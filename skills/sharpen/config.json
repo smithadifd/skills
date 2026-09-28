@@ -1,5 +1,6 @@
 {
   "harness_root": {
+    "resolver": null,
     "root": null,
     "roadmaps": null,
     "standards": null,
@@ -14,5 +15,5 @@
   "sot_path": "wave-current.md",
   "model_routing_standard": "model-routing.md",
   "brief_commit": true,
-  "_notes": "Standalone resolution: config.json lives beside this skill. Unset roadmaps and standards use the ~/.claude/roadmaps and ~/.claude/standards defaults. Relative source values join their configured roadmaps or standards directory; absolute source values remain explicit, and ~-prefixed source values expand against HOME instead of joining that directory. A missing optional source degrades to one one-line notice."
+  "_notes": "Standalone resolution: config.json lives beside this skill. Set harness_root.resolver to an absolute or ~-prefixed Python file to opt in to that module's path resolution. Unset roadmaps and standards use the ~/.claude/roadmaps and ~/.claude/standards defaults. Relative source values join their configured roadmaps or standards directory; absolute source values remain explicit, and ~-prefixed source values expand against HOME instead of joining that directory. A missing optional source degrades to one one-line notice."
 }

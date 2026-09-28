@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from collections.abc import Mapping
@@ -125,16 +126,7 @@ def _configured_string(config: Mapping[str, Any], key: str, default: str) -> str
     return value or default
 
 
-def resolve_paths(config_path: Path | None = None) -> dict[str, Path]:
-    """Resolve all sharpen paths with the standalone resolver."""
-    if config_path is not None:
-        config = _load_config(config_path)
-    else:
-        config = _load_config(CONFIG_PATH)
-        override = _load_override(Path(OVERRIDE_PATH).expanduser())
-        if override is not None:
-            config = {**config, **override}
-
+def _resolve_standalone(config: Mapping[str, Any]) -> dict[str, Path]:
     resolved = {
         "roadmaps": Path(
             _configured_string(config, "harness_root.roadmaps", DEFAULT_ROADMAPS)
@@ -154,6 +146,61 @@ def resolve_paths(config_path: Path | None = None) -> dict[str, Path]:
     return resolved
 
 
+def _resolve_with_module(
+    resolver_path: Path,
+    config: Mapping[str, Any],
+    cwd: Path | None,
+) -> dict[str, Path]:
+    spec = importlib.util.spec_from_file_location(
+        "_sharpen_configured_path_resolver", resolver_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError("could not create an import specification")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    resolve = getattr(module, "resolve", None)
+    resolve_relative = getattr(module, "resolve_relative", None)
+    if not callable(resolve):
+        raise TypeError("resolve is missing or not callable")
+    if not callable(resolve_relative):
+        raise TypeError("resolve_relative is missing or not callable")
+
+    root_paths = resolve(config, cwd=cwd)
+    resolved = {"roadmaps": root_paths.roadmaps, "standards": root_paths.standards}
+    for key, (subkey, default) in SOURCE_DEFAULTS.items():
+        value = _configured_string(config, key, default)
+        resolved[key] = resolve_relative(root_paths, subkey, value)
+    return resolved
+
+
+def resolve_paths(
+    config_path: Path | None = None, *, cwd: Path | None = None
+) -> dict[str, Path]:
+    """Resolve all sharpen paths, optionally using a configured resolver."""
+    if config_path is not None:
+        config = _load_config(config_path)
+    else:
+        config = _load_config(CONFIG_PATH)
+        override = _load_override(Path(OVERRIDE_PATH).expanduser())
+        if override is not None:
+            config = {**config, **override}
+
+    resolver = _configured_string(config, "harness_root.resolver", "")
+    if resolver:
+        resolver_path = Path(resolver).expanduser()
+        try:
+            if not (Path(resolver).is_absolute() or resolver.startswith("~")):
+                raise ValueError("path must be absolute or ~-prefixed")
+            return _resolve_with_module(resolver_path, config, cwd)
+        except Exception as exc:
+            sys.stderr.write(
+                f"config_path: harness_root.resolver {resolver_path} "
+                f"({type(exc).__name__}: {exc}) — degrading to standalone resolution\n"
+            )
+    return _resolve_standalone(config)
+
+
 def report_unavailable_sources(paths: Mapping[str, Path]) -> None:
     for key in SOURCE_DEFAULTS:
         path = paths[key]
@@ -169,9 +216,10 @@ def report_unavailable_sources(paths: Mapping[str, Path]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--cwd", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    paths = resolve_paths(args.config)
+    paths = resolve_paths(args.config, cwd=args.cwd)
     report_unavailable_sources(paths)
     print(json.dumps({key: str(value) for key, value in paths.items()}, sort_keys=True))
     return 0
