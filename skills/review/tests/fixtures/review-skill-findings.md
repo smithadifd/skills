@@ -1,0 +1,2 @@
+- [BUG] skills/portfolio-health/portfolio-health-run.sh:188 — `/off/` matches `cutoff` and `offline`, so a live pool can be skipped as off. Anchor the match to the pool's own status word.
+- [SECURITY] launchd-kit/lib.sh:77 — the report path is interpolated into a shell string unquoted, so a path with spaces or a `;` runs as a command. Quote the expansion.

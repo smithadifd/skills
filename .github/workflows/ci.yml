@@ -17,3 +17,16 @@ jobs:
           set -euo pipefail
           unset HARNESS_ROOT
           ./ci/check.sh
+      - name: Run skill tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset HARNESS_ROOT
+          export HOME
+          HOME=$(mktemp -d)
+          python3 -m pip install pytest==9.1.1
+          shopt -s nullglob
+          test_dirs=(skills/*/tests)
+          for test_dir in "${test_dirs[@]}"; do
+            python3 -m pytest "$test_dir" -q
+          done
