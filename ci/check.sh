@@ -13,6 +13,13 @@ fail() {
 skill_paths=(skills/*)
 ((${#skill_paths[@]} > 0)) || fail 'no skills were discovered'
 
+agent_paths=()
+for agent_path in agents/*.md; do
+  [ -f "$agent_path" ] || continue
+  agent_paths+=("$agent_path")
+done
+((${#agent_paths[@]} > 0)) || fail 'no agents were discovered'
+
 check_install_all() {
   local home skill_path skill_name
   home=$(mktemp -d)
@@ -49,8 +56,12 @@ check_references() {
   local home matches
   home=$(mktemp -d)
   HOME="$home" ./install.sh --all
+  HOME="$home" ./install.sh --all-agents
   if matches=$(grep -RilE 'foundry|harness_root' "$home/.claude/skills"); then
     fail "installed tree contains a forbidden reference: $matches"
+  fi
+  if matches=$(grep -RilE 'foundry|harness_root|claude-toolkit' "$home/.claude/agents"); then
+    fail "installed agents contain a forbidden reference: $matches"
   fi
   printf 'PASS: installed tree contains no forbidden references\n'
 }
@@ -68,16 +79,111 @@ check_uninstall() {
   printf 'PASS: uninstall-all left the skills directory clean\n'
 }
 
+check_install_all_agents() {
+  local home agent_path agent_name
+  home=$(mktemp -d)
+  HOME="$home" ./install.sh --all-agents
+  for agent_path in "${agent_paths[@]}"; do
+    [ -f "$agent_path" ] || continue
+    agent_name=${agent_path##*/}
+    agent_name=${agent_name%.md}
+    [ -f "$home/.claude/agents/$agent_name.md" ] || fail "--all-agents did not install discovered agent: $agent_name"
+  done
+  printf 'PASS: install-all-agents installed every discovered agent\n'
+}
+
+check_install_one_agent() {
+  local home selected agent_path
+  selected=${agent_paths[0]##*/}
+  selected=${selected%.md}
+  home=$(mktemp -d)
+  HOME="$home" ./install.sh --agent "$selected"
+
+  shopt -s nullglob dotglob
+  local installed=("$home/.claude/agents"/*)
+  ((${#installed[@]} == 1)) || fail "--agent did not install exactly one agent (installed ${#installed[@]} files, wanted only $selected)"
+  [ "${installed[0]##*/}" = "$selected.md" ] || fail "--agent installed ${installed[0]##*/} instead of exactly one: $selected.md"
+  for agent_path in "${agent_paths[@]}"; do
+    [ -f "$agent_path" ] || continue
+    if [ "${agent_path##*/}" != "$selected.md" ] && [ -e "$home/.claude/agents/${agent_path##*/}" ]; then
+      fail "--agent also installed unrequested agent: ${agent_path##*/}"
+    fi
+  done
+  shopt -u nullglob dotglob
+  printf 'PASS: install-one-agent installed exactly one discovered agent\n'
+}
+
+check_uninstall_agents() {
+  local home agent_path agent_name
+  home=$(mktemp -d)
+  HOME="$home" ./install.sh --all-agents
+  for agent_path in "${agent_paths[@]}"; do
+    [ -f "$agent_path" ] || continue
+    agent_name=${agent_path##*/}
+    agent_name=${agent_name%.md}
+    [ -f "$home/.claude/agents/$agent_name.md" ] || fail "uninstall-agents precondition failed; $agent_name was not installed"
+  done
+  HOME="$home" ./install.sh --uninstall --all-agents
+
+  shopt -s nullglob dotglob
+  local leftovers=("$home/.claude/agents"/*)
+  ((${#leftovers[@]} == 0)) || fail "uninstall-all-agents left an agent behind: ${leftovers[0]}"
+  shopt -u nullglob dotglob
+  printf 'PASS: uninstall-all-agents left the agents directory clean\n'
+}
+
+check_agent_traversal() {
+  local scratch home repo err
+  scratch=$(mktemp -d)
+  home="$scratch/home"
+  repo="$scratch/repo"
+  mkdir -p -- "$home" "$repo/agents"
+  ln -s -- "$repo_dir/install.sh" "$repo/install.sh"
+  printf 'traversal-payload\n' > "$scratch/x.md"
+  err="$scratch/err"
+  # $0 is the symlink, so agents/../../x.md is the planted file. Slash
+  # rejection must refuse that name before the path is read.
+  if HOME="$home" "$repo/install.sh" --agent '../../x' >"$scratch/out" 2>"$err"; then
+    fail "path traversal via --agent ../../x was accepted"
+  fi
+  if [ -e "$home/x.md" ] || [ -e "$home/.claude/x.md" ]; then
+    fail "path traversal via --agent ../../x was accepted"
+  fi
+  grep -F -q 'Unknown agent: ../../x' "$err" || fail "path traversal via --agent ../../x was not rejected"
+  printf 'PASS: path traversal via --agent ../../x was rejected\n'
+}
+
+check_agent_unknown() {
+  local home err
+  home=$(mktemp -d)
+  err="$home/err"
+  if HOME="$home" ./install.sh --agent 'not-a-real-agent' >"$home/out" 2>"$err"; then
+    fail "unknown agent name was accepted: not-a-real-agent"
+  fi
+  grep -F -q 'Unknown agent: not-a-real-agent' "$err" || fail "unknown agent name was not rejected: not-a-real-agent"
+  printf 'PASS: unknown agent name was rejected\n'
+}
+
 case ${1-} in
   install-all) check_install_all ;;
   install-one) check_install_one ;;
   references) check_references ;;
   uninstall) check_uninstall ;;
+  install-all-agents) check_install_all_agents ;;
+  install-one-agent) check_install_one_agent ;;
+  uninstall-agents) check_uninstall_agents ;;
+  agent-traversal) check_agent_traversal ;;
+  agent-unknown) check_agent_unknown ;;
   '')
     check_install_all
     check_install_one
     check_references
     check_uninstall
+    check_install_all_agents
+    check_install_one_agent
+    check_uninstall_agents
+    check_agent_traversal
+    check_agent_unknown
     ;;
   *)
     printf 'Unknown check: %s\n' "$1" >&2
