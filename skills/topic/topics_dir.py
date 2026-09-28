@@ -53,6 +53,7 @@ from typing import Any, Mapping, NamedTuple, Optional, Union
 HERE = Path(__file__).resolve().parent
 SKILLS_DIR = HERE.parent
 CONFIG_PATH = HERE / "config.json"
+OVERRIDE_PATH = "~/.claude/skill-config/topic.json"
 
 #: Unset default. A config that names `topics_dir` wins over this.
 DEFAULT_TOPICS_DIR = "~/.claude/topics"
@@ -129,13 +130,51 @@ def _bind_resolver():
 _load_config, _resolve_configured_path = _bind_resolver()
 
 
-def resolve(config_path: Path = CONFIG_PATH) -> Path:
-    """`topics_dir` when it is a non-empty string; otherwise the unset default.
+def _load_override(path: Path) -> Optional[Mapping[str, Any]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        sys.stderr.write(
+            f"config_path: could not read override {path} ({exc}) — ignoring it\n"
+        )
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        sys.stderr.write(
+            f"config_path: override {path} is not valid JSON ({exc}) — ignoring it\n"
+        )
+        return None
+    if not isinstance(data, Mapping):
+        sys.stderr.write(
+            f"config_path: override {path} did not parse to a JSON object — ignoring it\n"
+        )
+        return None
+    value = data.get("topics_dir")
+    if value is not None and not isinstance(value, str):
+        sys.stderr.write(
+            f"config_path: override {path} has invalid 'topics_dir' value "
+            f"({type(value).__name__}) — ignoring it\n"
+        )
+        return None
+    return data
 
-    A missing, unreadable, or malformed config degrades to the unset default.
-    Never existence-checked. Never raises on the config file.
+
+def resolve(config_path: Optional[Path] = None) -> Path:
+    """Resolve ``topics_dir`` using explicit, override, shipped, then default.
+
+    Missing configuration degrades to the unset default and never raises.
     """
-    config = _load_config(config_path)
+    if config_path is not None:
+        config = _load_config(config_path)
+    else:
+        config = _load_config(CONFIG_PATH)
+        override_path = Path(OVERRIDE_PATH).expanduser()
+        override = _load_override(override_path)
+        if override is not None:
+            config = {**config, **override}
     return _resolve_configured_path(config, "topics_dir", DEFAULT_TOPICS_DIR)
 
 
@@ -243,7 +282,7 @@ def _record_ask(body: str, ask: str) -> str:
 def open_topic(
     slug: str,
     ask: str,
-    config_path: Path = CONFIG_PATH,
+    config_path: Optional[Path] = None,
     today: Optional[str] = None,
 ) -> OpenResult:
     """Write `<topics_dir>/<slug>.md` if it does not already exist.
@@ -272,7 +311,7 @@ def open_topic(
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--notices", action="store_true")
     parser.add_argument("--open", dest="slug", default=None)
     parser.add_argument("--ask", default=None)

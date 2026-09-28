@@ -53,6 +53,8 @@ Do not invent a second directory when the resolved path is absent.
    `python3 ~/.claude/skills/topic/topics_dir.py` to print the
    resolved path — never hardcode it). When the key is unset, that command
    prints `~/.claude/topics`.
+   Path precedence is explicit `--config`, then
+   `~/.claude/skill-config/topic.json`, then shipped config, then built-in defaults.
 3. Creating: copy `<topics_dir>/TEMPLATE.md` when that file exists, fill the
    header, record the ask in the asker's words. When it does not exist, print
    the one line above and use the built-in skeleton in this file. Run the
