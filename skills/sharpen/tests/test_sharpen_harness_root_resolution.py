@@ -249,6 +249,54 @@ def test_invalid_per_skill_override_degrades_once(tmp_path):
     ], "invalid sharpen override must emit exactly one line naming its path"
 
 
+def test_non_object_harness_root_override_degrades_once(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps({"harness_root": "notadict"}), encoding="utf-8"
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(
+        result, "a non-object harness_root override must degrade without a traceback"
+    )
+
+    assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
+    assert Path(actual["standards"]) == home / ".claude" / "standards"
+    assert Path(actual["sot_path"]) == home / ".claude" / "roadmaps" / "wave-current.md"
+    assert result.stderr.splitlines() == [
+        f"config_path: override {override} has a value of the wrong type — ignoring it"
+    ], "a non-object harness_root override must emit exactly one degradation line"
+
+
+def test_non_boolean_brief_commit_override_degrades_once(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps({"brief_commit": "yes"}), encoding="utf-8"
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(
+        result, "a non-boolean brief_commit override must degrade without a traceback"
+    )
+
+    assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
+    assert Path(actual["standards"]) == home / ".claude" / "standards"
+    assert Path(actual["sot_path"]) == home / ".claude" / "roadmaps" / "wave-current.md"
+    assert result.stderr.splitlines() == [
+        f"config_path: override {override} has a value of the wrong type — ignoring it"
+    ], "a non-boolean brief_commit override must emit exactly one degradation line"
+
+
 def test_standalone_config_degrades_once_for_each_invalid_shape(tmp_path):
     cases = {
         "missing": None,
