@@ -54,6 +54,24 @@ def test_topic_config_change_is_followed_without_shared_library(tmp_path):
     ), "DRIFT: kickoff must derive model routing through topic's normative_paths()"
 
 
+def test_topic_override_reaches_kickoff_topic_path(tmp_path):
+    copied_skills = _copy_skills(tmp_path, "topic", "kickoff")
+    home = tmp_path / "home"
+    target = tmp_path / "override-topics"
+    override = home / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(json.dumps({"topics_dir": str(target)}), encoding="utf-8")
+
+    process = _run(copied_skills / "kickoff", home, "from-override")
+
+    assert process.returncode == 0
+    payload = json.loads(process.stdout)
+    assert Path(payload["topics_dir"]) == target
+    assert Path(payload["topic_path"]) == target / "from-override.md", (
+        "kickoff must obtain its topic path through topic's override-aware resolver"
+    )
+
+
 def test_shipped_standalone_topic_config_uses_clean_home_defaults(tmp_path):
     copied_skills = _copy_skills(tmp_path, "topic", "kickoff")
     home = tmp_path / "home"

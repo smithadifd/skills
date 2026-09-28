@@ -12,6 +12,7 @@ from typing import Any
 
 SKILL_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SKILL_DIR / "config.json"
+OVERRIDE_PATH = "~/.claude/skill-config/sharpen.json"
 
 DEFAULT_ROADMAPS = "~/.claude/roadmaps"
 DEFAULT_STANDARDS = "~/.claude/standards"
@@ -49,6 +50,64 @@ def _load_config(config_path: Path) -> Mapping[str, Any]:
         return {}
     return data
 
+_STRING_OVERRIDE_KEYS = frozenset(
+    {
+        "brief_filename_pattern",
+        "delegation_loop_standard",
+        "calibration_sot",
+        "sot_path",
+        "model_routing_standard",
+        "_notes",
+    }
+)
+
+
+def _load_override(path: Path) -> Mapping[str, Any] | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        sys.stderr.write(
+            f"config_path: could not read override {path} ({exc}) — ignoring it\n"
+        )
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        sys.stderr.write(
+            f"config_path: override {path} is not valid JSON ({exc}) — ignoring it\n"
+        )
+        return None
+    if not isinstance(data, Mapping):
+        sys.stderr.write(
+            f"config_path: override {path} did not parse to a JSON object — ignoring it\n"
+        )
+        return None
+    root_paths = data.get("harness_root")
+    invalid_root_paths = root_paths is not None and (
+        not isinstance(root_paths, Mapping)
+        or any(
+            value is not None and not isinstance(value, str)
+            for value in root_paths.values()
+        )
+    )
+    invalid_string = any(
+        key in data and data[key] is not None and not isinstance(data[key], str)
+        for key in _STRING_OVERRIDE_KEYS
+    )
+    invalid_boolean = (
+        "brief_commit" in data
+        and data["brief_commit"] is not None
+        and not isinstance(data["brief_commit"], bool)
+    )
+    if invalid_root_paths or invalid_string or invalid_boolean:
+        sys.stderr.write(
+            f"config_path: override {path} has a value of the wrong type — ignoring it\n"
+        )
+        return None
+    return data
+
 
 def _configured_string(config: Mapping[str, Any], key: str, default: str) -> str:
     value: Any = config
@@ -66,9 +125,15 @@ def _configured_string(config: Mapping[str, Any], key: str, default: str) -> str
     return value or default
 
 
-def resolve_paths(config_path: Path = CONFIG_PATH) -> dict[str, Path]:
+def resolve_paths(config_path: Path | None = None) -> dict[str, Path]:
     """Resolve all sharpen paths with the standalone resolver."""
-    config = _load_config(config_path)
+    if config_path is not None:
+        config = _load_config(config_path)
+    else:
+        config = _load_config(CONFIG_PATH)
+        override = _load_override(Path(OVERRIDE_PATH).expanduser())
+        if override is not None:
+            config = {**config, **override}
 
     resolved = {
         "roadmaps": Path(
@@ -103,7 +168,7 @@ def report_unavailable_sources(paths: Mapping[str, Path]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    parser.add_argument("--config", type=Path, default=None)
     args = parser.parse_args(argv)
 
     paths = resolve_paths(args.config)

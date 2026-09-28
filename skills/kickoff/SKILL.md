@@ -89,6 +89,8 @@ installed, follows its `topics_dir`, and derives the template and model-routing
 paths through its `normative_paths()`. Each missing optional reference is reported
 on stderr in one line. `topic` is not required: when its resolver is absent,
 kickoff reports that once and falls back to `~/.claude/topics`.
+When topic is installed, kickoff inherits topic's path precedence: its override
+file `~/.claude/skill-config/topic.json`, then shipped config, then built-in defaults.
 
 | What | Resolver / fallback | Notes |
 |---|---|---|

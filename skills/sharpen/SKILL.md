@@ -82,6 +82,8 @@ Unset `harness_root.roadmaps` and
 `harness_root.standards` then resolve to `~/.claude/roadmaps` and
 `~/.claude/standards`. For each source key below, an absolute or `~`-prefixed
 value stays explicit; a bare filename is joined to its named directory.
+Path precedence is explicit `--config`, then
+`~/.claude/skill-config/sharpen.json`, then shipped config, then built-in defaults.
 
 The shipped config preserves toolkit path behavior. The standalone defaults
 make an independently copied skill usable in a clean home directory.

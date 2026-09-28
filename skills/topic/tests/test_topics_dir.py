@@ -79,6 +79,60 @@ def test_override_is_honoured(tmp_path):
     assert resolved != UNSET
 
 
+def test_per_skill_override_is_honoured(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    target = tmp_path / "override-topics"
+    override = home / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(json.dumps({"topics_dir": str(target)}), encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    assert topics_dir.resolve() == target
+
+
+def test_explicit_config_beats_per_skill_override(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    override_target = tmp_path / "override-topics"
+    explicit_target = tmp_path / "explicit-topics"
+    override = home / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps({"topics_dir": str(override_target)}), encoding="utf-8"
+    )
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text(
+        json.dumps({"topics_dir": str(explicit_target)}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    assert topics_dir.resolve(explicit) == explicit_target
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "{broken",
+        "[]",
+        json.dumps({"topics_dir": 7}),
+    ],
+)
+def test_invalid_per_skill_override_degrades_once(
+    tmp_path, monkeypatch, capsys, contents
+):
+    home = tmp_path / "home"
+    override = home / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    assert topics_dir.resolve() == home / ".claude" / "topics"
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 1, (
+        f"invalid topic override must emit exactly one degradation line; got {lines!r}"
+    )
+    assert str(override) in lines[0], "degradation line must name the override path"
+
+
 def test_unset_default_when_key_is_empty_string(tmp_path):
     config_file = tmp_path / "config.json"
     config_file.write_text(json.dumps({"topics_dir": ""}), encoding="utf-8")

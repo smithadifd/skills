@@ -5,7 +5,7 @@ review/tests/test_review_phase.py 2 # run-envelope contract and fixture field
 review/tests/test_standalone.py 14 # assertions reject configured project-specific paths
 sharpen/SKILL.md 5 # standalone path-resolution contract terminology
 sharpen/config.json 1 # path-resolution contract keys and notes
-sharpen/paths.py 2 # optional shared-resolver contract and fallback keys
-sharpen/tests/test_sharpen_harness_root_resolution.py 14 # standalone resolution assertions and contract names
+sharpen/paths.py 3 # path-resolution contract and override keys
+sharpen/tests/test_sharpen_harness_root_resolution.py 18 # standalone resolution assertions and contract names
 topic/tests/test_topics_dir.py 10 # assertions reject configured project-specific paths
 kickoff/tests/test_kickoff_paths.py 3 # environment cleanup and absence assertions reject project-specific paths

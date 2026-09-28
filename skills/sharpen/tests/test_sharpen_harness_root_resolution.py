@@ -150,6 +150,105 @@ def resolve_relative(paths, key, value):
     )
 
 
+def test_per_skill_override_merges_over_shipped_config(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    roadmaps = tmp_path / "override-roadmaps"
+    standards = tmp_path / "override-standards"
+    shipped = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    shipped["calibration_sot"] = "shipped-calibration.md"
+    script = _copy_standalone(tmp_path, json.dumps(shipped))
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps(
+            {
+                "harness_root": {
+                    "roadmaps": str(roadmaps),
+                    "standards": str(standards),
+                },
+                "sot_path": "nested/wave-current.md",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for path in (
+        standards / "delegation-loop.md",
+        roadmaps / "shipped-calibration.md",
+        roadmaps / "nested" / "wave-current.md",
+        standards / "model-routing.md",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("available\n", encoding="utf-8")
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "per-skill override must merge over shipped config")
+
+    assert Path(actual["roadmaps"]) == roadmaps
+    assert Path(actual["standards"]) == standards
+    assert Path(actual["sot_path"]) == roadmaps / "nested" / "wave-current.md", (
+        "a relative override source must join the overridden directory"
+    )
+    assert Path(actual["calibration_sot"]) == roadmaps / "shipped-calibration.md", (
+        "an unspecified shipped key must survive the override merge"
+    )
+    assert result.stderr == ""
+
+
+def test_explicit_config_beats_per_skill_override(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    override_roadmaps = tmp_path / "override-roadmaps"
+    explicit_roadmaps = tmp_path / "explicit-roadmaps"
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps({"harness_root": {"roadmaps": str(override_roadmaps)}}),
+        encoding="utf-8",
+    )
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text(
+        json.dumps({"harness_root": {"roadmaps": str(explicit_roadmaps)}}),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--config", str(explicit)],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    actual = _resolved_output(result, "explicit config must beat sharpen override")
+
+    assert Path(actual["roadmaps"]) == explicit_roadmaps
+
+
+def test_invalid_per_skill_override_degrades_once(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps({"harness_root": {"roadmaps": 7}}), encoding="utf-8"
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "invalid sharpen override must degrade")
+    lines = result.stderr.splitlines()
+
+    assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
+    assert lines == [
+        f"config_path: override {override} has a value of the wrong type — ignoring it"
+    ], "invalid sharpen override must emit exactly one line naming its path"
+
+
 def test_standalone_config_degrades_once_for_each_invalid_shape(tmp_path):
     cases = {
         "missing": None,
