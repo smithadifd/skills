@@ -3,7 +3,7 @@ review/tests/test_jev_fallback.py 1 # run-envelope fixture field set to null
 review/tests/test_jev_shadow.py 1 # run-envelope fixture field set to null
 review/tests/test_review_phase.py 2 # run-envelope contract and fixture field
 review/tests/test_standalone.py 14 # assertions reject configured project-specific paths
-sharpen/SKILL.md 8 # standalone path-resolution contract terminology
+sharpen/SKILL.md 5 # standalone path-resolution contract terminology
 sharpen/config.json 7 # path-resolution contract keys and notes
-sharpen/paths.py 4 # optional shared-resolver contract and fallback keys
-sharpen/tests/test_sharpen_harness_root_resolution.py 10 # standalone resolution assertions and contract names
+sharpen/paths.py 2 # optional shared-resolver contract and fallback keys
+sharpen/tests/test_sharpen_harness_root_resolution.py 13 # standalone resolution assertions and contract names

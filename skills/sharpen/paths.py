@@ -4,18 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 SKILL_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SKILL_DIR / "config.json"
-SHARED_RESOLVER_PATH = SKILL_DIR.parent / "_lib" / "harness_root.py"
-SHARED_MODULE_NAME = "_sharpen_shared_harness_root"
 
 DEFAULT_ROADMAPS = "~/.claude/roadmaps"
 DEFAULT_STANDARDS = "~/.claude/standards"
@@ -70,40 +66,13 @@ def _configured_string(config: Mapping[str, Any], key: str, default: str) -> str
     return value or default
 
 
-def _load_shared_resolver() -> ModuleType | None:
-    if not SHARED_RESOLVER_PATH.is_file():
-        return None
-    spec = importlib.util.spec_from_file_location(
-        SHARED_MODULE_NAME,
-        SHARED_RESOLVER_PATH,
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load shared resolver at {SHARED_RESOLVER_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[SHARED_MODULE_NAME] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def resolve_paths(
     config_path: Path = CONFIG_PATH,
     *,
     cwd: Path | None = None,
 ) -> dict[str, Path]:
-    """Resolve all sharpen paths through the shared or standalone seam."""
+    """Resolve all sharpen paths with the standalone resolver."""
     config = _load_config(config_path)
-    shared = _load_shared_resolver()
-
-    if shared is not None:
-        root_paths = shared.resolve(config, cwd=cwd)
-        resolved = {
-            "roadmaps": root_paths.roadmaps,
-            "standards": root_paths.standards,
-        }
-        for key, (subkey, default) in SOURCE_DEFAULTS.items():
-            value = _configured_string(config, key, default)
-            resolved[key] = shared.resolve_relative(root_paths, subkey, value)
-        return resolved
 
     resolved = {
         "roadmaps": Path(

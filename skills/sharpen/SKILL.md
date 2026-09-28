@@ -69,18 +69,16 @@ Run `python3 ~/.claude/skills/sharpen/paths.py` before reading or
 writing anything. It prints one JSON object containing `roadmaps`, `standards`,
 and the four optional-source paths below.
 
-When `skills/_lib/harness_root.py` is present, `paths.py` delegates to its
-`resolve()` and `resolve_relative()` functions. Root precedence therefore stays
-shared with chart-wave: `HARNESS_ROOT`, then `harness_root.root`, then a
-same-repository checkout discovered from the current working directory, then
-the shared default. The `harness_root.roadmaps` directory is the mini-brief
-directory; do not add `brief_dir` or another alias for it. Keeping briefs there
-also keeps ratified briefs inside chart-wave's `roadmaps_glob` without extra
-wiring.
+Path resolution is standalone: `paths.py` never discovers or delegates to a
+neighboring resolver. It reads `config.json` beside itself and resolves the
+configured directories and source filenames directly. The
+`harness_root.roadmaps` directory is the mini-brief directory; do not add
+`brief_dir` or another alias for it. Keeping briefs there also keeps ratified
+briefs inside chart-wave's `roadmaps_glob` without extra wiring.
 
-When the shared resolver is absent, `paths.py` reads `config.json` beside
-itself. Missing, malformed, non-object, and non-string configuration values
-each emit one degradation line. Unset `harness_root.roadmaps` and
+The standalone resolver reads `config.json` beside itself. Missing, malformed,
+non-object, and non-string configuration values each emit one degradation line.
+Unset `harness_root.roadmaps` and
 `harness_root.standards` then resolve to `~/.claude/roadmaps` and
 `~/.claude/standards`. For each source key below, an absolute or `~`-prefixed
 value stays explicit; a bare filename is joined to its named directory.

@@ -111,6 +111,45 @@ def test_standalone_clean_home_uses_claude_defaults_and_four_notices(tmp_path):
     )
 
 
+def test_standalone_ignores_neighbor_shared_resolver(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    shared_resolver = tmp_path / "skills" / "_lib" / "harness_root.py"
+    shared_resolver.parent.mkdir()
+    shared_resolver.write_text(
+        """
+from pathlib import Path
+from types import SimpleNamespace
+
+
+def resolve(config, cwd=None):
+    return SimpleNamespace(
+        roadmaps=Path.home() / "foundry" / "roadmaps",
+        standards=Path.home() / "foundry" / "standards",
+    )
+
+
+def resolve_relative(paths, key, value):
+    return getattr(paths, key) / value
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(
+        result,
+        "standalone sharpen must ignore a neighboring shared resolver",
+    )
+
+    assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps", (
+        "standalone roadmaps default must not switch to a neighboring resolver"
+    )
+    assert Path(actual["standards"]) == home / ".claude" / "standards", (
+        "standalone standards default must not switch to a neighboring resolver"
+    )
+
+
 def test_standalone_config_degrades_once_for_each_invalid_shape(tmp_path):
     cases = {
         "missing": None,
@@ -142,6 +181,26 @@ def test_standalone_config_degrades_once_for_each_invalid_shape(tmp_path):
         assert expected_fragments[name] in lines[0], (
             f"{name} config degradation line must name the guarded condition"
         )
+
+
+def test_empty_source_value_uses_its_documented_default(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(
+        tmp_path,
+        json.dumps({"calibration_sot": ""}),
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(
+        result,
+        "an empty source value must use its documented default",
+    )
+
+    assert Path(actual["calibration_sot"]) == (
+        home / ".claude" / "roadmaps" / "calibration.md"
+    ), "an explicit empty source value must retain the existing fallback behavior"
 
 
 def test_standalone_undecodable_optional_source_degrades_alone(tmp_path):
