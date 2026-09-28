@@ -1,0 +1,18 @@
+{
+  "harness_root": {
+    "root": null,
+    "roadmaps": null,
+    "standards": null,
+    "decisions": null,
+    "topics": null,
+    "memory_index": null,
+    "delivery": null
+  },
+  "brief_filename_pattern": "sharpen-{topic_slug}-{YYYY-MM-DD}.md",
+  "delegation_loop_standard": "delegation-loop.md",
+  "calibration_sot": "calibration.md",
+  "sot_path": "wave-current.md",
+  "model_routing_standard": "model-routing.md",
+  "brief_commit": true,
+  "_notes": "Standalone resolution: config.json lives beside this skill. Unset roadmaps and standards use the ~/.claude/roadmaps and ~/.claude/standards defaults. Relative source values join their configured roadmaps or standards directory; absolute source values remain explicit, and ~-prefixed source values expand against HOME instead of joining that directory. A missing optional source degrades to one one-line notice."
+}
