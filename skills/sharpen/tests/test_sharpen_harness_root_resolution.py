@@ -565,6 +565,92 @@ def test_explicit_config_uses_configured_resolver_for_all_paths(tmp_path):
     assert result.stderr == ""
 
 
+def test_relative_configured_resolver_degrades_once_to_standalone(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "p" / "marker.py"
+    resolver.parent.mkdir()
+    _write_resolver(resolver)
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": "p/marker.py"}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "relative resolver must be refused")
+
+    expected = {
+        "roadmaps": str(home / ".claude" / "roadmaps"),
+        "standards": str(home / ".claude" / "standards"),
+    }
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str(home / ".claude" / subdir / filename)
+    assert actual == expected, "a relative resolver must use all standalone defaults"
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1, (
+        f"a relative configured resolver must emit exactly one line; got {lines!r}"
+    )
+    assert lines[0].startswith("config_path: harness_root.resolver")
+    assert "path must be absolute or ~-prefixed" in lines[0]
+
+
+def test_configured_resolver_delegates_every_source_to_resolve_relative(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    root = tmp_path / "resolver-root"
+    resolver.write_text(
+        """
+from pathlib import Path
+from types import SimpleNamespace
+
+
+def resolve(config, cwd=None):
+    root = Path(__file__).parent / "resolver-root"
+    return SimpleNamespace(roadmaps=root / "roadmaps", standards=root / "standards")
+
+
+def resolve_relative(paths, subkey, value):
+    return getattr(paths, subkey) / "via-relative" / value
+""".lstrip(),
+        encoding="utf-8",
+    )
+    for subdir, filename in SOURCE_KEYS.values():
+        source = root / subdir / "via-relative" / filename
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("available\n", encoding="utf-8")
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "resolve_relative must handle every source")
+
+    assert Path(actual["roadmaps"]) == root / "roadmaps"
+    assert Path(actual["standards"]) == root / "standards"
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        assert Path(actual[key]) == root / subdir / "via-relative" / filename, (
+            f"{key} must be resolved through resolve_relative"
+        )
+    assert result.stderr == ""
+
+
 def test_configured_dataclass_resolver_is_registered_before_execution(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
