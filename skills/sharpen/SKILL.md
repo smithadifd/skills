@@ -69,8 +69,8 @@ Run `python3 ~/.claude/skills/sharpen/paths.py` before reading or
 writing anything. It prints one JSON object containing `roadmaps`, `standards`,
 and the four optional-source paths below.
 
-Path resolution is standalone: `paths.py` never discovers or delegates to a
-neighboring resolver. It reads `config.json` beside itself and resolves the
+Path resolution is standalone by default: `paths.py` never discovers or delegates
+to a neighboring resolver. It reads `config.json` beside itself and resolves the
 configured directories and source filenames directly. The
 `harness_root.roadmaps` directory is the mini-brief directory; do not add
 `brief_dir` or another alias for it. Keeping briefs there also keeps ratified
@@ -86,6 +86,12 @@ Path precedence is explicit `--config`, then
 `~/.claude/skill-config/sharpen.json`, then shipped config, then built-in defaults;
 top-level keys are replaced whole, so an override `harness_root` object replaces
 the shipped one.
+
+Set `harness_root.resolver` to an absolute or `~`-prefixed Python file to opt in
+to delegated resolution. Its module must provide `resolve(config, cwd=)` and
+`resolve_relative(paths, subkey, value)`; `--cwd` forwards a working directory
+to `resolve`. Import, contract, or runtime failures emit one configuration line
+and degrade to the unchanged standalone resolution.
 
 The shipped config preserves toolkit path behavior. The standalone defaults
 make an independently copied skill usable in a clean home directory.

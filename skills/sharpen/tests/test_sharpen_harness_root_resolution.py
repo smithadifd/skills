@@ -32,7 +32,14 @@ def test_documented_resolver_path_targets_standalone_install():
     )
 
 
-def _run_paths(script: Path, *, home: Path, cwd: Path, harness_root_env: Path | None = None):
+def _run_paths(
+    script: Path,
+    *,
+    home: Path,
+    cwd: Path,
+    harness_root_env: Path | None = None,
+    args: tuple[str, ...] = (),
+):
     env = os.environ.copy()
     env["HOME"] = str(home)
     if harness_root_env is None:
@@ -40,7 +47,7 @@ def _run_paths(script: Path, *, home: Path, cwd: Path, harness_root_env: Path | 
     else:
         env["HARNESS_ROOT"] = str(harness_root_env)
     return subprocess.run(
-        [sys.executable, str(script)],
+        [sys.executable, str(script), *args],
         cwd=cwd,
         env=env,
         text=True,
@@ -490,3 +497,361 @@ def test_standalone_undecodable_config_degrades_to_defaults(tmp_path):
         assert Path(actual[key]) == home / ".claude" / subdir / filename, (
             f"undecodable config must apply the documented {key} default"
         )
+
+
+def _write_resolver(path: Path, *, use_cwd: bool = False) -> None:
+    roadmaps = (
+        "cwd / 'resolver-roadmaps'"
+        if use_cwd
+        else "Path(__file__).parent / 'resolver-roadmaps'"
+    )
+    standards = (
+        "cwd / 'resolver-standards'"
+        if use_cwd
+        else "Path(__file__).parent / 'resolver-standards'"
+    )
+    path.write_text(
+        f"""
+from pathlib import Path
+from types import SimpleNamespace
+
+
+def resolve(config, cwd=None):
+    return SimpleNamespace(roadmaps={roadmaps}, standards={standards})
+
+
+def resolve_relative(paths, subkey, value):
+    return getattr(paths, subkey) / value
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def _create_resolver_sources(roadmaps: Path, standards: Path) -> None:
+    for subdir, filename in SOURCE_KEYS.values():
+        base = roadmaps if subdir == "roadmaps" else standards
+        path = base / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("available\n", encoding="utf-8")
+
+
+def test_explicit_config_uses_configured_resolver_for_all_paths(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    _write_resolver(resolver)
+    roadmaps = tmp_path / "resolver-roadmaps"
+    standards = tmp_path / "resolver-standards"
+    _create_resolver_sources(roadmaps, standards)
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "explicit resolver must handle all paths")
+
+    expected = {"roadmaps": str(roadmaps), "standards": str(standards)}
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str((roadmaps if subdir == "roadmaps" else standards) / filename)
+    assert actual == expected, "the configured resolver must produce all six paths"
+    assert result.stderr == ""
+
+
+def test_relative_configured_resolver_degrades_once_to_standalone(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "p" / "marker.py"
+    resolver.parent.mkdir()
+    _write_resolver(resolver)
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": "p/marker.py"}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "relative resolver must be refused")
+
+    expected = {
+        "roadmaps": str(home / ".claude" / "roadmaps"),
+        "standards": str(home / ".claude" / "standards"),
+    }
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str(home / ".claude" / subdir / filename)
+    assert actual == expected, "a relative resolver must use all standalone defaults"
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1, (
+        f"a relative configured resolver must emit exactly one line; got {lines!r}"
+    )
+    assert lines[0].startswith("config_path: harness_root.resolver")
+    assert "path must be absolute or ~-prefixed" in lines[0]
+
+
+def test_configured_resolver_delegates_every_source_to_resolve_relative(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    root = tmp_path / "resolver-root"
+    resolver.write_text(
+        """
+from pathlib import Path
+from types import SimpleNamespace
+
+
+def resolve(config, cwd=None):
+    root = Path(__file__).parent / "resolver-root"
+    return SimpleNamespace(roadmaps=root / "roadmaps", standards=root / "standards")
+
+
+def resolve_relative(paths, subkey, value):
+    return getattr(paths, subkey) / "via-relative" / value
+""".lstrip(),
+        encoding="utf-8",
+    )
+    for subdir, filename in SOURCE_KEYS.values():
+        source = root / subdir / "via-relative" / filename
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("available\n", encoding="utf-8")
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "resolve_relative must handle every source")
+
+    assert Path(actual["roadmaps"]) == root / "roadmaps"
+    assert Path(actual["standards"]) == root / "standards"
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        assert Path(actual[key]) == root / subdir / "via-relative" / filename, (
+            f"{key} must be resolved through resolve_relative"
+        )
+    assert result.stderr == ""
+
+
+def test_configured_dataclass_resolver_is_registered_before_execution(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    root = tmp_path / "configured-root"
+    resolver.write_text(
+        """
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Paths:
+    roadmaps: Path
+    standards: Path
+
+
+def resolve(config, cwd=None):
+    root = Path(__file__).parent / "configured-root"
+    return Paths(roadmaps=root / "roadmaps", standards=root / "standards")
+
+
+def resolve_relative(paths, subkey, value):
+    return getattr(paths, subkey) / value
+""".lstrip(),
+        encoding="utf-8",
+    )
+    _create_resolver_sources(root / "roadmaps", root / "standards")
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "dataclass resolver must load successfully")
+
+    expected = {
+        "roadmaps": str(root / "roadmaps"),
+        "standards": str(root / "standards"),
+    }
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str(root / subdir / filename)
+    assert actual == expected, "the dataclass resolver must produce all six paths"
+    assert "config_path: harness_root.resolver" not in result.stderr, (
+        "a registered dataclass resolver must not degrade to standalone resolution"
+    )
+
+
+def test_override_uses_configured_resolver(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    _write_resolver(resolver)
+    roadmaps = tmp_path / "resolver-roadmaps"
+    standards = tmp_path / "resolver-standards"
+    _create_resolver_sources(roadmaps, standards)
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "override resolver must be used")
+
+    assert Path(actual["roadmaps"]) == roadmaps
+    assert Path(actual["standards"]) == standards
+    assert result.stderr == ""
+
+
+def test_cwd_option_reaches_configured_resolver(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    _write_resolver(resolver, use_cwd=True)
+    forwarded_cwd = tmp_path / "forwarded"
+    forwarded_cwd.mkdir()
+    roadmaps = forwarded_cwd / "resolver-roadmaps"
+    standards = forwarded_cwd / "resolver-standards"
+    _create_resolver_sources(roadmaps, standards)
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config), "--cwd", str(forwarded_cwd)),
+    )
+    actual = _resolved_output(result, "--cwd must reach the configured resolver")
+
+    assert Path(actual["roadmaps"]) == roadmaps, (
+        "resolve must receive the path passed through --cwd"
+    )
+    assert result.stderr == ""
+
+
+def test_missing_configured_resolver_degrades_once_to_standalone(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "absent-resolver.py"
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "missing resolver must degrade")
+
+    expected = {
+        "roadmaps": str(home / ".claude" / "roadmaps"),
+        "standards": str(home / ".claude" / "standards"),
+    }
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str(home / ".claude" / subdir / filename)
+    assert actual == expected, "a missing resolver must use all standalone defaults"
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1, (
+        f"a missing configured resolver must emit exactly one line; got {lines!r}"
+    )
+    assert lines[0].startswith("config_path: harness_root.resolver")
+    assert str(resolver) in lines[0]
+
+
+def test_invalid_configured_resolver_degrades_once_to_standalone(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    resolver.write_text(
+        "def resolve(config, cwd=None):\n    return object()\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "invalid resolver must degrade")
+    lines = result.stderr.splitlines()
+
+    expected = {
+        "roadmaps": str(home / ".claude" / "roadmaps"),
+        "standards": str(home / ".claude" / "standards"),
+    }
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str(home / ".claude" / subdir / filename)
+    assert actual == expected, "an invalid resolver must use all standalone defaults"
+    assert len(lines) == 1, (
+        f"an invalid configured resolver must emit exactly one line; got {lines!r}"
+    )
+    assert lines[0].startswith("config_path: harness_root.resolver")
+    assert str(resolver) in lines[0]
+    assert "resolve_relative" in lines[0]
+
+
+def test_non_string_configured_resolver_is_ignored_once(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(
+        tmp_path,
+        json.dumps({"harness_root": {"resolver": 7}}),
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "non-string resolver must be ignored")
+
+    assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
+    assert result.stderr.splitlines() == [
+        "config_path: 'harness_root.resolver' is a int, not a string "
+        "(7) — ignoring it; the default applies instead"
+    ]
