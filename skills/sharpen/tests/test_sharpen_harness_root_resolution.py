@@ -40,7 +40,7 @@ def _run_paths(script: Path, *, home: Path, cwd: Path, harness_root_env: Path | 
     else:
         env["HARNESS_ROOT"] = str(harness_root_env)
     return subprocess.run(
-        [sys.executable, str(script), "--cwd", str(cwd)],
+        [sys.executable, str(script)],
         cwd=cwd,
         env=env,
         text=True,
@@ -201,6 +201,63 @@ def test_empty_source_value_uses_its_documented_default(tmp_path):
     assert Path(actual["calibration_sot"]) == (
         home / ".claude" / "roadmaps" / "calibration.md"
     ), "an explicit empty source value must retain the existing fallback behavior"
+
+
+def test_absolute_source_value_stays_explicit(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    source = tmp_path / "explicit" / "wave-current.md"
+    source.parent.mkdir()
+    source.write_text("available\n", encoding="utf-8")
+    script = _copy_standalone(tmp_path, json.dumps({"sot_path": str(source)}))
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "an absolute source value must stay explicit")
+
+    assert Path(actual["sot_path"]) == source, (
+        "an absolute source value must not join the configured roadmaps directory"
+    )
+
+
+def test_tilde_prefixed_source_value_stays_explicit_under_home(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    source = home / "ro" / "wave-current.md"
+    source.parent.mkdir()
+    source.write_text("available\n", encoding="utf-8")
+    script = _copy_standalone(tmp_path, json.dumps({"sot_path": "~/ro/wave-current.md"}))
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "a tilde-prefixed source value must stay explicit")
+
+    assert Path(actual["sot_path"]) == source, (
+        "a tilde-prefixed source value must expand under HOME instead of joining roadmaps"
+    )
+
+
+def test_relative_source_value_joins_its_configured_directory(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    roadmaps = tmp_path / "configured-roadmaps"
+    source = roadmaps / "nested" / "wave-current.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("available\n", encoding="utf-8")
+    script = _copy_standalone(
+        tmp_path,
+        json.dumps(
+            {
+                "harness_root": {"roadmaps": str(roadmaps)},
+                "sot_path": "nested/wave-current.md",
+            }
+        ),
+    )
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "a relative source value must join roadmaps")
+
+    assert Path(actual["sot_path"]) == source, (
+        "a relative source value must join its configured source directory"
+    )
 
 
 def test_standalone_undecodable_optional_source_degrades_alone(tmp_path):

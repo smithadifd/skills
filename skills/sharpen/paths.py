@@ -66,11 +66,7 @@ def _configured_string(config: Mapping[str, Any], key: str, default: str) -> str
     return value or default
 
 
-def resolve_paths(
-    config_path: Path = CONFIG_PATH,
-    *,
-    cwd: Path | None = None,
-) -> dict[str, Path]:
+def resolve_paths(config_path: Path = CONFIG_PATH) -> dict[str, Path]:
     """Resolve all sharpen paths with the standalone resolver."""
     config = _load_config(config_path)
 
@@ -85,11 +81,11 @@ def resolve_paths(
     for key, (subkey, default) in SOURCE_DEFAULTS.items():
         value = _configured_string(config, key, default)
         candidate = Path(value)
-        resolved[key] = (
-            candidate.expanduser()
-            if candidate.is_absolute() or value.startswith("~")
-            else resolved[subkey] / candidate
-        )
+        if candidate.is_absolute() or value.startswith("~"):
+            resolved[key] = candidate.expanduser()
+        else:
+            assert not candidate.is_absolute()
+            resolved[key] = resolved[subkey] / candidate
     return resolved
 
 
@@ -108,10 +104,9 @@ def report_unavailable_sources(paths: Mapping[str, Path]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
-    parser.add_argument("--cwd", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    paths = resolve_paths(args.config, cwd=args.cwd)
+    paths = resolve_paths(args.config)
     report_unavailable_sources(paths)
     print(json.dumps({key: str(value) for key, value in paths.items()}, sort_keys=True))
     return 0
