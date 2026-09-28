@@ -4,9 +4,11 @@ set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 skills_dir="$repo_dir/skills"
 install_dir="$HOME/.claude/skills"
+agents_dir="$repo_dir/agents"
+agents_install_dir="$HOME/.claude/agents"
 
 usage() {
-  printf 'Usage: %s <name> | --all | --uninstall <name|--all>\n' "${0##*/}" >&2
+  printf 'Usage: %s <name> | --all | --agent <name> | --all-agents | --uninstall <name|--all|--agent <name>|--all-agents>\n' "${0##*/}" >&2
   exit 2
 }
 
@@ -59,18 +61,93 @@ uninstall_all() {
   done
 }
 
+require_agent() {
+  agent_name=$1
+  case "$agent_name" in
+    ''|.|..|*/*) ;;
+    *)
+      if [ -f "$agents_dir/$agent_name.md" ]; then
+        return
+      fi
+      ;;
+  esac
+  printf 'Unknown agent: %s\n' "$agent_name" >&2
+  exit 1
+}
+
+install_one_agent() {
+  agent_name=$1
+  require_agent "$agent_name"
+  mkdir -p -- "$agents_install_dir"
+  if [ -e "$agents_install_dir/$agent_name.md" ]; then
+    rm -r -- "$agents_install_dir/$agent_name.md"
+  fi
+  cp -f -- "$agents_dir/$agent_name.md" "$agents_install_dir/$agent_name.md"
+  printf 'Installed agent %s\n' "$agent_name"
+}
+
+uninstall_one_agent() {
+  agent_name=$1
+  require_agent "$agent_name"
+  if [ -e "$agents_install_dir/$agent_name.md" ]; then
+    rm -r -- "$agents_install_dir/$agent_name.md"
+  fi
+  printf 'Uninstalled agent %s\n' "$agent_name"
+}
+
+install_all_agents() {
+  for agent_path in "$agents_dir"/*.md; do
+    [ -f "$agent_path" ] || continue
+    agent_name=${agent_path##*/}
+    agent_name=${agent_name%.md}
+    install_one_agent "$agent_name"
+  done
+}
+
+uninstall_all_agents() {
+  for agent_path in "$agents_dir"/*.md; do
+    [ -f "$agent_path" ] || continue
+    agent_name=${agent_path##*/}
+    agent_name=${agent_name%.md}
+    uninstall_one_agent "$agent_name"
+  done
+}
+
 case ${1-} in
   --all)
     [ "$#" -eq 1 ] || usage
     install_all
     ;;
-  --uninstall)
+  --all-agents)
+    [ "$#" -eq 1 ] || usage
+    install_all_agents
+    ;;
+  --agent)
     [ "$#" -eq 2 ] || usage
-    if [ "$2" = --all ]; then
-      uninstall_all
-    else
-      uninstall_one "$2"
-    fi
+    install_one_agent "$2"
+    ;;
+  --uninstall)
+    case ${2-} in
+      --all)
+        [ "$#" -eq 2 ] || usage
+        uninstall_all
+        ;;
+      --all-agents)
+        [ "$#" -eq 2 ] || usage
+        uninstall_all_agents
+        ;;
+      --agent)
+        [ "$#" -eq 3 ] || usage
+        uninstall_one_agent "$3"
+        ;;
+      '')
+        usage
+        ;;
+      *)
+        [ "$#" -eq 2 ] || usage
+        uninstall_one "$2"
+        ;;
+    esac
     ;;
   '')
     usage
