@@ -52,18 +52,51 @@ check_install_one() {
   printf 'PASS: install-one installed exactly one discovered skill\n'
 }
 
+count_reference_hits() {
+  local matches
+  if matches=$(grep -oiE 'foundry|harness_root' "$1"); then
+    printf '%s\n' "$matches" | wc -l | tr -d ' '
+  else
+    printf '0\n'
+  fi
+}
+
 check_references() {
-  local home matches
+  local home installed_root path relative expected actual matches
+  local allowed_path allowed_count marker reason
   home=$(mktemp -d)
   HOME="$home" ./install.sh --all
   HOME="$home" ./install.sh --all-agents
-  if matches=$(grep -RilE 'foundry|harness_root' "$home/.claude/skills"); then
-    fail "installed tree contains a forbidden reference: $matches"
-  fi
+  installed_root="$home/.claude/skills"
+
+  while read -r allowed_path allowed_count marker reason; do
+    [ "$marker" = "#" ] && [ -n "$reason" ] && [[ "$allowed_count" =~ ^[0-9]+$ ]] ||
+      fail "invalid reference allowlist entry: $allowed_path $allowed_count $marker $reason"
+    path="$installed_root/$allowed_path"
+    actual=0
+    [ ! -f "$path" ] || actual=$(count_reference_hits "$path")
+    [ "$actual" = "$allowed_count" ] ||
+      fail "reference count mismatch for $allowed_path: expected $allowed_count, found $actual"
+  done < "$repo_dir/ci/reference-allowlist.txt"
+
+  while IFS= read -r path; do
+    relative=${path#"$installed_root/"}
+    expected=
+    while read -r allowed_path allowed_count marker reason; do
+      if [ "$allowed_path" = "$relative" ]; then
+        expected=$allowed_count
+      fi
+    done < "$repo_dir/ci/reference-allowlist.txt"
+    actual=$(count_reference_hits "$path")
+    [ -n "$expected" ] ||
+      fail "reference count mismatch for $relative: expected 0, found $actual"
+  done < <(grep -RilE 'foundry|harness_root' "$installed_root")
+
+  printf 'PASS: installed references match the pinned allowlist\n'
   if matches=$(grep -RilE 'foundry|harness_root|claude-toolkit' "$home/.claude/agents"); then
     fail "installed agents contain a forbidden reference: $matches"
   fi
-  printf 'PASS: installed tree contains no forbidden references\n'
+  printf 'PASS: installed agents contain no forbidden references\n'
 }
 
 check_uninstall() {

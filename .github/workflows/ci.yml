@@ -17,3 +17,20 @@ jobs:
           set -euo pipefail
           unset HARNESS_ROOT
           ./ci/check.sh
+      - name: Run skill tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset HARNESS_ROOT
+          export HOME
+          HOME=$(mktemp -d)
+          python3 -m pip install pytest==9.1.1
+          shopt -s nullglob
+          test_dirs=(skills/*/tests)
+          if ((${#test_dirs[@]} == 0)); then
+            printf 'ERROR: no test directories matched skills/*/tests\n' >&2
+            exit 1
+          fi
+          for test_dir in "${test_dirs[@]}"; do
+            python3 -m pytest "$test_dir" -q
+          done

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smithadifd/claude-toolkit/skills/review/findings.schema.json",
+  "title": "Review findings (review-findings/v1)",
+  "description": "The machine-readable half of a REVIEW phase result: artifacts[\"findings.json\"]. The verdict lives here, not in the phase status, which stays runner-generic (success / failure / blocked).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "backend", "verdict", "findings"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "review-findings/v1"
+    },
+    "backend": {
+      "type": "string",
+      "enum": ["claude-fresh", "grok-notools"]
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["approved", "changes_requested"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "rule", "description", "severity"],
+        "properties": {
+          "file": {
+            "description": "The path the finding cites, as written by the reviewer; null when the finding names no file.",
+            "type": ["string", "null"],
+            "minLength": 1
+          },
+          "line": {
+            "description": "The line the finding cites; null when the finding names no line.",
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "rule": {
+            "description": "The reviewer's own category for the finding (bug, security, issue, minor, finding).",
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "description": "The finding text, verbatim from the review.",
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["error", "warning", "info"]
+          }
+        }
+      }
+    }
+  }
+}
