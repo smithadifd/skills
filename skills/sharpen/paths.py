@@ -151,21 +151,24 @@ def _resolve_with_module(
     config: Mapping[str, Any],
     cwd: Path | None,
 ) -> dict[str, Path]:
-    spec = importlib.util.spec_from_file_location(
-        "_sharpen_configured_path_resolver", resolver_path
-    )
+    module_name = "_sharpen_configured_path_resolver"
+    spec = importlib.util.spec_from_file_location(module_name, resolver_path)
     if spec is None or spec.loader is None:
         raise ImportError("could not create an import specification")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
 
-    resolve = getattr(module, "resolve", None)
-    resolve_relative = getattr(module, "resolve_relative", None)
-    if not callable(resolve):
-        raise TypeError("resolve is missing or not callable")
-    if not callable(resolve_relative):
-        raise TypeError("resolve_relative is missing or not callable")
-
+        resolve = getattr(module, "resolve", None)
+        resolve_relative = getattr(module, "resolve_relative", None)
+        if not callable(resolve):
+            raise TypeError("resolve is missing or not callable")
+        if not callable(resolve_relative):
+            raise TypeError("resolve_relative is missing or not callable")
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     root_paths = resolve(config, cwd=cwd)
     resolved = {"roadmaps": root_paths.roadmaps, "standards": root_paths.standards}
     for key, (subkey, default) in SOURCE_DEFAULTS.items():

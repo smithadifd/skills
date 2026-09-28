@@ -565,6 +565,63 @@ def test_explicit_config_uses_configured_resolver_for_all_paths(tmp_path):
     assert result.stderr == ""
 
 
+def test_configured_dataclass_resolver_is_registered_before_execution(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    root = tmp_path / "configured-root"
+    resolver.write_text(
+        """
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Paths:
+    roadmaps: Path
+    standards: Path
+
+
+def resolve(config, cwd=None):
+    root = Path(__file__).parent / "configured-root"
+    return Paths(roadmaps=root / "roadmaps", standards=root / "standards")
+
+
+def resolve_relative(paths, subkey, value):
+    return getattr(paths, subkey) / value
+""".lstrip(),
+        encoding="utf-8",
+    )
+    _create_resolver_sources(root / "roadmaps", root / "standards")
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(result, "dataclass resolver must load successfully")
+
+    expected = {
+        "roadmaps": str(root / "roadmaps"),
+        "standards": str(root / "standards"),
+    }
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str(root / subdir / filename)
+    assert actual == expected, "the dataclass resolver must produce all six paths"
+    assert "config_path: harness_root.resolver" not in result.stderr, (
+        "a registered dataclass resolver must not degrade to standalone resolution"
+    )
+
+
 def test_override_uses_configured_resolver(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
