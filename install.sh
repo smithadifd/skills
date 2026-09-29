@@ -35,6 +35,8 @@ install_one() {
   fi
   mkdir -p -- "$install_dir/$skill_name"
   cp -R -- "$skills_dir/$skill_name/." "$install_dir/$skill_name/"
+  find "$install_dir/$skill_name" \( -name __pycache__ -o -name .pytest_cache \) -type d -prune -exec rm -r {} +
+  find "$install_dir/$skill_name" -name '*.pyc' -type f -exec rm -f {} +
   printf 'Installed %s\n' "$skill_name"
 }
 
