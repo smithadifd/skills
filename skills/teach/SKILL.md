@@ -20,9 +20,9 @@ description: >
 
 Explain code so it *sticks*. The output is understanding — a mental model, a
 tour of the parts, and one worked trace — not a pile of prose and not a diff.
-Where `document` produces a durable artifact for a repo, `teach` produces a
-comprehension session for a person: fast, layered, drillable, and honest about
-what it did and didn't read.
+If the user needs durable repo documentation, write that as a separate task.
+`teach` produces a comprehension session for a person: fast, layered,
+drillable, and honest about what it did and didn't read.
 
 ## The one idea: three layers, top-down
 
@@ -51,7 +51,7 @@ code to check you.
 
 ## Core architecture: Explore-first, JIT reading
 
-You (the skill) are an **orchestrator** and a **synthesizer**. You do NOT read
+You (the skill) coordinate the reading and synthesize the result. You do NOT read
 the whole repo into your own context — that is how a teach-out on a large repo
 gets slow and shallow. Instead:
 
@@ -65,9 +65,7 @@ gets slow and shallow. Instead:
 - **Fan out per region.** For a multi-component subsystem, spawn one Explore per
   region in parallel (single message, multiple tool calls). Each returns a small
   structured report. You do the *thinking* — stitching the reports into one
-  coherent model — while the sub-agents do the *reading*. (This division is the
-  same one the `document` and `orchestrate` skills use, and it's the pattern the
-  prior-art walkthrough tools converged on independently.)
+  coherent model — while the sub-agents do the *reading*.
 
 Keep main context lean. The moment you catch yourself about to `Read` five files
 "just to get oriented," stop and send an Explore instead.
@@ -195,7 +193,7 @@ One short subsection per component. For each: what it owns (one line), where it
 lives (`dir/ · file.ext:LINE` for the key definition), its inputs and outputs,
 and any gotcha worth flagging. In **deep** depth, include the actual contract
 (signature, the side effects). Keep each to a few lines — this is a tour, not a
-reference manual (that's what `document` is for).
+reference manual (write that separately when needed).
 
 > **`SyncEngine`** — owns the reconcile loop; decides what to push/pull.
 > `src/sync/engine.ts:42`. In: a `SyncPlan`. Out: a `SyncResult`, plus writes
@@ -251,10 +249,10 @@ sampled is the failure mode to avoid.
 
 ## Model tiering
 
-- Orchestrator (this skill): whatever's driving. It holds the coordination
+- The caller (this skill): whatever's driving. It holds the coordination
   state and does the synthesis — the thinking.
 - `Explore` sub-agents: one tier down is fine; they locate and summarize.
-- Bump the orchestrator to **opus** for a genuinely large or gnarly subsystem
+- Use a stronger model for a genuinely large or gnarly subsystem
   where the *synthesis* is the hard part ("how it all fits together," a repo
   spanning many services). Synthesis quality is where the strong model pays off,
   not the reading.
@@ -268,10 +266,10 @@ sampled is the failure mode to avoid.
 - The user asks for an architecture diagram or a mental model of existing code.
 
 **Don't use this skill for:**
-- Writing durable documentation to commit (use `document` — that's an artifact
-  for the repo; this is a session for a person).
-- Finding bugs, security holes, or tech debt (use `audit-sweep`, or
-  `cross-stack-debugger` for a specific misbehavior).
+- Writing durable documentation to commit (write and verify the document as a
+  separate task; this is a session for a person).
+- Finding bugs, security holes, or tech debt (run `review` on a diff, or
+  investigate a specific misbehavior directly).
 - Explaining a *diff* or a PR (just read the diff and explain it directly —
   too lightweight for this).
 - Changing code. Teach is read-only; it explains, it doesn't edit.
