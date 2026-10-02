@@ -54,6 +54,22 @@ def test_private_name_in_test_file_is_allowed(tmp_path, name):
     assert result.returncode == 0, result.stderr
 
 
+def test_installed_symlink_to_test_file_with_private_name_is_rejected(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    skill = repo / "skills/example/SKILL.md"
+    skill.unlink()
+    skill.symlink_to("tests/test_example.py")
+    (repo / "skills/example/tests/test_example.py").write_text(
+        "See " + "foun" + "dry for details.\n", encoding="utf-8"
+    )
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, f"installed symlink private name was accepted: {result.stderr}"
+    assert "installed file contains a private project name" in result.stderr
+
+
 @pytest.mark.parametrize(
     "reference",
     [
