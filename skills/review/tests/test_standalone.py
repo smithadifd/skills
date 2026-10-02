@@ -1,45 +1,60 @@
-"""Tiny structural test-runner shim for the `review` skill.
+"""Structural checks for a standalone `review` installation.
 
-DISCOVERED FACT: `review` ships as pure SKILL.md prose with no code, no
-`config.json`, and no test suite of its own — and neither does `humanizer`,
-the alternative leaf-skill candidate considered for this job. Sixteen of
-claude-toolkit's twenty-five skills have no tests today; both `review` and
-`humanizer` are in that set. This file is a small test-runner shim written
-for exactly that situation — not a port of `scripts/coupling_gauge.py`. It
-is deliberately independent of that gauge: a gauge that silently stopped
-scanning skills/review/ would still be caught here, and a bug in this
-file's own pattern would still be caught by the gauge. Neither can go green
-covering for the other's blind spot.
-
-Runs green under the clean-account job's own contract: HARNESS_ROOT unset,
-no foundry checkout present, no network.
+The skill instructions must work from an installed copy with no sibling
+project checkout. These checks run with HARNESS_ROOT unset and no network.
 """
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SKILL_MD = SKILL_DIR / "SKILL.md"
 CONFIG_JSON = SKILL_DIR / "config.json"
+CHECK_SCRIPT = SKILL_DIR.parent.parent / "ci" / "check.sh"
 
-# Independent of coupling_gauge.py's literal categories on purpose (see the
-# module docstring above) — a plain, readable pattern for the same families
-# the gauge falsifies: a configured harness root env var, foundry's own
-# standards/roadmap/decisions/topics tree, and the herald repo.
-_COUPLING_PATTERN = re.compile(
-    r"~/foundry"
-    r"|\$HOME/foundry"
-    r"|\$\{HOME\}/foundry"
-    r"|/Users/\w+/foundry"
-    r"|~/\.herald"
-    r"|~/herald"
-    r"|HARNESS_ROOT"
-    r"|foundry/roadmaps"
-    r"|foundry/standards"
-    r"|foundry/decisions"
-    r"|foundry/topics"
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "~/" + "private-sibling-repo" + "/scripts/run.sh",
+        "$HOME/" + "private-sibling-repo" + "/standards/example.md",
+        "${HOME}/" + "private-sibling-repo" + "/decisions/example.md",
+        "/Users/example/" + "private-sibling-repo" + "/topics/example.md",
+        "/Users/example/" + "private-sibling-repo" + "/.claude/example.md",
+        "/home/example/" + "private-sibling-repo" + "/scripts/run.sh",
+        "/tmp/" + "private-sibling-repo" + "/topics/example.md",
+    ],
 )
+def test_installed_outside_reference_is_rejected(tmp_path, reference):
+    (tmp_path / "example.md").write_text(reference, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(CHECK_SCRIPT), "outside-references", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "installed files contain an outside project reference" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "~/.claude/skills/example/SKILL.md",
+        "$HOME/.claude/skill-config/example.json",
+        "${HOME}/.claude/topics/example.md",
+        "/Users/example/.claude/skills/example/SKILL.md",
+        "/home/example/.claude/skills/example/SKILL.md",
+    ],
+)
+def test_installed_generic_path_is_allowed(tmp_path, reference):
+    (tmp_path / "example.md").write_text(reference, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(CHECK_SCRIPT), "outside-references", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_harness_root_is_unset():
@@ -72,7 +87,7 @@ def test_config_json_if_present_parses():
 
 def test_no_harness_coupling_literals_in_skill_md():
     text = SKILL_MD.read_text()
-    match = _COUPLING_PATTERN.search(text)
+    match = re.search(r"HARNESS_ROOT", text)
     assert match is None, (
         f"review/SKILL.md contains a coupling literal: {match.group(0)!r}"
     )

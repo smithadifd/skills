@@ -2,6 +2,6 @@
 - none
 
 ## VERDICT
-cleared — the builder occupied the lane for 41 minutes.
+cleared — the caller waited for 41 minutes.
 
-INTERVAL: from lane dispatch, spawns.tsv:14 to handback write, handback-DI4.md mtime = 41m
+INTERVAL: from request start, events.tsv:14 to result write, result.md mtime = 41m

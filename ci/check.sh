@@ -54,11 +54,30 @@ check_install_one() {
 
 count_reference_hits() {
   local matches
-  if matches=$(grep -oiE 'foundry|harness_root' "$1"); then
+  if matches=$(grep -oiE 'harness_root' "$1"); then
     printf '%s\n' "$matches" | wc -l | tr -d ' '
   else
     printf '0\n'
   fi
+}
+
+check_outside_references() {
+  local root matches reference
+  root=$1
+  # Allow ~/.claude, $HOME/.claude, and ${HOME}/.claude: installed skill
+  # commands and defaults use the user's own skill and config directories.
+  # Allow /Users/<user>/.claude and /home/<user>/.claude for the same
+  # directory when a documented path is expanded to an absolute path.
+  # Every other home, user, or temporary path into a project is external.
+  matches=$(grep -RhoE '(~|\$HOME|\$\{HOME\}|/Users/[^/[:space:]]+|/home/[^/[:space:]]+|/tmp)/[[:alnum:]_.-]+(/[[:alnum:]_.-]+)+' "$root" || true)
+  while IFS= read -r reference; do
+    [ -n "$reference" ] || continue
+    case "$reference" in
+      '~/.claude/'*|'$HOME/.claude/'*|'${HOME}/.claude/'*) continue ;;
+    esac
+    [[ "$reference" =~ ^/(Users|home)/[^/]+/\.claude/ ]] && continue
+    fail "installed files contain an outside project reference: $reference"
+  done <<< "$matches"
 }
 
 check_references() {
@@ -90,12 +109,14 @@ check_references() {
     actual=$(count_reference_hits "$path")
     [ -n "$expected" ] ||
       fail "reference count mismatch for $relative: expected 0, found $actual"
-  done < <(grep -RilE 'foundry|harness_root' "$installed_root")
+  done < <(grep -RilE 'harness_root' "$installed_root")
 
   printf 'PASS: installed references match the pinned allowlist\n'
-  if matches=$(grep -RilE 'foundry|harness_root|claude-toolkit' "$home/.claude/agents"); then
+  check_outside_references "$installed_root"
+  if matches=$(grep -RilE 'harness_root' "$home/.claude/agents"); then
     fail "installed agents contain a forbidden reference: $matches"
   fi
+  check_outside_references "$home/.claude/agents"
   printf 'PASS: installed agents contain no forbidden references\n'
 }
 
@@ -201,6 +222,7 @@ case ${1-} in
   install-all) check_install_all ;;
   install-one) check_install_one ;;
   references) check_references ;;
+  outside-references) [ "$#" -eq 2 ] || fail 'outside-references needs a directory'; check_outside_references "$2" ;;
   uninstall) check_uninstall ;;
   install-all-agents) check_install_all_agents ;;
   install-one-agent) check_install_one_agent ;;

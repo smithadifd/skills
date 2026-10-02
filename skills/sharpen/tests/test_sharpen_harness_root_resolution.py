@@ -27,7 +27,7 @@ def test_documented_resolver_path_targets_standalone_install():
     assert "python3 ~/.claude/skills/sharpen/paths.py" in text, (
         "the resolver command must target install.sh's standalone destination"
     )
-    assert "~/claude-toolkit/" not in text, (
+    assert "~/private-sibling-repo/" not in text, (
         "standalone instructions must not depend on a toolkit checkout"
     )
 
@@ -113,8 +113,8 @@ def test_standalone_clean_home_uses_claude_defaults_and_four_notices(tmp_path):
         assert sum(f"optional source {key} unavailable" in line for line in notices) == 1, (
             f"optional source {key} must emit one one-line notice"
         )
-    assert not (home / "foundry").exists(), (
-        "standalone clean-home execution must not touch the foundry directory"
+    assert not (home / "private-sibling-repo").exists(), (
+        "standalone clean-home execution must not touch a private sibling directory"
     )
 
 
@@ -132,8 +132,8 @@ from types import SimpleNamespace
 
 def resolve(config, cwd=None):
     return SimpleNamespace(
-        roadmaps=Path.home() / "foundry" / "roadmaps",
-        standards=Path.home() / "foundry" / "standards",
+        roadmaps=Path.home() / "private-sibling-repo" / "roadmaps",
+        standards=Path.home() / "private-sibling-repo" / "standards",
     )
 
 
@@ -401,7 +401,7 @@ def test_tilde_prefixed_source_value_stays_explicit_under_home(tmp_path):
     source = home / "ro" / "wave-current.md"
     source.parent.mkdir()
     source.write_text("available\n", encoding="utf-8")
-    script = _copy_standalone(tmp_path, json.dumps({"sot_path": "~/ro/wave-current.md"}))
+    script = _copy_standalone(tmp_path, json.dumps({"sot_path": "~/" + "ro/wave-current.md"}))
 
     result = _run_paths(script, home=home, cwd=tmp_path)
     actual = _resolved_output(result, "a tilde-prefixed source value must stay explicit")
