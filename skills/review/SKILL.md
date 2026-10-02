@@ -23,9 +23,9 @@ finding across several bullets.
 - If nothing found: "No bugs or security issues found."
 - Any verdict that relies on a measured interval carries an `INTERVAL:` line: `INTERVAL: from <start event>, <start source> to <end event>, <end source> = <duration>` (every part non-empty).
 
-Phase artifacts (optional, when a caller wants the structured result): write the
-review to a file and run `python3 skills/review/review_phase.py --from-text <file>
---backend claude-fresh` from the toolkit checkout. It prints a `phase_result: v1`
+Phase artifacts (optional, when a caller wants the structured result): Python 3
+is needed. Write the review to a file and run `python3 ~/.claude/skills/review/review_phase.py --from-text <file>
+--backend claude-fresh`. It prints a `phase_result: v1`
 whose `artifacts["findings.json"]` validates against `skills/review/findings.schema.json`
 (`--validate <findings.json>` re-checks one); the one-line bullet shape above,
 tag and `file:line` exact, is what its `claude-fresh` adapter parses — the

@@ -28,7 +28,7 @@ NO_VERDICT = (FIXTURES / "no-verdict.md").read_text()
 DRIFT_BLOCKING = GROK_FLAGGED.replace("flagged —", "BLOCKING —")
 DRIFT_LGTM = GROK_CLEARED.replace("cleared —", "LGTM —")
 
-FAKE_KEY = "sk-test-not-a-real-jev-key"
+FAKE_KEY = "REDACTION-SENTINEL-not-a-key-0002"
 
 
 def _envelope(backend: str, return_text: str, *, jev: bool = False) -> dict:

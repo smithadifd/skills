@@ -18,7 +18,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 import jev_client  # noqa: E402
 
-FAKE_SECRET = "sk-test-FAKESECRET_c4d5e6f7g8h9i0j1k2l3"
+FAKE_SECRET = "REDACTION-SENTINEL-not-a-key-0001"
 
 
 def _env():
