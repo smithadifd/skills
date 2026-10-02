@@ -1,10 +1,10 @@
 # Skills and agents for Claude Code
 
-This repository contains reusable Claude Code skills for common tasks and agents for focused research, writing, and review. Install only the ones you need, or install the full collection.
+This repository contains reusable Claude Code skills for common tasks and agents for focused research, writing, and review. Install the skills and agents you need, or install the full collection. `humanizer-finance` also needs `humanizer`.
 
 ## Before you start
 
-You need Claude Code, `git`, and `bash`. Python 3 is needed only if you use `review`'s optional structured output. The `pr` skill also needs the GitHub CLI (`gh`).
+You need Claude Code, `git`, and `bash`. Python 3 is required for `kickoff`, `sharpen`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
 
 This is a private repository. If you've been invited as a collaborator, clone it using the URL provided with your access, then run the commands below from the clone:
 
@@ -47,6 +47,15 @@ Install one skill:
 ```sh
 ./install.sh pr
 ```
+
+For financial writing, install both `humanizer` and its `humanizer-finance` extension:
+
+```sh
+./install.sh humanizer
+./install.sh humanizer-finance
+```
+
+The optional HTML output in `teach` uses a separate `artifact-design` skill. Its standard chat walkthrough does not need that skill.
 
 Install every available skill:
 
