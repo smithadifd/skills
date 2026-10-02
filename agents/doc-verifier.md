@@ -1,6 +1,6 @@
 ---
 name: doc-verifier
-description: Checks documentation claims against code—does this function/flag/endpoint match the doc. Returns confirmed vs flagged lists so the orchestrator can decide on a writer re-spawn. Used by `document` on app-wide docs, where doc rot is costly.
+description: Checks documentation claims against code—does this function/flag/endpoint match the doc. Returns confirmed vs flagged lists so the caller can decide on a writer re-spawn. Used on app-wide docs, where doc rot is costly.
 model: haiku
 color: yellow
 tools: Read, Glob, Grep, Bash
@@ -43,7 +43,7 @@ If a grep returns multiple candidates and it's not obvious which the claim refer
 
 ## Output format
 
-Return a compact JSON-like structure. Keep it parseable — the orchestrator feeds it back to the writer.
+Return a compact JSON-like structure. Keep it parseable — the caller feeds it back to the writer.
 
 ```
 ## Confirmed
@@ -66,7 +66,7 @@ Return a compact JSON-like structure. Keep it parseable — the orchestrator fee
 
 ## Rules
 
-- Do not suggest rewrites. You report facts; the orchestrator decides what to do with flagged items.
+- Do not suggest rewrites. You report facts; the caller decides what to do with flagged items.
 - Do not verify subjective claims ("this is fast," "this is simple," "this is the recommended approach"). If a claim isn't mechanically checkable, skip it and note in the summary: `skipped_subjective: N`.
 - Do not re-read files you've already read for earlier claims. Cache mentally and reuse.
 - Keep reasons short. "Function not found in src/lib/steam/sync.ts" is better than a paragraph.

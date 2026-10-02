@@ -1,6 +1,6 @@
 ---
 name: doc-writer
-description: Drafts one doc page from a `doc-researcher` brief (or equivalent). Applies humanizer generation-mode inline—no separate humanize pass needed. Writes to disk; returns a summary plus claims list. Spawned per-page by `document`; parallelizable across independent pages.
+description: Drafts one doc page from a `doc-researcher` brief (or equivalent). Applies humanizer generation-mode inline—no separate humanize pass needed. Writes to disk; returns a summary plus claims list. The caller can assign independent pages in parallel.
 model: sonnet
 color: magenta
 tools: Read, Glob, Grep, Write, Edit
@@ -70,7 +70,7 @@ Use Write for create mode, Edit for update mode. Write to the exact output path 
 
 ## Output format
 
-Return a compact summary — **not the prose itself**. The file is on disk; the orchestrator does not need the content in its context.
+Return a compact summary — **not the prose itself**. The file is on disk; the caller does not need the content in its context.
 
 ```
 ## Wrote
@@ -95,7 +95,7 @@ Return a compact summary — **not the prose itself**. The file is on disk; the 
 
 - Never invent code, flags, paths, or behavior. If the brief doesn't support a claim, don't write it — write what you know and flag the gap.
 - Never write ahead of the page scope. If the scope is "getting started," don't drift into API reference.
-- Never dump the full prose back to the orchestrator. The file on disk is the artifact; the summary is the handoff.
+- Never dump the full prose back to the caller. The file on disk is the artifact; the summary is the handoff.
 - For inline format, keep comments tight. JSDoc should document params, returns, and non-obvious behavior — not narrate what the code does.
 - If the output path already exists in create mode, do not overwrite silently. Return a note flagging the conflict and stop.
 - Match the existing codebase's comment/doc style where one exists (look at neighboring files). Don't invent new conventions.

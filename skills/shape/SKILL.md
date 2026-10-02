@@ -13,7 +13,7 @@ description: >
   before I build it", "what am I missing", "stress-test this direction", "is this the
   right approach", "review this design/RFC/proposal", "what could go wrong with X". NOT
   for critiquing code that already exists (that is `review`), and NOT for executing a
-  decided plan (that is `orchestrate`).
+  decided plan (hand the brief to whoever will build it).
 ---
 
 # Shape
@@ -29,7 +29,7 @@ of code, not a code change.
 repos, no PRs. Sub-agents are read-only. The one and only artifact is the
 synthesized brief you hand back to the user (printed inline; optionally saved to
 a scratch path if the user asks). Say so if the user seems to expect a build —
-`/shape` ends *before* `orchestrate` begins.
+`/shape` ends *before* implementation begins.
 
 ## When it fits (and when it doesn't)
 
@@ -37,11 +37,11 @@ a scratch path if the user asks). Say so if the user seems to expect a build —
   optimism bias and sunk-cost pressure are highest and dissent is cheapest. An
   RFC awaiting sign-off. A "here's my plan, poke holes" request. A fork in the
   road between two approaches.
-- **Doesn't fit:** code already exists and you want its quality assessed → that
-  is `audit-sweep` (full sweep) or `review` (the current diff). A decision is
-  already made and you want it *shipped* → that is `orchestrate`. A single
-  obvious question with a cheap answer → just answer it; don't spin up five
-  agents.
+- **Doesn't fit:** code already exists and you want its quality assessed → run
+  `review` on the current diff, or inspect the existing code directly. A
+  decision is already made and you want it *shipped* → hand the brief to whoever
+  will build it. A single obvious question with a cheap answer → just answer
+  it; don't spin up five agents.
 
 ## Phase 0 — nail the proposal before fanning out (main loop, cheap)
 
@@ -153,8 +153,8 @@ reports — that is a pile, not a brief. Instead:
      drown the signal.
 
 4. **Recommend the next move.** Usually one of: answer questions Q1–Q3 then
-   re-shape; fold mitigations M1–M2 into the approach and proceed to
-   `/orchestrate`; or step back and prototype the risky alternative first. Name
+   re-shape; fold mitigations M1–M2 into the approach and hand it to whoever
+   will build it; or step back and prototype the risky alternative first. Name
    it explicitly — the brief should end with a decision, not a shrug.
 
 Keep the brief tight. A red-team that returns 40 undifferentiated worries has
@@ -178,12 +178,11 @@ things that matter before the thirty that don't.
 
 ## Prior art
 
-Distilled from three established practices, adapted to a parallel-agent harness:
+Distilled from established practices for parallel review:
 Gary Klein's **pre-mortem** / prospective-hindsight technique (imagine the plan
 has already failed, then enumerate why — HBR 2007; the failure-modes lens);
 **adversarial design review / red-teaming**, which challenges an approach's
 fundamental assumptions and scrutinizes its interfaces and integration points for
 failure before commitment (the unknowns, edge-case, and hidden-dependency
-lenses); and this toolkit's own fan-out conventions from `audit-sweep`
-(one read-only agent per concern → synthesis) and `orchestrate` (fresh-context
-adversarial review, structured returns, judgment stays in the main loop).
+lenses). The five read-only agents each examine one concern, return structured
+findings, and leave the final ranking to the main loop.
