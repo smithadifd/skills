@@ -80,6 +80,19 @@ check_outside_references() {
   done <<< "$matches"
 }
 
+check_private_words() {
+  local root path first second
+  root=$1
+  first='foun''dry'
+  second='claude''[-_]toolkit'
+  while IFS= read -r -d '' path; do
+    [ -f "$path" ] || fail "installed file contains an unreadable symlink: $path"
+    if LC_ALL=C grep -aiqE "$first|$second" "$path"; then
+      fail "installed file contains a private project name: $path"
+    fi
+  done < <(find "$root" -regex "$root/[^/]*/tests" -type d -prune -o \( -type f -o -type l \) -print0)
+}
+
 check_references() {
   local home installed_root path relative expected actual matches
   local allowed_path allowed_count marker reason
@@ -113,10 +126,12 @@ check_references() {
 
   printf 'PASS: installed references match the pinned allowlist\n'
   check_outside_references "$installed_root"
+  check_private_words "$installed_root"
   if matches=$(grep -RilE 'harness_root' "$home/.claude/agents"); then
     fail "installed agents contain a forbidden reference: $matches"
   fi
   check_outside_references "$home/.claude/agents"
+  check_private_words "$home/.claude/agents"
   printf 'PASS: installed agents contain no forbidden references\n'
 }
 
