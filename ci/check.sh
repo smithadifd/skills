@@ -62,12 +62,22 @@ count_reference_hits() {
 }
 
 check_outside_references() {
-  local root matches
+  local root matches reference
   root=$1
-  # Project data under a sibling checkout must not become an install default.
-  if matches=$(grep -RilE '(~|\$HOME|\$\{HOME\}|/Users/[^/[:space:]]+)/[[:alnum:]_-]+/(roadmaps|standards|decisions|topics)' "$root"); then
-    fail "installed files contain an outside project reference: $matches"
-  fi
+  # Allow ~/.claude, $HOME/.claude, and ${HOME}/.claude: installed skill
+  # commands and defaults use the user's own skill and config directories.
+  # Allow /Users/<user>/.claude and /home/<user>/.claude for the same
+  # directory when a documented path is expanded to an absolute path.
+  # Every other home, user, or temporary path into a project is external.
+  matches=$(grep -RhoE '(~|\$HOME|\$\{HOME\}|/Users/[^/[:space:]]+|/home/[^/[:space:]]+|/tmp)/[[:alnum:]_.-]+(/[[:alnum:]_.-]+)+' "$root" || true)
+  while IFS= read -r reference; do
+    [ -n "$reference" ] || continue
+    case "$reference" in
+      '~/.claude/'*|'$HOME/.claude/'*|'${HOME}/.claude/'*) continue ;;
+    esac
+    [[ "$reference" =~ ^/(Users|home)/[^/]+/\.claude/ ]] && continue
+    fail "installed files contain an outside project reference: $reference"
+  done <<< "$matches"
 }
 
 check_references() {
@@ -212,6 +222,7 @@ case ${1-} in
   install-all) check_install_all ;;
   install-one) check_install_one ;;
   references) check_references ;;
+  outside-references) [ "$#" -eq 2 ] || fail 'outside-references needs a directory'; check_outside_references "$2" ;;
   uninstall) check_uninstall ;;
   install-all-agents) check_install_all_agents ;;
   install-one-agent) check_install_one_agent ;;

@@ -6,24 +6,55 @@ project checkout. These checks run with HARNESS_ROOT unset and no network.
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SKILL_MD = SKILL_DIR / "SKILL.md"
 CONFIG_JSON = SKILL_DIR / "config.json"
+CHECK_SCRIPT = SKILL_DIR.parent.parent / "ci" / "check.sh"
 
-# A configured root or a project data path outside the installed skill is a
-# coupling literal. The sibling repository name is intentionally arbitrary.
-_COUPLING_PATTERN = re.compile(
-    r"HARNESS_ROOT"
-    r"|(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+)/[A-Za-z0-9_-]+/"
-    r"(?:roadmaps|standards|decisions|topics)"
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "~/" + "private-sibling-repo" + "/scripts/run.sh",
+        "$HOME/" + "private-sibling-repo" + "/standards/example.md",
+        "${HOME}/" + "private-sibling-repo" + "/decisions/example.md",
+        "/Users/example/" + "private-sibling-repo" + "/topics/example.md",
+        "/Users/example/" + "private-sibling-repo" + "/.claude/example.md",
+        "/home/example/" + "private-sibling-repo" + "/scripts/run.sh",
+        "/tmp/" + "private-sibling-repo" + "/topics/example.md",
+    ],
 )
+def test_installed_outside_reference_is_rejected(tmp_path, reference):
+    (tmp_path / "example.md").write_text(reference, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(CHECK_SCRIPT), "outside-references", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "installed files contain an outside project reference" in result.stderr
 
 
-def test_generic_outside_reference_is_rejected():
-    sentinel = "~/" + "private-sibling-repo" + "/roadmaps"
-    assert _COUPLING_PATTERN.search(sentinel) is not None
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "~/.claude/skills/example/SKILL.md",
+        "$HOME/.claude/skill-config/example.json",
+        "${HOME}/.claude/topics/example.md",
+        "/Users/example/.claude/skills/example/SKILL.md",
+        "/home/example/.claude/skills/example/SKILL.md",
+    ],
+)
+def test_installed_generic_path_is_allowed(tmp_path, reference):
+    (tmp_path / "example.md").write_text(reference, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(CHECK_SCRIPT), "outside-references", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_harness_root_is_unset():
@@ -56,7 +87,7 @@ def test_config_json_if_present_parses():
 
 def test_no_harness_coupling_literals_in_skill_md():
     text = SKILL_MD.read_text()
-    match = _COUPLING_PATTERN.search(text)
+    match = re.search(r"HARNESS_ROOT", text)
     assert match is None, (
         f"review/SKILL.md contains a coupling literal: {match.group(0)!r}"
     )

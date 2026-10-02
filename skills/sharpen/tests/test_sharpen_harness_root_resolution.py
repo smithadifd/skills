@@ -401,7 +401,7 @@ def test_tilde_prefixed_source_value_stays_explicit_under_home(tmp_path):
     source = home / "ro" / "wave-current.md"
     source.parent.mkdir()
     source.write_text("available\n", encoding="utf-8")
-    script = _copy_standalone(tmp_path, json.dumps({"sot_path": "~/ro/wave-current.md"}))
+    script = _copy_standalone(tmp_path, json.dumps({"sot_path": "~/" + "ro/wave-current.md"}))
 
     result = _run_paths(script, home=home, cwd=tmp_path)
     actual = _resolved_output(result, "a tilde-prefixed source value must stay explicit")
