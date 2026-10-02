@@ -1,6 +1,44 @@
-# Skills
+# Skills and agents for Claude Code
 
-Standalone skills installed by directory name from `skills/`. Standalone agents installed by file name from `agents/`.
+This repository contains reusable Claude Code skills for common tasks and agents for focused research, writing, and review. Install only the ones you need, or install the full collection.
+
+## Before you start
+
+You need Claude Code, `git`, and `bash`. Python 3 is needed only if you use `review`'s optional structured output. The `pr` skill also needs the GitHub CLI (`gh`).
+
+This is a private repository. If you've been invited as a collaborator, clone it using the URL provided with your access, then run the commands below from the clone:
+
+```sh
+git clone 'your-private-clone-url' skills
+cd skills
+```
+
+## Skills
+
+| Skill | What it does |
+| --- | --- |
+| `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. |
+| `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. |
+| `kickoff` | Turns an early project idea into a researched plan through questions and review points. |
+| `pr` | Prepares a pull request for the current branch using the project's conventions. |
+| `review` | Checks code changes for bugs and security problems. |
+| `shape` | Tests a proposed design for risks and missing considerations before implementation. |
+| `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. |
+| `teach` | Explains how a codebase works with a system overview, component tour, and traced example. |
+| `topic` | Keeps the notes for an ongoing, focused discussion in one file. |
+
+## Agents
+
+| Agent | What it does |
+| --- | --- |
+| `api-contract-tracer` | Follows an API endpoint from its handler to its callers to find mismatched expectations. |
+| `dependency-auditor` | Compares dependency versions across projects and flags differences. |
+| `doc-researcher` | Gathers code facts and examples for a documentation draft. |
+| `doc-verifier` | Checks specific documentation claims against the code. |
+| `doc-writer` | Writes a documentation page from a research brief. |
+| `planner` | Investigates a codebase and outlines the steps for a change. |
+| `researcher` | Answers a focused question about code or an external API. |
+| `reviewer` | Independently examines uncommitted changes for issues. |
 
 ## Install
 
@@ -30,6 +68,10 @@ Install every available agent:
 
 Skills are copied to `~/.claude/skills/`. Agents are copied to `~/.claude/agents/`.
 
+## Update
+
+After pulling changes in your clone, rerun the install command for a skill or agent. The installer replaces the installed copy. Use `./install.sh --all` and `./install.sh --all-agents` to refresh everything.
+
 ## Uninstall
 
 Remove one skill:
@@ -56,3 +98,6 @@ Remove every available agent:
 ./install.sh --uninstall --all-agents
 ```
 
+## License
+
+See [LICENSE](LICENSE).
