@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/smithadifd/claude-toolkit/skills/review/findings.schema.json",
+  "$id": "https://github.com/smithadifd/skills/blob/main/skills/review/findings.schema.json",
   "title": "Review findings (review-findings/v1)",
   "description": "The machine-readable half of a REVIEW phase result: artifacts[\"findings.json\"]. The verdict lives here, not in the phase status, which stays runner-generic (success / failure / blocked).",
   "type": "object",

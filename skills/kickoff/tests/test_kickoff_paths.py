@@ -131,8 +131,8 @@ def test_kickoff_alone_uses_clean_home_fallback_and_three_notices(tmp_path):
     assert {path.name for path in home.iterdir()} == {".claude"}, (
         "KICKOFF-ALONE: clean-HOME writes must touch only the ~/.claude tree"
     )
-    assert not (home / "foundry").exists(), (
-        "KICKOFF-ALONE: clean-HOME resolution must not touch ~/foundry"
+    assert not (home / "private-sibling-repo").exists(), (
+        "KICKOFF-ALONE: clean-HOME resolution must not touch ~/private-sibling-repo"
     )
 
 

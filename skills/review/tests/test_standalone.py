@@ -1,18 +1,7 @@
-"""Tiny structural test-runner shim for the `review` skill.
+"""Structural checks for a standalone `review` installation.
 
-DISCOVERED FACT: `review` ships as pure SKILL.md prose with no code, no
-`config.json`, and no test suite of its own — and neither does `humanizer`,
-the alternative leaf-skill candidate considered for this job. Sixteen of
-claude-toolkit's twenty-five skills have no tests today; both `review` and
-`humanizer` are in that set. This file is a small test-runner shim written
-for exactly that situation — not a port of `scripts/coupling_gauge.py`. It
-is deliberately independent of that gauge: a gauge that silently stopped
-scanning skills/review/ would still be caught here, and a bug in this
-file's own pattern would still be caught by the gauge. Neither can go green
-covering for the other's blind spot.
-
-Runs green under the clean-account job's own contract: HARNESS_ROOT unset,
-no foundry checkout present, no network.
+The skill instructions must work from an installed copy with no sibling
+project checkout. These checks run with HARNESS_ROOT unset and no network.
 """
 import json
 import os
@@ -23,23 +12,18 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 SKILL_MD = SKILL_DIR / "SKILL.md"
 CONFIG_JSON = SKILL_DIR / "config.json"
 
-# Independent of coupling_gauge.py's literal categories on purpose (see the
-# module docstring above) — a plain, readable pattern for the same families
-# the gauge falsifies: a configured harness root env var, foundry's own
-# standards/roadmap/decisions/topics tree, and the herald repo.
+# A configured root or a project data path outside the installed skill is a
+# coupling literal. The sibling repository name is intentionally arbitrary.
 _COUPLING_PATTERN = re.compile(
-    r"~/foundry"
-    r"|\$HOME/foundry"
-    r"|\$\{HOME\}/foundry"
-    r"|/Users/\w+/foundry"
-    r"|~/\.herald"
-    r"|~/herald"
-    r"|HARNESS_ROOT"
-    r"|foundry/roadmaps"
-    r"|foundry/standards"
-    r"|foundry/decisions"
-    r"|foundry/topics"
+    r"HARNESS_ROOT"
+    r"|(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+)/[A-Za-z0-9_-]+/"
+    r"(?:roadmaps|standards|decisions|topics)"
 )
+
+
+def test_generic_outside_reference_is_rejected():
+    sentinel = "~/" + "private-sibling-repo" + "/roadmaps"
+    assert _COUPLING_PATTERN.search(sentinel) is not None
 
 
 def test_harness_root_is_unset():

@@ -2,4 +2,4 @@
 - none
 
 ## VERDICT
-cleared — the builder occupied the lane for 41 minutes.
+cleared — the caller waited for 41 minutes.

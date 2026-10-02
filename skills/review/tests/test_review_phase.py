@@ -7,7 +7,7 @@ Seams under test, each observable from outside the module:
   * the schema validator (`validate_findings` / `--validate`): reads
     `findings.schema.json` and names the offending path;
   * each backend adapter's parse on fixture return text;
-  * the standalone `review` text and an orchestrate lane return both
+  * the standalone `review` text and a caller return both
     validate against the same schema file.
 
 Expected values are literals taken from the fixtures and the schema, never
@@ -40,7 +40,7 @@ CLAUDE_APPROVE = (FIXTURES / "claude-fresh-approve.md").read_text()
 REVIEW_SKILL_FINDINGS = (FIXTURES / "review-skill-findings.md").read_text()
 REVIEW_SKILL_CLEAN = (FIXTURES / "review-skill-clean.md").read_text()
 CLAUDE_ISSUES_CLEAN = (FIXTURES / "claude-fresh-issues-clean.md").read_text()
-ROLL_CLEAN_APPROVE = (FIXTURES / "roll-clean-approve.md").read_text()
+CLEAN_APPROVE = (FIXTURES / "clean-approve.md").read_text()
 NO_VERDICT = (FIXTURES / "no-verdict.md").read_text()
 
 ENVELOPE_KEYS = ("repo/ref", "inputs", "constraints", "harness_root", "adapters", "budget")
@@ -71,7 +71,7 @@ def _valid_findings_doc() -> dict:
         "verdict": "changes_requested",
         "findings": [
             {
-                "file": "launchd-kit/lib.sh",
+                "file": "src/report.sh",
                 "line": 77,
                 "rule": "finding",
                 "description": "the report path is expanded unquoted",
@@ -98,6 +98,9 @@ def _run_cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess
 def test_schema_file_is_closed_at_every_object():
     schema = json.loads(SCHEMA.read_text())
     assert schema["$schema"].startswith("https://json-schema.org/")
+    assert schema["$id"] == (
+        "https://github.com/smithadifd/skills/blob/main/skills/review/findings.schema.json"
+    ), "schema identifier must point to this repository"
 
     def walk(node: dict, path: str) -> None:
         if node.get("type") == "object" or "properties" in node:
@@ -191,12 +194,12 @@ def test_grok_adapter_parses_the_flagged_return():
     assert verdict == "changes_requested"
     assert len(findings) == 6
     assert findings[1]["description"] == (
-        "`_ph_default_codex_meter`: `tolower($0) ~ /off/` is an unanchored "
-        "substring. A Codex usage line containing `cutoff`/`offset`/`offline` "
+        "`_sm_default_worker_meter`: `tolower($0) ~ /off/` is an unanchored "
+        "substring. A worker usage line containing `cutoff`/`offset`/`offline` "
         "is classified `off` and skips the fallback (`pool-off`) even when the "
         "pool is on."
     )
-    assert findings[0]["file"] == "portfolio-health-run.sh"
+    assert findings[0]["file"] == "sample-monitor-run.sh"
     assert findings[0]["line"] is None
     assert {f["rule"] for f in findings} == {"finding"}
     assert {f["severity"] for f in findings} == {"error"}
@@ -258,7 +261,7 @@ def test_claude_adapter_parses_the_reviewer_agent_block():
     assert verdict == "changes_requested"
     assert len(findings) == 3
     first = findings[0]
-    assert first["file"] == "skills/portfolio-health/portfolio-health-run.sh"
+    assert first["file"] == "skills/sample-monitor/sample-monitor-run.sh"
     assert first["line"] == 212
     assert first["rule"] == "issue"
     assert first["severity"] == "error"
@@ -281,7 +284,7 @@ def test_claude_adapter_parses_the_review_skill_bullets():
     assert verdict == "changes_requested"
     assert [f["rule"] for f in findings] == ["bug", "security"]
     assert [f["line"] for f in findings] == [188, 77]
-    assert findings[1]["file"] == "launchd-kit/lib.sh"
+    assert findings[1]["file"] == "src/report.sh"
     assert {f["severity"] for f in findings} == {"error"}
 
 
@@ -317,8 +320,8 @@ def test_claude_adapter_accepts_clean_sentinel_as_issues_bullet():
     assert findings == []
 
 
-def test_claude_adapter_accepts_real_roll_clean_approve():
-    verdict, findings = review_phase.parse_claude_fresh(ROLL_CLEAN_APPROVE)
+def test_claude_adapter_accepts_clean_approve():
+    verdict, findings = review_phase.parse_claude_fresh(CLEAN_APPROVE)
     assert verdict == "approved"
     assert findings == []
     document = {
@@ -427,8 +430,8 @@ def test_run_phase_accepts_grok_findings_none():
     assert review_phase.validate_findings(findings) == []
 
 
-def test_run_phase_accepts_real_roll_clean_approve_on_claude_fresh():
-    result = review_phase.run_phase(_envelope("claude-fresh", ROLL_CLEAN_APPROVE))
+def test_run_phase_accepts_clean_approve_on_claude_fresh():
+    result = review_phase.run_phase(_envelope("claude-fresh", CLEAN_APPROVE))
     assert result["status"] == "success", result["reason"]
     findings = result["artifacts"]["findings.json"]
     assert findings["schema"] == "review-findings/v1"
@@ -583,12 +586,12 @@ def test_from_text_mode_refuses_an_unknown_backend():
 # --- both call-site paths, one schema ---------------------------------------
 
 
-def test_standalone_and_orchestrate_paths_validate_against_the_same_schema(tmp_path: Path):
+def test_standalone_and_caller_paths_validate_against_the_same_schema(tmp_path: Path):
     """Both real call sites, each producing an artifact file the CLI reads.
 
     Standalone: `review`/SKILL.md's own documented invocation —
-    `--from-text <file> --backend claude-fresh` on a saved return. Orchestrate
-    lane: a run envelope built the way a runner assembles one from an
+    `--from-text <file> --backend claude-fresh` on a saved return. Caller:
+    a run envelope built the way a caller assembles one from an
     already-obtained return (`--envelope <file>`), not a hand-built dict fed
     straight to `validate_findings`. Each artifact is written to its own file
     and re-read by a fresh `--validate <file>` subprocess, so the schema file
@@ -603,13 +606,13 @@ def test_standalone_and_orchestrate_paths_validate_against_the_same_schema(tmp_p
     )
     assert standalone_run.returncode == 0, standalone_run.stderr
 
-    lane_envelope = tmp_path / "lane-envelope.json"
-    lane_envelope.write_text(json.dumps(_envelope("grok-notools", GROK_FLAGGED)))
-    lane_out = tmp_path / "lane-result.json"
-    lane_run = _run_cli("--envelope", str(lane_envelope), "--out", str(lane_out))
-    assert lane_run.returncode == 0, lane_run.stderr
+    caller_envelope = tmp_path / "caller-envelope.json"
+    caller_envelope.write_text(json.dumps(_envelope("grok-notools", GROK_FLAGGED)))
+    caller_out = tmp_path / "caller-result.json"
+    caller_run = _run_cli("--envelope", str(caller_envelope), "--out", str(caller_out))
+    assert caller_run.returncode == 0, caller_run.stderr
 
-    for result_file in (standalone_out, lane_out):
+    for result_file in (standalone_out, caller_out):
         result = json.loads(result_file.read_text())
         assert result["status"] == "success"
         findings_file = tmp_path / f"{result_file.stem}-findings.json"
@@ -631,7 +634,7 @@ def _timed_grok(interval_line: str | None) -> str:
         "- none",
         "",
         "## VERDICT",
-        "cleared — the builder occupied the lane for 41 minutes.",
+        "cleared — the caller waited for 41 minutes.",
         "",
     ]
     if interval_line is not None:
@@ -698,10 +701,10 @@ def test_duration_with_complete_interval_is_parsed_onto_the_phase_result():
     assert result["status"] == "success", result["reason"]
     assert result["intervals"] == [
         {
-            "start_event": "lane dispatch",
-            "start_source": "spawns.tsv:14",
-            "end_event": "handback write",
-            "end_source": "handback-DI4.md mtime",
+            "start_event": "request start",
+            "start_source": "events.tsv:14",
+            "end_event": "result write",
+            "end_source": "result.md mtime",
             "duration": "41m",
         }
     ]
@@ -714,8 +717,8 @@ def test_duration_with_complete_interval_is_parsed_onto_the_phase_result():
 
 def test_interval_missing_start_event_is_refused():
     text = _timed_grok(
-        "INTERVAL: from , spawns.tsv:14 to handback write, "
-        "handback-DI4.md mtime = 41m"
+        "INTERVAL: from , events.tsv:14 to result write, "
+        "result.md mtime = 41m"
     )
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
@@ -726,8 +729,8 @@ def test_interval_missing_start_event_is_refused():
 
 def test_interval_missing_start_source_is_refused():
     text = _timed_grok(
-        "INTERVAL: from lane dispatch, to handback write, "
-        "handback-DI4.md mtime = 41m"
+        "INTERVAL: from request start, to result write, "
+        "result.md mtime = 41m"
     )
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
@@ -738,8 +741,8 @@ def test_interval_missing_start_source_is_refused():
 
 def test_interval_missing_end_event_is_refused():
     text = _timed_grok(
-        "INTERVAL: from lane dispatch, spawns.tsv:14 to , "
-        "handback-DI4.md mtime = 41m"
+        "INTERVAL: from request start, events.tsv:14 to , "
+        "result.md mtime = 41m"
     )
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
@@ -750,7 +753,7 @@ def test_interval_missing_end_event_is_refused():
 
 def test_interval_missing_end_source_is_refused():
     text = _timed_grok(
-        "INTERVAL: from lane dispatch, spawns.tsv:14 to handback write,  = 41m"
+        "INTERVAL: from request start, events.tsv:14 to result write,  = 41m"
     )
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
@@ -761,12 +764,11 @@ def test_interval_missing_end_source_is_refused():
 
 def test_interval_missing_duration_is_refused():
     text = _timed_grok(
-        "INTERVAL: from lane dispatch, spawns.tsv:14 to handback write, "
-        "handback-DI4.md mtime = "
+        "INTERVAL: from request start, events.tsv:14 to result write, "
+        "result.md mtime = "
     )
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
     assert "duration" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
-

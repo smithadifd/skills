@@ -2,7 +2,7 @@
 """The one REVIEW entry point: a run envelope in, a `phase_result: v1` out.
 
 Every review surface — the `review` skill run by hand, the `reviewer` agent,
-and a second no-tools lane — returns free text in its own shape. This module
+and a second no-tools caller — returns free text in its own shape. This module
 is the single place that text becomes a phase result, so every consumer
 reads one contract instead of three:
 
@@ -587,7 +587,7 @@ def run_phase(envelope: object) -> dict:
         return _result(
             "blocked",
             "inputs carry no return_text or return_file; the model dispatch is "
-            "runner-owned, so the lane's return must arrive in the envelope",
+            "runner-owned, so the caller's return must arrive in the envelope",
             None,
             None,
         )
@@ -780,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--envelope", metavar="FILE", help="run envelope JSON (six keys)")
-    mode.add_argument("--from-text", metavar="FILE", help="a lane's raw return text")
+    mode.add_argument("--from-text", metavar="FILE", help="a caller's raw return text")
     mode.add_argument("--validate", metavar="FILE", help="a findings.json to check")
     parser.add_argument("--backend", choices=sorted(ADAPTERS), help="adapter for --from-text")
     parser.add_argument("--target", default="", help="what was reviewed, for --from-text")

@@ -54,10 +54,19 @@ check_install_one() {
 
 count_reference_hits() {
   local matches
-  if matches=$(grep -oiE 'foundry|harness_root' "$1"); then
+  if matches=$(grep -oiE 'harness_root' "$1"); then
     printf '%s\n' "$matches" | wc -l | tr -d ' '
   else
     printf '0\n'
+  fi
+}
+
+check_outside_references() {
+  local root matches
+  root=$1
+  # Project data under a sibling checkout must not become an install default.
+  if matches=$(grep -RilE '(~|\$HOME|\$\{HOME\}|/Users/[^/[:space:]]+)/[[:alnum:]_-]+/(roadmaps|standards|decisions|topics)' "$root"); then
+    fail "installed files contain an outside project reference: $matches"
   fi
 }
 
@@ -90,12 +99,14 @@ check_references() {
     actual=$(count_reference_hits "$path")
     [ -n "$expected" ] ||
       fail "reference count mismatch for $relative: expected 0, found $actual"
-  done < <(grep -RilE 'foundry|harness_root' "$installed_root")
+  done < <(grep -RilE 'harness_root' "$installed_root")
 
   printf 'PASS: installed references match the pinned allowlist\n'
-  if matches=$(grep -RilE 'foundry|harness_root|claude-toolkit' "$home/.claude/agents"); then
+  check_outside_references "$installed_root"
+  if matches=$(grep -RilE 'harness_root' "$home/.claude/agents"); then
     fail "installed agents contain a forbidden reference: $matches"
   fi
+  check_outside_references "$home/.claude/agents"
   printf 'PASS: installed agents contain no forbidden references\n'
 }
 
