@@ -6,6 +6,7 @@ project checkout. These checks run with HARNESS_ROOT unset and no network.
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,43 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 SKILL_MD = SKILL_DIR / "SKILL.md"
 CONFIG_JSON = SKILL_DIR / "config.json"
 CHECK_SCRIPT = SKILL_DIR.parent.parent / "ci" / "check.sh"
+
+
+def private_reference_repo(tmp_path):
+    repo = tmp_path / "repo"
+    for directory in ("ci", "skills/example/tests", "agents"):
+        (repo / directory).mkdir(parents=True)
+    shutil.copy2(CHECK_SCRIPT, repo / "ci/check.sh")
+    shutil.copy2(CHECK_SCRIPT.parent.parent / "install.sh", repo / "install.sh")
+    (repo / "ci/reference-allowlist.txt").write_text("", encoding="utf-8")
+    (repo / "skills/example/SKILL.md").write_text("clean\n", encoding="utf-8")
+    (repo / "agents/example.md").write_text("clean\n", encoding="utf-8")
+    return repo
+
+
+@pytest.mark.parametrize("name", ["foun" + "dry", "claude" + "-toolkit"])
+@pytest.mark.parametrize("target", ["skills/example/SKILL.md", "agents/example.md"])
+def test_installed_private_name_is_rejected(tmp_path, name, target):
+    repo = private_reference_repo(tmp_path)
+    (repo / target).write_text(f"See {name} for details.\n", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, f"{target} private name was accepted: {result.stderr}"
+    assert "installed file contains a private project name" in result.stderr
+
+
+@pytest.mark.parametrize("name", ["foun" + "dry", "claude" + "-toolkit"])
+def test_private_name_in_test_file_is_allowed(tmp_path, name):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/tests/test_example.py").write_text(name, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
 
 @pytest.mark.parametrize(
     "reference",

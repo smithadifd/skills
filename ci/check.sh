@@ -80,6 +80,16 @@ check_outside_references() {
   done <<< "$matches"
 }
 
+check_private_words() {
+  local root path
+  root=$1
+  while IFS= read -r -d '' path; do
+    if grep -iqE '(^|[^[:alnum:]_])(foundry|claude-toolkit)([^[:alnum:]_]|$)' "$path"; then
+      fail "installed file contains a private project name: $path"
+    fi
+  done < <(find "$root" -path '*/tests' -prune -o -type f -print0)
+}
+
 check_references() {
   local home installed_root path relative expected actual matches
   local allowed_path allowed_count marker reason
@@ -113,10 +123,12 @@ check_references() {
 
   printf 'PASS: installed references match the pinned allowlist\n'
   check_outside_references "$installed_root"
+  check_private_words "$installed_root"
   if matches=$(grep -RilE 'harness_root' "$home/.claude/agents"); then
     fail "installed agents contain a forbidden reference: $matches"
   fi
   check_outside_references "$home/.claude/agents"
+  check_private_words "$home/.claude/agents"
   printf 'PASS: installed agents contain no forbidden references\n'
 }
 
