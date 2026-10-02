@@ -18,9 +18,12 @@ CONFIG_JSON = SKILL_DIR / "config.json"
 CHECK_SCRIPT = SKILL_DIR.parent.parent / "ci" / "check.sh"
 
 
-def private_reference_repo(tmp_path):
+def private_reference_repo(tmp_path, include_tests=True):
     repo = tmp_path / "repo"
-    for directory in ("ci", "skills/example/tests", "agents"):
+    directories = ["ci", "skills/example", "agents"]
+    if include_tests:
+        directories.append("skills/example/tests")
+    for directory in directories:
         (repo / directory).mkdir(parents=True)
     shutil.copy2(CHECK_SCRIPT, repo / "ci/check.sh")
     shutil.copy2(CHECK_SCRIPT.parent.parent / "install.sh", repo / "install.sh")
@@ -68,6 +71,83 @@ def test_installed_symlink_to_test_file_with_private_name_is_rejected(tmp_path):
     )
     assert result.returncode == 1, f"installed symlink private name was accepted: {result.stderr}"
     assert "installed file contains a private project name" in result.stderr
+
+
+@pytest.mark.parametrize("name", [
+    "FOUN" + "DRY_ROOT",
+    "foun" + "dryctl",
+    "claude" + "_toolkit",
+])
+def test_private_name_substrings_are_rejected(tmp_path, name):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text(name, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, f"private name substring was accepted: {result.stderr}"
+    assert "installed file contains a private project name" in result.stderr
+
+
+def test_private_name_case_is_ignored(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text("FoUn" + "DrY", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, f"mixed-case private name was accepted: {result.stderr}"
+    assert "installed file contains a private project name" in result.stderr
+
+
+@pytest.mark.parametrize("entry", ["symlink", "file", "nested"])
+def test_non_test_directory_named_tests_is_scanned(tmp_path, entry):
+    repo = private_reference_repo(tmp_path, include_tests=False)
+    content = "foun" + "dry"
+    if entry == "symlink":
+        outside = tmp_path / "outside.md"
+        outside.write_text(content, encoding="utf-8")
+        (repo / "skills/example/tests").symlink_to(outside)
+    elif entry == "file":
+        (repo / "skills/example/tests").write_text(content, encoding="utf-8")
+    else:
+        nested = repo / "skills/example/references/tests"
+        nested.mkdir(parents=True)
+        (nested / "a.md").write_text(content, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, f"{entry} named tests was accepted: {result.stderr}"
+    assert "installed file contains a private project name" in result.stderr
+
+
+def test_unreadable_installed_symlink_is_rejected(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/missing.md").symlink_to("absent.md")
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, f"unreadable symlink was accepted: {result.stderr}"
+    assert "installed file contains an unreadable symlink" in result.stderr
+
+
+def test_private_name_in_invalid_utf8_file_is_rejected(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_bytes(b"\xff" + b"foun" + b"dry")
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1, f"invalid UTF-8 private name was accepted: {result.stderr}"
+    assert "installed file contains a private project name" in result.stderr
+
+
+def test_private_names_are_not_spelled_out_in_check_script():
+    check = CHECK_SCRIPT.read_text(encoding="utf-8").lower()
+    assert "foun" + "dry" not in check
+    assert "claude" + "-toolkit" not in check
 
 
 @pytest.mark.parametrize(

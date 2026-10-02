@@ -81,14 +81,16 @@ check_outside_references() {
 }
 
 check_private_words() {
-  local root path
+  local root path first second
   root=$1
+  first='foun''dry'
+  second='claude''[-_]toolkit'
   while IFS= read -r -d '' path; do
     [ -f "$path" ] || fail "installed file contains an unreadable symlink: $path"
-    if grep -iqE '(^|[^[:alnum:]_])(foundry|claude-toolkit)([^[:alnum:]_]|$)' "$path"; then
+    if LC_ALL=C grep -aiqE "$first|$second" "$path"; then
       fail "installed file contains a private project name: $path"
     fi
-  done < <(find "$root" -path '*/tests' -prune -o \( -type f -o -type l \) -print0)
+  done < <(find "$root" -regex "$root/[^/]*/tests" -type d -prune -o \( -type f -o -type l \) -print0)
 }
 
 check_references() {
