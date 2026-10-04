@@ -1,0 +1,73 @@
+{
+  "memory_dir": "tests/fixtures/memory",
+  "generated": "2026-07-08",
+  "files": [
+    {
+      "file": "compost-bin-setup.md",
+      "verdict": "KEEP",
+      "rationale": "Single current-truth statement, tidy one-line index entry, no saga. Left untouched (do not mass-stamp untouched files)."
+    },
+    {
+      "file": "patio-umbrella-warranty.md",
+      "verdict": "UNVERIFIED>90d",
+      "rationale": "last_verified 2026-01-01 is 188 days old. Flag for human re-verification (is the warranty window still open / receipt still filed?). No content change."
+    },
+    {
+      "file": "hedge-trimmer-schedule.md",
+      "verdict": "UPDATE",
+      "rationale": "Content is fine and single-truth, but the MEMORY.md index line ballooned into a paragraph-length state dump duplicating the file. Rebuild the index line to one scannable line and stamp last_verified.",
+      "index_line": "[Hedge trimmer schedule](hedge-trimmer-schedule.md) — trim boxwoods twice a year (late spring + late summer), never in a heat wave; cordless trimmer, charge the night before",
+      "sha256": "cc680740bec9e4b58b7353d943a101cfedff952dd426149badcc8ee189cb357f"
+    },
+    {
+      "file": "garden-hose-leak.md",
+      "verdict": "SUPERSEDED",
+      "rationale": "Resolved saga: the file carries a WRONG->CORRECTED->red-herring chain and its index line ballooned. Rewrite to one current-truth statement with a short appended changelog; this note is now the canonical brass-fitting home, so it supersedes sprinkler-timer.",
+      "index_line": "[Garden hose leak](garden-hose-leak.md) — far-spigot low pressure root cause = cracked brass Y-splitter (fixed 2026-05-30); check the splitter first, not the hose/regulator",
+      "frontmatter": {
+        "status": "current",
+        "supersedes": [
+          "sprinkler-timer"
+        ]
+      },
+      "body": "\nFar-bed low pressure at the far spigot is caused by a **cracked brass Y-splitter at that spigot** — confirmed and fixed 2026-05-30 by replacing the splitter. It is NOT the hose and NOT the pressure regulator.\n\n**How to apply:** if far-bed pressure drops again, check the Y-splitter FIRST. Brass fittings on this property are age-failing (same mode hit sprinkler zone 3 — see [[sprinkler-timer]]), so treat any sudden pressure/flow loss as a fitting crack until proven otherwise.\n",
+      "changelog": [
+        "2026-04-02 first blamed a kinked hose (re-coiling changed nothing) — WRONG.",
+        "2026-04 swapped the pressure regulator — red herring, near-spigot pressure was always fine.",
+        "2026-05-30 root cause CONFIRMED: cracked brass Y-splitter; replacing it restored pressure.",
+        "Dead-ends, do not re-try: re-coil/replace hose, swap regulator, clean aerator screen."
+      ],
+      "sha256": "5d48967e20865fb19f1fe204fceb86bc810d4636128eb41731772ae98c271d32"
+    },
+    {
+      "file": "sprinkler-timer.md",
+      "verdict": "SUPERSEDED",
+      "rationale": "Same resolved brass-fitting saga, duplicated across files. Fold the canonical explanation into garden-hose-leak and leave a concise stub here that points to it; mark status: superseded.",
+      "index_line": "[Sprinkler timer](sprinkler-timer.md) — zone 3 dry = cracked brass fitting (same mode as the hose); canonical note is garden-hose-leak",
+      "frontmatter": {
+        "status": "superseded"
+      },
+      "body": "\nZone 3 ran dry because of a **cracked brass fitting at the zone-3 manifold** — the same age-failure mode as the far-spigot hose, not the timer program.\n\n**How to apply:** the brass-fitting failure pattern is now tracked canonically in [[garden-hose-leak]]; treat sudden flow loss as a fitting crack until proven otherwise.\n",
+      "changelog": [
+        "Initially reprogrammed the timer thinking the schedule was wrong — WRONG, schedule was fine.",
+        "Root cause = cracked brass manifold fitting; consolidated into [[garden-hose-leak]]."
+      ],
+      "sha256": "eb09a9dd493ddd3093bf05a39528882158f7117cf954e4d596ecee502a7b4d32"
+    },
+    {
+      "file": "old-mower-brand.md",
+      "verdict": "DEAD",
+      "rationale": "The GreenBlade 2200 was sold and replaced by a corded electric mower with no choke ritual; the fact no longer applies. Archive with a tombstone (never delete) and repair the inbound wikilink from hedge-trimmer-schedule.",
+      "archive": {
+        "reason": "GreenBlade 2200 sold 2026-06; replaced by corded electric mower (no choke ritual)."
+      },
+      "wikilink_repairs": [
+        {
+          "from": "old-mower-brand",
+          "to": "archive/old-mower-brand"
+        }
+      ],
+      "sha256": "c4e0249b90fc5699093dfac088c16cac106fe05aac439a7a596c695db71c9186"
+    }
+  ]
+}

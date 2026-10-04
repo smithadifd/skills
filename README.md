@@ -4,7 +4,7 @@ This repository contains reusable Claude Code skills for common tasks and agents
 
 ## Before you start
 
-You need Claude Code, `git`, and `bash`. Python 3 is required for `kickoff`, `sharpen`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
+You need Claude Code, `git`, and `bash`. Python 3 is required for `kickoff`, `memory-gardener`, `sharpen`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
 
 This is a private repository. If you've been invited as a collaborator, clone it using the URL provided with your access, then run the commands below from the clone:
 
@@ -20,6 +20,7 @@ cd skills
 | `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. |
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. |
 | `kickoff` | Turns an early project idea into a researched plan through questions and review points. |
+| `memory-gardener` | Reconciles a Claude memory directory. It reports stale, duplicated or oversized notes first, and only applies changes after you review the report. |
 | `pr` | Prepares a pull request for the current branch using the project's conventions. |
 | `review` | Checks code changes for bugs and security problems. |
 | `shape` | Tests a proposed design for risks and missing considerations before implementation. |
