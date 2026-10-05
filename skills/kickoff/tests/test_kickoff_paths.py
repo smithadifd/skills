@@ -141,6 +141,10 @@ def test_skill_invocation_uses_installed_path():
     assert "python3 ~/.claude/skills/kickoff/paths.py --slug <slug>" in skill, (
         "INSTALL-PATH: kickoff instructions must invoke the installed resolver"
     )
+    assert (
+        "When the hand-off ends in an accepted ADR, write its follow-ups in the same session"
+        in skill
+    ), "ACCEPTED-ADR: kickoff must write accepted ADR follow-ups in the same session"
 
 
 def test_kickoff_owns_no_config_file():

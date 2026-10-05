@@ -126,6 +126,9 @@ LITE
 1. Fill the **promote-or-park ledger**: every emitted work item gets exactly one
    disposition — a line actually added to a CHART-visible surface (`roadmaps/`), or an
    explicit dated `PARKED, not for CHART` stamp. No third state.
+   Every follow-up of an accepted ADR is dispositioned as a line added to a
+   `roadmaps/` file, never `PARKED`; only an item that still needs the user's
+   election stays gated, marked `AI-able: no`.
 2. Name the **close tier** in the file:
    - **LITE** — no emitted work, no live-system touches → this file update is the whole
      close. No mirror, no banner.

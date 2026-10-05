@@ -313,6 +313,10 @@ def test_skill_states_the_absent_notice_and_builtin_defaults():
         assert heading in text
     assert "throughput tier" in text
     assert "promote-or-park ledger at close" in text
+    assert (
+        "Every follow-up of an accepted ADR is dispositioned as a line added to a"
+        in text
+    ), "ACCEPTED-ADR: topic close must send every accepted ADR follow-up to roadmaps/"
 
 
 def test_resolves_without_shared_lib(tmp_path, monkeypatch):
