@@ -206,6 +206,10 @@ by `paths.py --slug <slug>` rather than spelling a home directory directly:
    does not exist, emit the resolver's one-line notice and start from the built-in
    write-up shape below instead. A missing template never blocks the session.
 
+When the hand-off ends in an accepted ADR, write its follow-ups in the same session
+as ticket-shaped items (Title / Target repo / Prompt / Size / AI-able) in a
+`roadmaps/` file.
+
 Write-up contents:
 
 ```markdown
