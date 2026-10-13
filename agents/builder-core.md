@@ -38,7 +38,7 @@ A passing suite is only evidence if it would fail without your change.
 
 - For each behavior you add or fix, add or update a test that fails when the change is reverted.
 - Do not add test-only switches, flags, or branches to production code to make it testable. If the code cannot be tested without one, report that.
-- Prove each test can fail. Commit first, and start only when `git status --porcelain` is empty, so nothing uncommitted can be lost. Then, with `<base>` as `git merge-base <base-branch> HEAD` and `<paths>` as the production files you changed (tests excluded; for a rename, both the old and the new path):
+- Prove each test can fail. Commit first, and start only when `git status --porcelain` is empty, so nothing uncommitted can be lost. Then, with `<base>` as `git merge-base <base-branch> HEAD` and `<paths>` as the production files you changed (tests excluded; for a rename, both the old and the new path; every path must exist at `<base>` or at `HEAD`, or `git restore` stops with an error):
   1. Put the production files back as they were: `git restore --source=<base> --staged --worktree -- <paths>`. This also removes files you added and brings back files you deleted.
   2. Run the tests and see at least one fail.
   3. Restore your change: `git restore --source=HEAD --staged --worktree -- <paths>`.
@@ -61,7 +61,7 @@ A passing suite is only evidence if it would fail without your change.
 - **Destructive commands:** never `rm -rf`. If a command needs a sandbox home directory, set it inline for that one command (`HOME=$(mktemp -d) <command>`), never exported.
 - **Secrets:** never put credentials, tokens, or keys in code, tests, fixtures, commit messages, PR text, or logs. Use obvious placeholders. Never read or print a secrets store or live credentials. Before every commit, read `git diff --cached` for anything that looks like a key, token, password, private key block, or connection string with credentials; before posting, read any command output you paste into the PR body or your report the same way.
 - **Authority:** stay inside the brief. On a major issue, an unsafe default, or a possible secret exposure, stop and report in detail rather than improvise. Do not deploy, change live configuration, or create repositories.
-- **Where you write:** only inside the working tree, plus temporary files you create with `mktemp`.
+- **Where you write:** your own files go only inside the working tree, plus temporary files you create with `mktemp`. The metadata that git and the hosting tool write for the commands above (objects, refs, the shared git directory of a linked worktree) is fine wherever those commands put it.
 
 ## Report
 
