@@ -42,6 +42,8 @@ REVIEW_SKILL_CLEAN = (FIXTURES / "review-skill-clean.md").read_text()
 CLAUDE_ISSUES_CLEAN = (FIXTURES / "claude-fresh-issues-clean.md").read_text()
 CLEAN_APPROVE = (FIXTURES / "clean-approve.md").read_text()
 NO_VERDICT = (FIXTURES / "no-verdict.md").read_text()
+CLAUDE_EVIDENCE = (FIXTURES / "claude-fresh-evidence.md").read_text()
+REVIEWER_AGENT = SKILL_DIR.parent.parent / "agents" / "reviewer.md"
 
 ENVELOPE_KEYS = ("repo/ref", "inputs", "constraints", "harness_root", "adapters", "budget")
 
@@ -277,6 +279,27 @@ def test_claude_adapter_parses_an_approve_block():
     verdict, findings = review_phase.parse_claude_fresh(CLAUDE_APPROVE)
     assert verdict == "approved"
     assert findings == []
+
+
+def test_claude_adapter_ignores_the_evidence_section():
+    # Evidence bullets carry `path:line` locators too; they record what the
+    # reviewer ran and must never be counted as findings.
+    verdict, findings = review_phase.parse_claude_fresh(CLAUDE_EVIDENCE)
+    assert verdict == "changes_requested"
+    assert [(f["rule"], f["line"]) for f in findings] == [("issue", 58), ("minor", 22)]
+    result = review_phase.run_phase(_envelope("claude-fresh", CLAUDE_EVIDENCE))
+    assert result["status"] == "success"
+    assert len(result["artifacts"]["findings.json"]["findings"]) == 2
+
+
+def test_claude_adapter_parses_the_reviewer_agent_documented_format():
+    if not REVIEWER_AGENT.is_file():
+        pytest.skip("reviewer agent is not beside this skill (installed copy)")
+    text = REVIEWER_AGENT.read_text()
+    block = re.search(r"## Output Format\n\n```\n(.*?)\n```", text, re.DOTALL)
+    assert block, "agents/reviewer.md has no fenced Output Format block"
+    _, findings = review_phase.parse_claude_fresh(block.group(1))
+    assert [f["rule"] for f in findings] == ["issue", "issue", "minor"]
 
 
 def test_claude_adapter_parses_the_review_skill_bullets():

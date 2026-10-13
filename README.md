@@ -39,7 +39,7 @@ cd skills
 | `doc-writer` | Writes a documentation page from a research brief. |
 | `planner` | Investigates a codebase and outlines the steps for a change. |
 | `researcher` | Answers a focused question about code or an external API. |
-| `reviewer` | Independently examines uncommitted changes for issues. |
+| `reviewer` | Independently reviews a change and checks that its tests would fail without it. |
 
 ## Install
 
