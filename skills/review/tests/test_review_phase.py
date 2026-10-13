@@ -300,6 +300,10 @@ def test_claude_adapter_parses_the_reviewer_agent_documented_format():
     assert block, "agents/reviewer.md has no fenced Output Format block"
     _, findings = review_phase.parse_claude_fresh(block.group(1))
     assert [f["rule"] for f in findings] == ["issue", "issue", "minor"]
+    assert [(f["file"], f["line"]) for f in findings[:2]] == [
+        ("path/to/file.js", 42),
+        ("path/to/other.js", 17),
+    ]
 
 
 def test_claude_adapter_parses_the_review_skill_bullets():
