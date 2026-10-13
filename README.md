@@ -33,6 +33,7 @@ cd skills
 | Agent | What it does |
 | --- | --- |
 | `api-contract-tracer` | Follows an API endpoint from its handler to its callers to find mismatched expectations. |
+| `builder-core` | Builds one ticket in its own branch, following the repo's conventions, and opens a draft pull request. |
 | `dependency-auditor` | Compares dependency versions across projects and flags differences. |
 | `doc-researcher` | Gathers code facts and examples for a documentation draft. |
 | `doc-verifier` | Checks specific documentation claims against the code. |
