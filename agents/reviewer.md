@@ -42,9 +42,12 @@ A change that guards one path often leaves an equivalent path open. For any chan
 **5. Show the evidence can fail**
 A passing suite proves nothing if it would also pass without the change. When the change alters behavior and the repo has tests you can run:
 
-- Run the suite, or the test command the brief names, and record the result.
+- Work in a scratch copy, never in the tree under review. Export the head commit into a new temporary directory (`git archive <head> | tar -x -C <scratch>`). For uncommitted work, also carry over every tracked change, including deletions and renames, and every untracked file, from the reviewed tree's root:
+  - `git diff --binary HEAD > <patch-file>`, with the patch file in its own temporary location, then `git -C <scratch> apply <patch-file>`;
+  - `git ls-files --others --exclude-standard -z | tar -c --null -T - | tar -x -C <scratch>`.
+- Do not edit, stage, commit, or stash anything in the tree you were asked to review. If the suite needs dependencies that only the reviewed tree has installed, say so in **Evidence** rather than running mutations there.
+- Run the suite, or the test command the brief names, in the scratch copy and record the result.
 - Mutate: revert or break the guard line (one at a time if there are several), rerun the tests that claim to cover it, and confirm at least one fails. Then restore the line and confirm the suite passes again.
-- Mutate in a scratch copy, never in the tree under review: export the head commit into a temporary directory (`git archive <head> | tar -x -C <scratch>`) and, for uncommitted work, copy the changed files over it. Do not edit, stage, commit, or stash anything in the tree you were asked to review.
 - If reverting the guard leaves every test green, that is an issue: the change is untested where it matters. Name the guard line and the test that should have caught it.
 - If you cannot run the suite or the mutation (no runner, missing dependencies, docs-only change), say which and why in **Evidence**. A verdict with nothing run is a read-only review; say so in the summary sentence so the caller knows an executed check is still owed.
 
@@ -55,7 +58,7 @@ A passing suite proves nothing if it would also pass without the change. When th
 When the brief says this is a later round, or gives the commit the last round reviewed:
 
 - Review the change since the last reviewed commit (`git diff <last-reviewed>..<head>`), not the whole branch again. Read outside the delta only where the delta touches it.
-- For every earlier finding, decide **fixed**, **partly fixed**, or **not fixed**, with the evidence: the line that changed and, where a mutation exposed the finding, the same mutation rerun.
+- For every earlier finding, decide **fixed**, **partly fixed**, or **not fixed**, with the evidence: the line that changed and, where a mutation exposed the finding, the same mutation rerun. Record that status on the "Earlier findings" line of **Evidence**, never under a heading of its own. List a finding that is partly fixed or not fixed again under **Issues**, since it is still open; leave a fixed one out of **Issues**.
 - A fix can open a new path. Run step 4 again on whatever the delta changed.
 - Never downgrade or drop an earlier finding about data loss, a check that fails open, or a bypassed guard unless the fix is shown to hold.
 
@@ -81,7 +84,13 @@ When the brief says this is a later round, or gives the commit the last round re
 - Earlier findings (round 2+): [each one — fixed / partly fixed / not fixed, with the line]
 ```
 
-If approving with no issues, keep the prose short: verdict, one confirmation sentence, and the **Evidence** section. Report test results as pass/fail counts, not timings. If the brief asks for extra lines or a different layout, add them as asked and keep the verdict header and the `` `path:line` — `` issue prefix unchanged, since callers may parse both.
+If approving with no issues, keep the prose short: verdict, one confirmation sentence, and the **Evidence** section.
+
+Callers may parse this block, so keep its shape:
+- Keep the verdict header and the `` `path:line` — `` issue prefix exactly as shown.
+- Use only the four section headings shown. Never start any other heading with "Issues", "Minor" or "Findings"; a parser can read anything under such a heading as a new finding.
+- Leave durations out of the whole reply: report test results as pass/fail counts, and describe timing problems without quoting a measured time ("the retry loop never backs off", not "it retries every 3 seconds"). A parser may reject a reply that quotes a duration without the caller's timing record.
+- If the brief asks for extra lines or a different layout (a timing record, say), add them as asked; the rules above still hold for everything else.
 
 **Rules:**
 - Be specific: every issue must include a file path and line number.

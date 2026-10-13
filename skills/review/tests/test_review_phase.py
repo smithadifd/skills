@@ -304,6 +304,10 @@ def test_claude_adapter_parses_the_reviewer_agent_documented_format():
         ("path/to/file.js", 42),
         ("path/to/other.js", 17),
     ]
+    # The documented shape carries no timing claim, so it never needs a
+    # caller's timing record to pass the phase.
+    result = review_phase.run_phase(_envelope("claude-fresh", block.group(1)))
+    assert result["status"] == "success"
 
 
 def test_claude_adapter_parses_the_review_skill_bullets():
