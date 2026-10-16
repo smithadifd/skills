@@ -478,3 +478,15 @@ def test_open_rejects_a_slug_that_leaves_the_topics_dir(slug):
         )
     finally:
         shutil.rmtree(home)
+
+
+def test_accepted_decision_followups_are_promoted_never_parked():
+    text = " ".join((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
+    assert (
+        "Every follow-up of an accepted decision" in text
+        and "is always promoted in the same session to a durable tracked surface, "
+        "never parked" in text
+    ), "accepted-decision follow-ups must be promoted in the same session, never parked"
+    assert "cannot turn this into a park" in text, (
+        "the convention document may pick the surface but not allow parking"
+    )

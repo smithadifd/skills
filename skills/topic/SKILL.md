@@ -128,6 +128,11 @@ LITE
    explicit dated `PARKED` stamp with the reason. No third state. An item that still
    needs the user's decision stays open and is marked as waiting on them rather than
    parked.
+   Every follow-up of an accepted decision (a decision record, a design choice the
+   user signed off on) is always promoted in the same session to a durable tracked
+   surface, never parked; only an item that still needs the user's own choice stays
+   open, marked as waiting on them. The convention document may choose which tracked
+   surface receives it, but it cannot turn this into a park.
 2. Name the **close tier** in the file:
    - **LITE** — no emitted work, no live-system touches → this file update is the whole
      close.
