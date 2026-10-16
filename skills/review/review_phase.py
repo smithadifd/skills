@@ -374,7 +374,10 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
 # Stricter than the claude-fresh patterns on purpose: a bare `VERDICT:` label,
 # a different token (`APPROVED`) or extra text on the line is not this agent's
 # block, so it does not count as the verdict line.
-_OMP_VERDICT_LINE = re.compile(r"## Verdict: (?:APPROVE|REQUEST CHANGES)[ \t]*")
+_OMP_VERDICT_LINE = re.compile(r"## Verdict: (APPROVE|REQUEST CHANGES)[ \t]*")
+# Any line that reads as a verdict heading, loosely. Each one must be the exact
+# line above, so a malformed second verdict cannot ride along with a good one.
+_OMP_VERDICT_LIKE = re.compile(r"\s*#+\s*\**\s*Verdict\**\s*:", re.IGNORECASE)
 
 
 def parse_omp(text: str) -> tuple[str, list[dict]]:
@@ -385,12 +388,36 @@ def parse_omp(text: str) -> tuple[str, list[dict]]:
     parse failure rather than an approval inferred from the rest of the text.
     """
     lines = text.splitlines()
-    if not any(_OMP_VERDICT_LINE.fullmatch(l) for l in lines):
+    exact = [m for m in (_OMP_VERDICT_LINE.fullmatch(l) for l in lines) if m]
+    if not exact:
         raise ParseError(
             "no verdict line in the omp reply: expected "
             "`## Verdict: APPROVE | REQUEST CHANGES`"
         )
-    return parse_claude_fresh(text)
+    if len(exact) > 1:
+        raise ParseError(
+            f"{len(exact)} verdict lines in the omp reply: expected exactly one "
+            "`## Verdict: APPROVE | REQUEST CHANGES`"
+        )
+    malformed = [
+        l for l in lines
+        if _OMP_VERDICT_LIKE.match(l) and not _OMP_VERDICT_LINE.fullmatch(l)
+    ]
+    if malformed:
+        raise ParseError(
+            "malformed verdict line in the omp reply: " + repr(malformed[0])
+        )
+    # The verdict comes from the exact line alone. The shared parser supplies
+    # the findings; if its looser patterns read a different verdict elsewhere
+    # in the reply, the reply contradicts itself and does not parse.
+    verdict = CHANGES_REQUESTED if exact[0].group(1) == "REQUEST CHANGES" else APPROVED
+    shared_verdict, findings = parse_claude_fresh(text)
+    if shared_verdict != verdict:
+        raise ParseError(
+            "conflicting verdict in the omp reply: the verdict line says "
+            f"{verdict}, other lines say {shared_verdict}"
+        )
+    return verdict, findings
 
 
 ADAPTERS = {

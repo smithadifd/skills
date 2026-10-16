@@ -267,6 +267,51 @@ def test_verdict_line_not_in_the_agent_shape_fails(verdict_line):
     assert result["artifacts"]["findings.json"] is None
 
 
+def test_conflicting_verdict_lines_fail_closed():
+    text = (
+        "## Verdict: REQUEST CHANGES\n"
+        "## Verdict: APPROVE because the later prose says so\n"
+    )
+    with pytest.raises(review_phase.ParseError):
+        review_phase.parse_omp(text)
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["artifacts"]["findings.json"] is None
+
+
+def test_two_identical_approve_lines_fail_closed():
+    text = "## Verdict: APPROVE\n\nLooks fine.\n\n## Verdict: APPROVE\n"
+    with pytest.raises(review_phase.ParseError, match="2 verdict lines"):
+        review_phase.parse_omp(text)
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["artifacts"]["findings.json"] is None
+
+
+def test_malformed_second_verdict_line_fails_closed():
+    text = "## Verdict: APPROVE\n\nLooks fine.\n\n## Verdict: APPROVED\n"
+    with pytest.raises(review_phase.ParseError, match="malformed verdict line"):
+        review_phase.parse_omp(text)
+
+
+def test_a_looser_verdict_elsewhere_that_disagrees_fails_closed():
+    text = "## Verdict: APPROVE\n\nVERDICT: REQUEST CHANGES\n"
+    with pytest.raises(review_phase.ParseError, match="conflicting verdict"):
+        review_phase.parse_omp(text)
+
+
+def test_exact_request_changes_line_yields_request_changes():
+    text = "## Verdict: REQUEST CHANGES\n\nThe limit is ignored.\n"
+    verdict, _ = review_phase.parse_omp(text)
+    assert verdict == review_phase.CHANGES_REQUESTED
+
+
+def test_exact_approve_line_yields_approve():
+    text = "## Verdict: APPROVE\n\nThe rename is complete.\n"
+    verdict, _ = review_phase.parse_omp(text)
+    assert verdict == review_phase.APPROVED
+
+
 # --- the fallback never rescues a failed omp parse ----------------------------
 
 
