@@ -36,15 +36,24 @@ Backends (one adapter each, chosen by the envelope's `inputs.backend`):
                    bullets (or its "No bugs or security issues found." line)
     grok-notools   `## FINDINGS` bullets (`none` when clean) + `## VERDICT`
                    `<cleared|flagged> — <sentence>`
+    omp            the reply of an `omp -p --model <id> --thinking=<level>`
+                   review: the reviewer agent's own `## Verdict:` block, which
+                   must carry an explicit verdict line. The envelope's
+                   `inputs.model` and `inputs.thinking` name the served model
+                   and thinking level; both are required, and the phase
+                   result carries them as `attribution` with the lane name
 
 The adapters normalise a return that a runner already obtained; dispatching
 the model (credentials, tools, pools) stays runner-owned, so an envelope
-whose `inputs` carry no `return_text` / `return_file` is `blocked`.
+whose `inputs` carry no `return_text` / `return_file` is `blocked`. The
+same holds for the omp model and thinking level: the runner chose them, so
+they arrive as envelope parameters and are only echoed back here.
 
 USAGE:
     python3 review_phase.py --envelope <envelope.json> [--out <result.json>]
     python3 review_phase.py --from-text <return.md> --backend <name>
                             [--target <what was reviewed>] [--out <result.json>]
+                            [--model <id> --thinking <level>]   (omp only)
     python3 review_phase.py --validate <findings.json>
 
 The envelope is a JSON object with exactly the six run-envelope keys
@@ -361,10 +370,50 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     return verdict, shaped
 
 
+def parse_omp(text: str) -> tuple[str, list[dict]]:
+    """An omp review reply: the reviewer agent's block, verdict line required.
+
+    The reviewer agent always writes `## Verdict: APPROVE | REQUEST CHANGES`,
+    so a reply without that line (empty, cut off, or some other shape) is a
+    parse failure rather than an approval inferred from the rest of the text.
+    """
+    lines = text.splitlines()
+    if not any(_CLAUDE_VERDICT_HEADING.match(l) or _CLAUDE_VERDICT_LABEL.match(l) for l in lines):
+        raise ParseError(
+            "no verdict line in the omp reply: expected "
+            "`## Verdict: APPROVE | REQUEST CHANGES`"
+        )
+    return parse_claude_fresh(text)
+
+
 ADAPTERS = {
     "claude-fresh": parse_claude_fresh,
     "grok-notools": parse_grok_notools,
+    "omp": parse_omp,
 }
+
+# Backends whose phase result names the lane and the served model. The values
+# are the envelope `inputs` keys that must carry them.
+OMP_LANE = "omp"
+OMP_PARAMETERS = ("model", "thinking")
+# A model id or thinking level as a command-line value: one token, no spaces.
+_OMP_PARAMETER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
+
+
+def omp_attribution(model: object, thinking: object) -> dict:
+    """The attribution an omp review carries, from the runner's own parameters.
+
+    Raises ValueError when either parameter is missing or not a single token;
+    nothing here supplies a default, so the record always names what the
+    runner actually asked for.
+    """
+    values = {"model": model, "thinking": thinking}
+    for name, value in values.items():
+        if not isinstance(value, str) or not _OMP_PARAMETER.match(value):
+            raise ValueError(
+                f"omp needs inputs.{name} as a single non-empty token, got {value!r}"
+            )
+    return {"lane": OMP_LANE, "model": model, "thinking": thinking}
 
 
 # --- the schema validator ----------------------------------------------------
@@ -577,6 +626,12 @@ def run_phase(envelope: object) -> dict:
             None,
             None,
         )
+    attribution = None
+    if backend == OMP_LANE:
+        try:
+            attribution = omp_attribution(*(inputs.get(k) for k in OMP_PARAMETERS))
+        except ValueError as exc:
+            return _result("blocked", str(exc), None, None)
     text = inputs.get("return_text")
     if text is None and inputs.get("return_file"):
         try:
@@ -591,6 +646,13 @@ def run_phase(envelope: object) -> dict:
             None,
             None,
         )
+    result = _parse_return(envelope, backend, text)
+    if attribution is not None:
+        result["attribution"] = attribution
+    return result
+
+
+def _parse_return(envelope: dict, backend: str, text: str) -> dict:
     selected = ADAPTERS[backend]
     try:
         verdict, findings = selected(text)
@@ -785,6 +847,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", choices=sorted(ADAPTERS), help="adapter for --from-text")
     parser.add_argument("--target", default="", help="what was reviewed, for --from-text")
     parser.add_argument("--out", metavar="FILE", help="also write the phase result here")
+    parser.add_argument("--model", help="for --backend omp: the model id the runner served")
+    parser.add_argument("--thinking", help="for --backend omp: the thinking level the runner set")
     args = parser.parse_args(argv)
 
     if args.validate:
@@ -812,6 +876,9 @@ def main(argv: list[str] | None = None) -> int:
             "adapters": {},
             "budget": {},
         }
+        if args.backend == OMP_LANE:
+            envelope["inputs"]["model"] = args.model
+            envelope["inputs"]["thinking"] = args.thinking
         return _emit(run_phase(envelope), args.out)
 
     try:
