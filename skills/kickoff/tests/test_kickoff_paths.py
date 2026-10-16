@@ -215,6 +215,31 @@ def test_shipped_public_files_name_no_private_vocabulary():
     assert not hits, "PUBLIC-TEXT: private vocabulary in shipped kickoff files:\n" + "\n".join(hits)
 
 
+def test_accepted_decision_followups_are_recorded_without_a_convention_file():
+    skill = " ".join((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
+    assert (
+        "the follow-up work it implies is written down before the session ends, "
+        "in the same session, in a durable place"
+    ) in skill, "FOLLOW-UPS: the same-session durable-record rule must be in the shipped text"
+    assert "This holds for every user, with or without a convention file." in skill, (
+        "FOLLOW-UPS: the rule must not depend on the optional convention file"
+    )
+    assert "but not whether they are recorded" in skill, (
+        "FOLLOW-UPS: a convention may change the destination, never waive recording"
+    )
+    assert "## Follow-ups" in skill, (
+        "FOLLOW-UPS: the write-up shape must carry a default Follow-ups section"
+    )
+
+
+def test_missing_reference_prose_exempts_the_silent_convention():
+    skill = " ".join((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
+    assert (
+        "Each missing optional reference except the topic convention is reported "
+        "on stderr in one line; an absent topic convention is silent."
+    ) in skill, "NOTICES: the playbook must exempt the topic convention from the notice sentence"
+
+
 def test_kickoff_owns_no_config_file():
     assert not (SKILL_DIR / "config.json").exists(), (
         "CONFIG-OWNERSHIP: kickoff must own no path config keys"

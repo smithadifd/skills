@@ -70,8 +70,9 @@ python3 ~/.claude/skills/kickoff/paths.py --slug <slug>
 
 The command loads `skills/topic/topics_dir.py` by path when that resolver is
 installed, follows its `topics_dir`, and derives the template, model-routing and
-convention paths through its `normative_paths()`. Each missing optional reference is reported
-on stderr in one line. `topic` is not required: when its resolver is absent,
+convention paths through its `normative_paths()`. Each missing optional reference except
+the topic convention is reported on stderr in one line; an absent topic convention is
+silent. `topic` is not required: when its resolver is absent,
 kickoff reports that once and falls back to `~/.claude/topics`.
 When topic is installed, kickoff inherits topic's path precedence: its override
 file `~/.claude/skill-config/topic.json`, then shipped config, then built-in defaults.
@@ -182,13 +183,23 @@ by `paths.py --slug <slug>` rather than spelling a home directory directly:
    it does not exist, emit the resolver's one-line notice and start from the built-in
    write-up shape below instead. A missing template never blocks the session.
 
+**Follow-ups are never parked.** When the user accepts a decision or direction during
+the session, the follow-up work it implies is written down before the session ends,
+in the same session, in a durable place: by default the write-up's "Follow-ups"
+section below, never only in chat. Every follow-up is a concrete, self-contained item
+(what to do, where, and how big), and none is left as an unrecorded intention. This
+holds for every user, with or without a convention file.
+
 **Local conventions.** When the file at the printed `topic_convention` path exists,
 read it before writing and follow whatever hand-off, follow-up and next-step
 conventions it states, in addition to the shape below. It is how a user routes
 kickoff output into their own planning process without that process being part of
-this skill. When it is absent, say nothing and use the built-in behaviour. It may add
-recommendations and consult preferences; it never lifts a rail in § Safety rails or
-waives a checkpoint.
+this skill. It may change where and in what format follow-ups are recorded, but not
+whether they are recorded. If it names a destination this skill's rails forbid
+writing to (such as an existing plan of record or a tracker entry), record the
+follow-ups in the write-up and tell the user the exact entries to copy there. When it
+is absent, say nothing and use the built-in behaviour. It may add recommendations and
+consult preferences; it never lifts a rail in § Safety rails or waives a checkpoint.
 
 Write-up contents:
 
@@ -213,6 +224,10 @@ Write-up contents:
 
 ## Open questions
 - <question> — <cheapest way to answer it>
+
+## Follow-ups
+- <one concrete item per accepted decision: what to do, where, rough size — or
+  "None — no decision was accepted this session">
 
 ## Recommended next step
 - <sharpen a portion still unclear / shape the chosen direction / start building
