@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Resolve kickoff's output directory and optional references."""
+"""Resolve kickoff's output directory and optional references.
+
+The topic convention file is an optional, silent read: no notice is printed
+when it is absent."""
 
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ class KickoffPaths:
     topics_dir: Path
     topic_template: Path
     model_routing_standard: Path
+    topic_convention: Path
 
     def topic_path(self, slug: str) -> Path:
         return self.topics_dir / f"{slug}.md"
@@ -44,6 +48,7 @@ def resolve() -> KickoffPaths:
         return KickoffPaths(
             topics_dir=topics_dir,
             topic_template=topics_dir / "TEMPLATE.md",
+            topic_convention=topics_dir / "README.md",
             model_routing_standard=Path(
                 FALLBACK_MODEL_ROUTING_STANDARD
             ).expanduser(),
@@ -55,6 +60,7 @@ def resolve() -> KickoffPaths:
     return KickoffPaths(
         topics_dir=topics_dir,
         topic_template=normative["template"],
+        topic_convention=normative["convention"],
         model_routing_standard=normative["model_routing"],
     )
 
@@ -93,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         "topics_dir": str(paths.topics_dir),
         "topic_template": str(paths.topic_template),
         "model_routing_standard": str(paths.model_routing_standard),
+        "topic_convention": str(paths.topic_convention),
     }
     if args.slug:
         payload["topic_path"] = str(paths.topic_path(args.slug))
