@@ -233,8 +233,17 @@ check_agent_unknown() {
   printf 'PASS: unknown agent name was rejected\n'
 }
 
+# Print the lines between a start and stop heading, skipping fenced blocks.
+reviewer_section() {
+  START="$2" STOP="$3" awk '
+    f && $0 ~ ENVIRON["STOP"] {f=0}
+    f && /^```/ {fence=!fence; next}
+    f && !fence {print}
+    !f && $0 ~ ENVIRON["START"] {f=1; fence=0}' "$1"
+}
+
 check_reviewer_axes() {
-  local home file section numbered expected line
+  local home file section evidence rules numbered expected line
   local pass_line spec_line std_line scope_line mutation_line docs_line routing_line
   pass_line='Review in two passes, in this order:'
   spec_line='1. **Spec compliance first.** Does the change do what was asked? Check it against the ticket'"'"'s acceptance criteria or the change'"'"'s stated requirements, and name any requirement the diff misses or contradicts.'
@@ -249,13 +258,21 @@ check_reviewer_axes() {
   file="$home/.claude/agents/reviewer.md"
   [ -s "$file" ] || fail "installed reviewer is missing or empty: $file"
 
-  for line in "$pass_line" "$spec_line" "$std_line" "$scope_line" "$mutation_line" "$docs_line" "$routing_line"; do
-    [ "$(grep -F -x -c -- "$line" "$file")" -eq 1 ] || fail "installed reviewer lacks this exact line: $line"
-  done
-
-  section=$(awk '/^\*\*3\. Review systematically\*\*$/{f=1;next} /^\*\*4\. /{f=0} f' "$file")
+  # Each normative line counts only inside its owning section and outside
+  # fenced code blocks, so a rule moved into the output example fails.
+  section=$(reviewer_section "$file" '^\*\*3\. Review systematically\*\*$' '^\*\*4\. ')
+  evidence=$(reviewer_section "$file" '^\*\*5\. Show the evidence can fail\*\*$' '^\*\*6\. ')
+  rules=$(reviewer_section "$file" '^\*\*Rules:\*\*$' '^$never-matches')
   [ -n "$section" ] || fail "installed reviewer lacks the Review systematically section"
-  [ "$(printf '%s\n' "$section" | grep -F -x -c -- "$pass_line")" -eq 1 ] || fail "the two-pass line is not under Review systematically"
+  [ -n "$evidence" ] || fail "installed reviewer lacks the evidence step"
+  [ -n "$rules" ] || fail "installed reviewer lacks the Rules list"
+  for line in "$pass_line" "$spec_line" "$std_line"; do
+    [ "$(printf '%s\n' "$section" | grep -F -x -c -- "$line")" -eq 1 ] || fail "Review systematically lacks this exact line outside code fences: $line"
+  done
+  for line in "$mutation_line" "$docs_line" "$routing_line"; do
+    [ "$(printf '%s\n' "$evidence" | grep -F -x -c -- "$line")" -eq 1 ] || fail "the evidence step lacks this exact line outside code fences: $line"
+  done
+  [ "$(printf '%s\n' "$rules" | grep -F -x -c -- "$scope_line")" -eq 1 ] || fail "the Rules list lacks this exact line outside code fences: $scope_line"
   numbered=$(printf '%s\n' "$section" | grep -E '^[0-9]+\. ' || true)
   expected=$(printf '%s\n%s' "$spec_line" "$std_line")
   [ "$numbered" = "$expected" ] || fail "Review systematically does not list spec compliance first, then standards second, as its numbered passes"
