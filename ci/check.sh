@@ -233,6 +233,22 @@ check_agent_unknown() {
   printf 'PASS: unknown agent name was rejected\n'
 }
 
+check_reviewer_axes() {
+  local file spec_line std_line
+  file="$repo_dir/agents/reviewer.md"
+  [ -f "$file" ] || fail "reviewer agent is missing: agents/reviewer.md"
+  grep -F -q '**Spec compliance first.**' "$file" || fail "reviewer lacks the spec-compliance-first axis"
+  grep -F -q '**Standards second.**' "$file" || fail "reviewer lacks the standards-second axis"
+  spec_line=$(grep -F -n '**Spec compliance first.**' "$file" | head -n 1 | cut -d: -f1)
+  std_line=$(grep -F -n '**Standards second.**' "$file" | head -n 1 | cut -d: -f1)
+  ((spec_line < std_line)) || fail "reviewer lists the standards axis before the spec axis"
+  grep -F -q 'report only correctness and requirement gaps' "$file" || fail "reviewer lacks the correctness-and-requirement-gaps scope rule"
+  grep -F -q 'Round 1 of a code change runs a targeted mutation' "$file" || fail "reviewer lacks the round-1 mutation rule"
+  grep -F -q 'so the caller can route the mutation to a lane that can execute' "$file" || fail "reviewer lacks the cannot-execute routing rule"
+  grep -F -q 'Docs-only changes are exempt from the mutation as a rule' "$file" || fail "reviewer lacks the docs-only exemption"
+  printf 'PASS: reviewer states spec-then-standards axes, scope, round-1 mutation and docs exemption\n'
+}
+
 case ${1-} in
   install-all) check_install_all ;;
   install-one) check_install_one ;;
@@ -244,6 +260,7 @@ case ${1-} in
   uninstall-agents) check_uninstall_agents ;;
   agent-traversal) check_agent_traversal ;;
   agent-unknown) check_agent_unknown ;;
+  reviewer-axes) check_reviewer_axes ;;
   '')
     check_install_all
     check_install_one
@@ -254,6 +271,7 @@ case ${1-} in
     check_uninstall_agents
     check_agent_traversal
     check_agent_unknown
+    check_reviewer_axes
     ;;
   *)
     printf 'Unknown check: %s\n' "$1" >&2
