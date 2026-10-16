@@ -15,10 +15,10 @@ PATHS_PATH = SKILL_DIR / "paths.py"
 SKILL_DOC = SKILL_DIR / "SKILL.md"
 
 SOURCE_KEYS = {
-    "delegation_loop_standard": ("standards", "delegation-loop.md"),
-    "calibration_sot": ("roadmaps", "calibration.md"),
-    "sot_path": ("roadmaps", "wave-current.md"),
-    "model_routing_standard": ("standards", "model-routing.md"),
+    "process_standard": ("standards", "process.md"),
+    "direction_record": ("roadmaps", "direction.md"),
+    "routing_context": ("roadmaps", "routing-context.md"),
+    "model_guidance": ("standards", "model-guidance.md"),
 }
 
 
@@ -27,8 +27,8 @@ def test_documented_resolver_path_targets_standalone_install():
     assert "python3 ~/.claude/skills/sharpen/paths.py" in text, (
         "the resolver command must target install.sh's standalone destination"
     )
-    assert "~/private-sibling-repo/" not in text, (
-        "standalone instructions must not depend on a toolkit checkout"
+    assert "~/neighbor-project/" not in text, (
+        "standalone instructions must not depend on a project checkout"
     )
 
 
@@ -113,7 +113,7 @@ def test_standalone_clean_home_uses_claude_defaults_and_four_notices(tmp_path):
         assert sum(f"optional source {key} unavailable" in line for line in notices) == 1, (
             f"optional source {key} must emit one one-line notice"
         )
-    assert not (home / "private-sibling-repo").exists(), (
+    assert not (home / "neighbor-project").exists(), (
         "standalone clean-home execution must not touch a private sibling directory"
     )
 
@@ -132,8 +132,8 @@ from types import SimpleNamespace
 
 def resolve(config, cwd=None):
     return SimpleNamespace(
-        roadmaps=Path.home() / "private-sibling-repo" / "roadmaps",
-        standards=Path.home() / "private-sibling-repo" / "standards",
+        roadmaps=Path.home() / "neighbor-project" / "roadmaps",
+        standards=Path.home() / "neighbor-project" / "standards",
     )
 
 
@@ -163,7 +163,7 @@ def test_per_skill_override_merges_over_shipped_config(tmp_path):
     roadmaps = tmp_path / "override-roadmaps"
     standards = tmp_path / "override-standards"
     shipped = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    shipped["calibration_sot"] = "shipped-calibration.md"
+    shipped["direction_record"] = "shipped-direction.md"
     script = _copy_standalone(tmp_path, json.dumps(shipped))
     override = home / ".claude" / "skill-config" / "sharpen.json"
     override.parent.mkdir(parents=True)
@@ -174,16 +174,16 @@ def test_per_skill_override_merges_over_shipped_config(tmp_path):
                     "roadmaps": str(roadmaps),
                     "standards": str(standards),
                 },
-                "sot_path": "nested/wave-current.md",
+                "routing_context": "nested/routing-context.md",
             }
         ),
         encoding="utf-8",
     )
     for path in (
-        standards / "delegation-loop.md",
-        roadmaps / "shipped-calibration.md",
-        roadmaps / "nested" / "wave-current.md",
-        standards / "model-routing.md",
+        standards / "process.md",
+        roadmaps / "shipped-direction.md",
+        roadmaps / "nested" / "routing-context.md",
+        standards / "model-guidance.md",
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("available\n", encoding="utf-8")
@@ -193,10 +193,10 @@ def test_per_skill_override_merges_over_shipped_config(tmp_path):
 
     assert Path(actual["roadmaps"]) == roadmaps
     assert Path(actual["standards"]) == standards
-    assert Path(actual["sot_path"]) == roadmaps / "nested" / "wave-current.md", (
+    assert Path(actual["routing_context"]) == roadmaps / "nested" / "routing-context.md", (
         "a relative override source must join the overridden directory"
     )
-    assert Path(actual["calibration_sot"]) == roadmaps / "shipped-calibration.md", (
+    assert Path(actual["direction_record"]) == roadmaps / "shipped-direction.md", (
         "an unspecified shipped key must survive the override merge"
     )
     assert result.stderr == ""
@@ -274,7 +274,7 @@ def test_non_object_harness_root_override_degrades_once(tmp_path):
 
     assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
     assert Path(actual["standards"]) == home / ".claude" / "standards"
-    assert Path(actual["sot_path"]) == home / ".claude" / "roadmaps" / "wave-current.md"
+    assert Path(actual["routing_context"]) == home / ".claude" / "roadmaps" / "routing-context.md"
     assert result.stderr.splitlines() == [
         f"config_path: override {override} has a value of the wrong type — ignoring it"
     ], "a non-object harness_root override must emit exactly one degradation line"
@@ -298,7 +298,7 @@ def test_non_boolean_brief_commit_override_degrades_once(tmp_path):
 
     assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
     assert Path(actual["standards"]) == home / ".claude" / "standards"
-    assert Path(actual["sot_path"]) == home / ".claude" / "roadmaps" / "wave-current.md"
+    assert Path(actual["routing_context"]) == home / ".claude" / "roadmaps" / "routing-context.md"
     assert result.stderr.splitlines() == [
         f"config_path: override {override} has a value of the wrong type — ignoring it"
     ], "a non-boolean brief_commit override must emit exactly one degradation line"
@@ -311,7 +311,7 @@ def test_non_string_source_override_degrades_once(tmp_path):
     script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
     override = home / ".claude" / "skill-config" / "sharpen.json"
     override.parent.mkdir(parents=True)
-    override.write_text(json.dumps({"sot_path": 5}), encoding="utf-8")
+    override.write_text(json.dumps({"routing_context": 5}), encoding="utf-8")
 
     result = _run_paths(script, home=home, cwd=tmp_path)
     actual = _resolved_output(
@@ -320,7 +320,7 @@ def test_non_string_source_override_degrades_once(tmp_path):
 
     assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
     assert Path(actual["standards"]) == home / ".claude" / "standards"
-    assert Path(actual["sot_path"]) == home / ".claude" / "roadmaps" / "wave-current.md"
+    assert Path(actual["routing_context"]) == home / ".claude" / "roadmaps" / "routing-context.md"
     assert result.stderr.splitlines() == [
         f"config_path: override {override} has a value of the wrong type — ignoring it"
     ], "a non-string source override must emit exactly one degradation line"
@@ -365,7 +365,7 @@ def test_empty_source_value_uses_its_documented_default(tmp_path):
     _create_default_sources(home)
     script = _copy_standalone(
         tmp_path,
-        json.dumps({"calibration_sot": ""}),
+        json.dumps({"direction_record": ""}),
     )
 
     result = _run_paths(script, home=home, cwd=tmp_path)
@@ -374,23 +374,23 @@ def test_empty_source_value_uses_its_documented_default(tmp_path):
         "an empty source value must use its documented default",
     )
 
-    assert Path(actual["calibration_sot"]) == (
-        home / ".claude" / "roadmaps" / "calibration.md"
+    assert Path(actual["direction_record"]) == (
+        home / ".claude" / "roadmaps" / "direction.md"
     ), "an explicit empty source value must retain the existing fallback behavior"
 
 
 def test_absolute_source_value_stays_explicit(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    source = tmp_path / "explicit" / "wave-current.md"
+    source = tmp_path / "explicit" / "routing-context.md"
     source.parent.mkdir()
     source.write_text("available\n", encoding="utf-8")
-    script = _copy_standalone(tmp_path, json.dumps({"sot_path": str(source)}))
+    script = _copy_standalone(tmp_path, json.dumps({"routing_context": str(source)}))
 
     result = _run_paths(script, home=home, cwd=tmp_path)
     actual = _resolved_output(result, "an absolute source value must stay explicit")
 
-    assert Path(actual["sot_path"]) == source, (
+    assert Path(actual["routing_context"]) == source, (
         "an absolute source value must not join the configured roadmaps directory"
     )
 
@@ -398,15 +398,15 @@ def test_absolute_source_value_stays_explicit(tmp_path):
 def test_tilde_prefixed_source_value_stays_explicit_under_home(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    source = home / "ro" / "wave-current.md"
+    source = home / "ro" / "routing-context.md"
     source.parent.mkdir()
     source.write_text("available\n", encoding="utf-8")
-    script = _copy_standalone(tmp_path, json.dumps({"sot_path": "~/" + "ro/wave-current.md"}))
+    script = _copy_standalone(tmp_path, json.dumps({"routing_context": "~/" + "ro/routing-context.md"}))
 
     result = _run_paths(script, home=home, cwd=tmp_path)
     actual = _resolved_output(result, "a tilde-prefixed source value must stay explicit")
 
-    assert Path(actual["sot_path"]) == source, (
+    assert Path(actual["routing_context"]) == source, (
         "a tilde-prefixed source value must expand under HOME instead of joining roadmaps"
     )
 
@@ -415,7 +415,7 @@ def test_relative_source_value_joins_its_configured_directory(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     roadmaps = tmp_path / "configured-roadmaps"
-    source = roadmaps / "nested" / "wave-current.md"
+    source = roadmaps / "nested" / "routing-context.md"
     source.parent.mkdir(parents=True)
     source.write_text("available\n", encoding="utf-8")
     script = _copy_standalone(
@@ -423,7 +423,7 @@ def test_relative_source_value_joins_its_configured_directory(tmp_path):
         json.dumps(
             {
                 "harness_root": {"roadmaps": str(roadmaps)},
-                "sot_path": "nested/wave-current.md",
+                "routing_context": "nested/routing-context.md",
             }
         ),
     )
@@ -431,7 +431,7 @@ def test_relative_source_value_joins_its_configured_directory(tmp_path):
     result = _run_paths(script, home=home, cwd=tmp_path)
     actual = _resolved_output(result, "a relative source value must join roadmaps")
 
-    assert Path(actual["sot_path"]) == source, (
+    assert Path(actual["routing_context"]) == source, (
         "a relative source value must join its configured source directory"
     )
 
@@ -444,7 +444,7 @@ def test_standalone_undecodable_optional_source_degrades_alone(tmp_path):
         source = tmp_path / f"{key}.md"
         source.write_text("available\n", encoding="utf-8")
         sources[key] = str(source)
-    undecodable = Path(sources["delegation_loop_standard"])
+    undecodable = Path(sources["process_standard"])
     undecodable.write_bytes(b"\xff\xfe\x00\x00")
     script = _copy_standalone(tmp_path, json.dumps(sources))
 
@@ -455,7 +455,7 @@ def test_standalone_undecodable_optional_source_degrades_alone(tmp_path):
     )
 
     expected_notice = (
-        "sharpen: optional source delegation_loop_standard unavailable at "
+        "sharpen: optional source process_standard unavailable at "
         f"{undecodable}; continuing with the built-in default."
     )
     assert result.stderr.splitlines() == [expected_notice], (
@@ -855,3 +855,89 @@ def test_non_string_configured_resolver_is_ignored_once(tmp_path):
         "config_path: 'harness_root.resolver' is a int, not a string "
         "(7) — ignoring it; the default applies instead"
     ]
+
+
+# Private vocabulary that must not appear in the shipped public files. Terms are
+# assembled from fragments so this file does not itself contain them verbatim.
+_PRIVATE_PATTERNS = {
+    "planning-loop stage": r"\bCHA" + r"RT\b",
+    "planning-loop skill": r"chart" + r"-wa" + r"ve",
+    "batch term": r"(?i)\bwa" + r"ve\b",
+    "source-of-truth abbreviation": r"(?i)(?<![a-z])s" + r"ot(?![a-z])",
+    "executor stage": r"\bRO" + r"LL\b",
+    "record grammar": r"contract" + r": v3",
+    "private project name": r"(?i)foun" + r"dry",
+    "private toolkit name": r"(?i)claude[-_]tool" + r"kit",
+    "personal name": r"\bAnd" + r"rew\b",
+    "unshipped skill": r"\borches" + r"trate\b|session-hand" + r"off",
+}
+_PUBLIC_FILES = (
+    SKILL_DOC,
+    CONFIG_PATH,
+    PATHS_PATH,
+    Path(__file__).resolve(),
+)
+
+
+def test_public_files_carry_no_private_vocabulary():
+    # No allowlist: every shipped file, this test included, must be clean.
+    import re
+
+    for path in _PUBLIC_FILES:
+        text = path.read_text(encoding="utf-8")
+        for label, pattern in _PRIVATE_PATTERNS.items():
+            match = re.search(pattern, text)
+            assert match is None, (
+                f"{path.name} contains private vocabulary ({label}): {match.group(0)!r}"
+            )
+
+
+def test_install_specific_routing_flows_through_the_override(tmp_path):
+    # An install keeps its own routing documents under names of its choosing and
+    # points the shipped source keys at them from the per-skill override file.
+    home = tmp_path / "home"
+    home.mkdir()
+    roadmaps = tmp_path / "install-roadmaps"
+    standards = tmp_path / "install-standards"
+    chosen = {
+        "process_standard": standards / "install-process.md",
+        "direction_record": roadmaps / "install-direction.md",
+        "routing_context": roadmaps / "install-context.md",
+        "model_guidance": standards / "install-models.md",
+    }
+    for path in chosen.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("available\n", encoding="utf-8")
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(
+        json.dumps(
+            {
+                "harness_root": {
+                    "roadmaps": str(roadmaps),
+                    "standards": str(standards),
+                },
+                **{key: path.name for key, path in chosen.items()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "override-routed sources must resolve")
+
+    for key, path in chosen.items():
+        assert Path(actual[key]) == path, (
+            f"{key} must follow the override filename into its configured directory"
+        )
+    assert result.stderr == "", "present override-routed sources must emit no notice"
+
+
+def test_skill_text_reads_install_routing_only_when_present():
+    text = SKILL_DOC.read_text(encoding="utf-8")
+    for key in SOURCE_KEYS:
+        assert f"`{key}`" in text, f"SKILL.md must document the optional {key} source"
+    assert "only when it is present" in " ".join(text.split()), (
+        "SKILL.md must state that install-specific documents are read only when present"
+    )

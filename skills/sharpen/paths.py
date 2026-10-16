@@ -18,10 +18,10 @@ OVERRIDE_PATH = "~/.claude/skill-config/sharpen.json"
 DEFAULT_ROADMAPS = "~/.claude/roadmaps"
 DEFAULT_STANDARDS = "~/.claude/standards"
 SOURCE_DEFAULTS = {
-    "delegation_loop_standard": ("standards", "delegation-loop.md"),
-    "calibration_sot": ("roadmaps", "calibration.md"),
-    "sot_path": ("roadmaps", "wave-current.md"),
-    "model_routing_standard": ("standards", "model-routing.md"),
+    "process_standard": ("standards", "process.md"),
+    "direction_record": ("roadmaps", "direction.md"),
+    "routing_context": ("roadmaps", "routing-context.md"),
+    "model_guidance": ("standards", "model-guidance.md"),
 }
 
 
@@ -54,10 +54,10 @@ def _load_config(config_path: Path) -> Mapping[str, Any]:
 _STRING_OVERRIDE_KEYS = frozenset(
     {
         "brief_filename_pattern",
-        "delegation_loop_standard",
-        "calibration_sot",
-        "sot_path",
-        "model_routing_standard",
+        "process_standard",
+        "direction_record",
+        "routing_context",
+        "model_guidance",
         "_notes",
     }
 )
