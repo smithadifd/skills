@@ -857,6 +857,77 @@ def test_non_string_configured_resolver_is_ignored_once(tmp_path):
     ]
 
 
+# Old source key names, assembled from fragments (see the vocabulary scan below).
+_OLD_KEYS = {
+    "delegation_loop" + "_standard": "process_standard",
+    "calibration" + "_s" + "ot": "direction_record",
+    "s" + "ot" + "_path": "routing_context",
+    "model_routing" + "_standard": "model_guidance",
+}
+
+
+def _old_key_setup(tmp_path, override_data):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(json.dumps(override_data), encoding="utf-8")
+    for value in override_data.values():
+        for subdir in ("roadmaps", "standards"):
+            (home / ".claude" / subdir / value).write_text("custom\n", encoding="utf-8")
+    return home, script, override
+
+
+def test_old_key_override_resolves_and_prints_one_notice_per_key(tmp_path):
+    data = {old: f"custom-{new}.md" for old, new in _OLD_KEYS.items()}
+    home, script, override = _old_key_setup(tmp_path, data)
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "old-key override must still resolve")
+
+    for old, new in _OLD_KEYS.items():
+        subdir = SOURCE_KEYS[new][0]
+        assert Path(actual[new]) == home / ".claude" / subdir / f"custom-{new}.md", (
+            f"old key {old!r} must act as an alias of {new!r}"
+        )
+    assert sorted(result.stderr.splitlines()) == sorted(
+        f"config_path: override {override} uses the old key {old!r}; "
+        f"use {new!r} instead"
+        for old, new in _OLD_KEYS.items()
+    ), "each old key must produce exactly one notice naming its replacement"
+
+
+def test_override_setting_old_and_new_key_is_refused(tmp_path):
+    ((old, new), *_) = _OLD_KEYS.items()
+    data = {old: "old-choice.md", new: "new-choice.md"}
+    home, script, override = _old_key_setup(tmp_path, data)
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "a conflicting override must be refused")
+
+    assert Path(actual[new]) == home / ".claude" / SOURCE_KEYS[new][0] / SOURCE_KEYS[new][1], (
+        "a refused override must leave the shipped default in place"
+    )
+    assert result.stderr.splitlines() == [
+        f"config_path: override {override} sets both {old!r} and {new!r} — "
+        f"ignoring it; keep only {new!r}"
+    ], "a refused override must emit exactly one line naming both keys"
+
+
+def test_new_key_override_prints_no_notice(tmp_path):
+    data = {new: f"custom-{new}.md" for new in _OLD_KEYS.values()}
+    home, script, _ = _old_key_setup(tmp_path, data)
+
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "new-key override must resolve")
+
+    for new in _OLD_KEYS.values():
+        assert Path(actual[new]) == home / ".claude" / SOURCE_KEYS[new][0] / f"custom-{new}.md"
+    assert result.stderr == "", "new-key overrides must not print a notice"
+
+
 # Private vocabulary that must not appear in the shipped public files. Terms are
 # assembled from fragments so this file does not itself contain them verbatim.
 _PRIVATE_PATTERNS = {
