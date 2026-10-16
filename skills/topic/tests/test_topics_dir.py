@@ -1,8 +1,7 @@
 """topics_dir suite — config-read boundary, plus the unset-default and
 optional-read seams.
 
-Seam (declared per `skills/orchestrate/references/codebase-design.md` §
-The terms):
+Seams under test:
 
   S1  topics-dir resolution   `resolve(config_path) -> Path`. THE
       observable: the topics directory File-resolution step 2/3 points at.
@@ -15,7 +14,7 @@ The terms):
   S4  clean HOME              `HARNESS_ROOT` unset, `HOME` a fresh temp
       directory, no topics key: the write lands under `~/.claude/topics`,
       absent reads degrade with the one-line notice, and no path component
-      is the harness directory name.
+      is an unrelated workspace directory name.
 
 Not tautological: expected directories are literal strings in this file,
 never `topics_dir.DEFAULT_TOPICS_DIR` compared to itself.
@@ -24,6 +23,7 @@ never `topics_dir.DEFAULT_TOPICS_DIR` compared to itself.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,7 +41,7 @@ _spec.loader.exec_module(topics_dir)
 
 UNSET = Path("~/.claude/topics").expanduser()
 NOTICE_BODY = "is absent — continuing with the built-in default stated in SKILL.md"
-HARNESS_DIR = "foundry"
+UNRELATED_DIR = "sample-workspace"
 
 
 def _notice(path: Path) -> str:
@@ -182,14 +182,14 @@ def test_unset_default_when_key_is_an_object(tmp_path):
     assert topics_dir.resolve(config_file) == UNSET
 
 
-def test_unset_write_default_is_under_claude_not_harness_dir(tmp_path, monkeypatch):
+def test_unset_write_default_is_under_claude_not_unrelated_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("HARNESS_ROOT", raising=False)
     resolved = topics_dir.resolve(tmp_path / "missing.json")
     assert resolved == tmp_path / ".claude" / "topics", (
         "unset write default must live under ~/.claude/topics"
     )
-    assert HARNESS_DIR not in resolved.parts, (
+    assert UNRELATED_DIR not in resolved.parts, (
         "unset write default must live under ~/.claude/topics"
     )
 
@@ -219,7 +219,9 @@ def test_standalone_install_paths_are_documented():
     installed_path = "~/.claude/skills/topic/topics_dir.py"
     for filename in ("SKILL.md", "topics_dir.py", "config.json"):
         text = (SKILL_DIR / filename).read_text(encoding="utf-8")
-        assert "~/claude-toolkit/" not in text
+        assert re.findall(r"~/(?!\.claude)\S+", text) == [], (
+            "only ~/.claude paths may appear"
+        )
         assert installed_path in text
     resolver_text = (SKILL_DIR / "topics_dir.py").read_text(encoding="utf-8")
     assert "This standalone config leaves the key unset" in resolver_text
@@ -266,7 +268,7 @@ def test_open_uses_builtin_skeleton_when_template_absent(tmp_path, monkeypatch):
     assert len(result.notices) == 3
     for notice in result.notices:
         assert notice.endswith(NOTICE_BODY)
-        assert HARNESS_DIR not in Path(notice.split(" ", 1)[-1]).parts
+        assert UNRELATED_DIR not in Path(notice.split(" ", 1)[-1]).parts
 
 
 def test_open_does_not_overwrite_existing_topic(tmp_path, monkeypatch):
@@ -311,12 +313,10 @@ def test_skill_states_the_absent_notice_and_builtin_defaults():
         "## Close tier",
     ):
         assert heading in text
-    assert "throughput tier" in text
-    assert "promote-or-park ledger at close" in text
-    assert (
-        "Every follow-up of an accepted ADR is dispositioned as a line added to a"
-        in text
-    ), "ACCEPTED-ADR: topic close must send every accepted ADR follow-up to roadmaps/"
+    assert "session's own model" in text
+    assert "promote-or-park ledger" in text
+    assert "No third state." in text
+    assert "marked as waiting on them" in text
 
 
 def test_resolves_without_shared_lib(tmp_path, monkeypatch):
@@ -382,11 +382,11 @@ def test_clean_home_writes_under_claude_and_degrades_absent_reads():
             )
             assert "\n" not in line
         blob = proc.stdout + proc.stderr
-        assert HARNESS_DIR not in blob.split(os.sep)
-        assert not (home / HARNESS_DIR).exists()
+        assert UNRELATED_DIR not in blob.split(os.sep)
+        assert not (home / UNRELATED_DIR).exists()
         for path in home.rglob("*"):
-            assert HARNESS_DIR not in path.parts, (
-                "clean HOME must not touch a path under the harness directory"
+            assert UNRELATED_DIR not in path.parts, (
+                "clean HOME must not touch a path under an unrelated workspace directory"
             )
     finally:
         shutil.rmtree(home)
