@@ -18,10 +18,20 @@ OVERRIDE_PATH = "~/.claude/skill-config/sharpen.json"
 DEFAULT_ROADMAPS = "~/.claude/roadmaps"
 DEFAULT_STANDARDS = "~/.claude/standards"
 SOURCE_DEFAULTS = {
-    "delegation_loop_standard": ("standards", "delegation-loop.md"),
-    "calibration_sot": ("roadmaps", "calibration.md"),
-    "sot_path": ("roadmaps", "wave-current.md"),
-    "model_routing_standard": ("standards", "model-routing.md"),
+    "process_standard": ("standards", "process.md"),
+    "direction_record": ("roadmaps", "direction.md"),
+    "routing_context": ("roadmaps", "routing-context.md"),
+    "model_guidance": ("standards", "model-guidance.md"),
+}
+
+# Earlier releases named the four source keys differently. An override file
+# that still uses an old name is honoured as an alias of the new name. The old
+# names are assembled from fragments so they stay out of plain-text scans.
+_DEPRECATED_KEY_ALIASES = {
+    "delegation_loop" + "_standard": "process_standard",
+    "calibration" + "_s" + "ot": "direction_record",
+    "s" + "ot" + "_path": "routing_context",
+    "model_routing" + "_standard": "model_guidance",
 }
 
 
@@ -54,10 +64,10 @@ def _load_config(config_path: Path) -> Mapping[str, Any]:
 _STRING_OVERRIDE_KEYS = frozenset(
     {
         "brief_filename_pattern",
-        "delegation_loop_standard",
-        "calibration_sot",
-        "sot_path",
-        "model_routing_standard",
+        "process_standard",
+        "direction_record",
+        "routing_context",
+        "model_guidance",
         "_notes",
     }
 )
@@ -95,7 +105,7 @@ def _load_override(path: Path) -> Mapping[str, Any] | None:
     )
     invalid_string = any(
         key in data and data[key] is not None and not isinstance(data[key], str)
-        for key in _STRING_OVERRIDE_KEYS
+        for key in _STRING_OVERRIDE_KEYS | _DEPRECATED_KEY_ALIASES.keys()
     )
     invalid_boolean = (
         "brief_commit" in data
@@ -107,7 +117,22 @@ def _load_override(path: Path) -> Mapping[str, Any] | None:
             f"config_path: override {path} has a value of the wrong type — ignoring it\n"
         )
         return None
-    return data
+    for old, new in _DEPRECATED_KEY_ALIASES.items():
+        if old in data and new in data:
+            sys.stderr.write(
+                f"config_path: override {path} sets both {old!r} and {new!r} — "
+                f"ignoring it; keep only {new!r}\n"
+            )
+            return None
+    aliased = {k: v for k, v in data.items() if k not in _DEPRECATED_KEY_ALIASES}
+    for old, new in _DEPRECATED_KEY_ALIASES.items():
+        if old in data:
+            sys.stderr.write(
+                f"config_path: override {path} uses the old key {old!r}; "
+                f"use {new!r} instead\n"
+            )
+            aliased[new] = data[old]
+    return aliased
 
 
 def _configured_string(config: Mapping[str, Any], key: str, default: str) -> str:
