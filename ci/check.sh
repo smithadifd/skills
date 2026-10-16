@@ -234,19 +234,35 @@ check_agent_unknown() {
 }
 
 check_reviewer_axes() {
-  local file spec_line std_line
-  file="$repo_dir/agents/reviewer.md"
-  [ -f "$file" ] || fail "reviewer agent is missing: agents/reviewer.md"
-  grep -F -q '**Spec compliance first.**' "$file" || fail "reviewer lacks the spec-compliance-first axis"
-  grep -F -q '**Standards second.**' "$file" || fail "reviewer lacks the standards-second axis"
-  spec_line=$(grep -F -n '**Spec compliance first.**' "$file" | head -n 1 | cut -d: -f1)
-  std_line=$(grep -F -n '**Standards second.**' "$file" | head -n 1 | cut -d: -f1)
-  ((spec_line < std_line)) || fail "reviewer lists the standards axis before the spec axis"
-  grep -F -q 'report only correctness and requirement gaps' "$file" || fail "reviewer lacks the correctness-and-requirement-gaps scope rule"
-  grep -F -q 'Round 1 of a code change runs a targeted mutation' "$file" || fail "reviewer lacks the round-1 mutation rule"
-  grep -F -q 'so the caller can route the mutation to a lane that can execute' "$file" || fail "reviewer lacks the cannot-execute routing rule"
-  grep -F -q 'Docs-only changes are exempt from the mutation as a rule' "$file" || fail "reviewer lacks the docs-only exemption"
-  printf 'PASS: reviewer states spec-then-standards axes, scope, round-1 mutation and docs exemption\n'
+  local home file section numbered expected line
+  local pass_line spec_line std_line scope_line mutation_line docs_line routing_line
+  pass_line='Review in two passes, in this order:'
+  spec_line='1. **Spec compliance first.** Does the change do what was asked? Check it against the ticket'"'"'s acceptance criteria or the change'"'"'s stated requirements, and name any requirement the diff misses or contradicts.'
+  std_line='2. **Standards second.** Does it meet the repository'"'"'s standards: its conventions, tests, and documented rules?'
+  scope_line='- Do not suggest improvements beyond what was asked — report only correctness and requirement gaps.'
+  mutation_line='- Round 1 of a code change runs a targeted mutation whenever you can execute one. Do not skip it because the suite is green.'
+  docs_line='- Docs-only changes are exempt from the mutation as a rule; say "docs-only" in **Evidence**.'
+  routing_line='- If you cannot run the suite or the mutation (no runner, missing dependencies), say plainly which and why in **Evidence**, so the caller can route the mutation to a lane that can execute. A verdict with nothing run is a read-only review; say so in the summary sentence so the caller knows an executed check is still owed.'
+
+  home=$(mktemp -d)
+  HOME="$home" ./install.sh --agent reviewer
+  file="$home/.claude/agents/reviewer.md"
+  [ -s "$file" ] || fail "installed reviewer is missing or empty: $file"
+
+  for line in "$pass_line" "$spec_line" "$std_line" "$scope_line" "$mutation_line" "$docs_line" "$routing_line"; do
+    [ "$(grep -F -x -c -- "$line" "$file")" -eq 1 ] || fail "installed reviewer lacks this exact line: $line"
+  done
+
+  section=$(awk '/^\*\*3\. Review systematically\*\*$/{f=1;next} /^\*\*4\. /{f=0} f' "$file")
+  [ -n "$section" ] || fail "installed reviewer lacks the Review systematically section"
+  [ "$(printf '%s\n' "$section" | grep -F -x -c -- "$pass_line")" -eq 1 ] || fail "the two-pass line is not under Review systematically"
+  numbered=$(printf '%s\n' "$section" | grep -E '^[0-9]+\. ' || true)
+  expected=$(printf '%s\n%s' "$spec_line" "$std_line")
+  [ "$numbered" = "$expected" ] || fail "Review systematically does not list spec compliance first, then standards second, as its numbered passes"
+  printf '%s\n' "$section" | awk -v p="$pass_line" -v a="$spec_line" -v b="$std_line" '
+    $0==p {np=NR} $0==a {na=NR} $0==b {nb=NR}
+    END {exit !(np && na && nb && np<na && na<nb)}' || fail "the spec pass does not precede the standards pass after the two-pass line"
+  printf 'PASS: installed reviewer states spec-then-standards passes, scope, round-1 mutation, docs exemption and routing\n'
 }
 
 case ${1-} in
