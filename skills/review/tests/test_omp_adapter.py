@@ -221,3 +221,76 @@ def test_from_text_without_model_is_blocked(tmp_path: Path):
     result = _run_cli("--from-text", str(reply), "--backend", "omp", "--thinking", "low")
     assert result.returncode == 3, result.stderr
     assert "inputs.model" in json.loads(result.stdout)["reason"]
+
+
+# --- parameter validation -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "params, fragment",
+    [
+        ({"thinking": "banana"}, "inputs.thinking"),
+        ({"thinking": "ultra"}, "inputs.thinking"),
+        ({"thinking": "low\n"}, "inputs.thinking"),
+        ({"model": "model\n"}, "inputs.model"),
+    ],
+)
+def test_unknown_thinking_level_or_trailing_newline_blocks(params, fragment):
+    result = review_phase.run_phase(_envelope(OMP_APPROVE, **params))
+    assert result["status"] == "blocked", result["reason"]
+    assert fragment in result["reason"]
+    assert "attribution" not in result
+
+
+@pytest.mark.parametrize(
+    "thinking", ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]
+)
+def test_every_omp_thinking_level_is_accepted(thinking):
+    result = review_phase.run_phase(_envelope(OMP_APPROVE, thinking=thinking))
+    assert result["status"] == "success", result["reason"]
+    assert result["attribution"]["thinking"] == thinking
+
+
+# --- the verdict line is the reviewer agent's exact heading -------------------
+
+
+@pytest.mark.parametrize(
+    "verdict_line",
+    ["VERDICT: APPROVE", "## Verdict: APPROVED", "## Verdict: REQUEST_CHANGES"],
+)
+def test_verdict_line_not_in_the_agent_shape_fails(verdict_line):
+    text = OMP_APPROVE.replace("## Verdict: APPROVE", verdict_line)
+    assert verdict_line in text
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure", result["reason"]
+    assert "no verdict line in the omp reply" in result["reason"]
+    assert result["artifacts"]["findings.json"] is None
+
+
+# --- the fallback never rescues a failed omp parse ----------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "### Issues\nNo bugs or security issues found.\n",
+        "- [BUG] `src/export.py:58` — the limit is applied after the write.\n",
+        OMP_NO_VERDICT,
+        "not a review at all\n",
+    ],
+)
+def test_jev_fallback_does_not_turn_an_omp_parse_failure_into_success(text, monkeypatch):
+    consulted = []
+
+    def fake_consult(backend, reply):
+        consulted.append(backend)
+        return review_phase._finish(backend, review_phase.APPROVED, [], reply, source="jev")
+
+    monkeypatch.setattr(review_phase, "_consult_jev", fake_consult)
+    envelope = _envelope(text)
+    envelope["adapters"] = {"jev_fallback": True}
+    result = review_phase.run_phase(envelope)
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith("omp: ")
+    assert result["artifacts"]["findings.json"] is None
+    assert consulted == []

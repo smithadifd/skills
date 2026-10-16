@@ -370,6 +370,13 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     return verdict, shaped
 
 
+# The reviewer agent's verdict heading, exactly as its output format writes it.
+# Stricter than the claude-fresh patterns on purpose: a bare `VERDICT:` label,
+# a different token (`APPROVED`) or extra text on the line is not this agent's
+# block, so it does not count as the verdict line.
+_OMP_VERDICT_LINE = re.compile(r"## Verdict: (?:APPROVE|REQUEST CHANGES)[ \t]*")
+
+
 def parse_omp(text: str) -> tuple[str, list[dict]]:
     """An omp review reply: the reviewer agent's block, verdict line required.
 
@@ -378,7 +385,7 @@ def parse_omp(text: str) -> tuple[str, list[dict]]:
     parse failure rather than an approval inferred from the rest of the text.
     """
     lines = text.splitlines()
-    if not any(_CLAUDE_VERDICT_HEADING.match(l) or _CLAUDE_VERDICT_LABEL.match(l) for l in lines):
+    if not any(_OMP_VERDICT_LINE.fullmatch(l) for l in lines):
         raise ParseError(
             "no verdict line in the omp reply: expected "
             "`## Verdict: APPROVE | REQUEST CHANGES`"
@@ -396,23 +403,28 @@ ADAPTERS = {
 # are the envelope `inputs` keys that must carry them.
 OMP_LANE = "omp"
 OMP_PARAMETERS = ("model", "thinking")
-# A model id or thinking level as a command-line value: one token, no spaces.
-_OMP_PARAMETER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
+# The thinking levels `omp --thinking` accepts.
+OMP_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "auto")
+# A model id as a command-line value: one token, no spaces or line breaks.
+_OMP_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*")
 
 
 def omp_attribution(model: object, thinking: object) -> dict:
     """The attribution an omp review carries, from the runner's own parameters.
 
-    Raises ValueError when either parameter is missing or not a single token;
-    nothing here supplies a default, so the record always names what the
-    runner actually asked for.
+    Raises ValueError when the model is missing or not a single token, or the
+    thinking level is not one omp accepts; nothing here supplies a default, so
+    the record always names what the runner actually asked for.
     """
-    values = {"model": model, "thinking": thinking}
-    for name, value in values.items():
-        if not isinstance(value, str) or not _OMP_PARAMETER.match(value):
-            raise ValueError(
-                f"omp needs inputs.{name} as a single non-empty token, got {value!r}"
-            )
+    if not isinstance(model, str) or not _OMP_MODEL.fullmatch(model):
+        raise ValueError(
+            f"omp needs inputs.model as a single non-empty token, got {model!r}"
+        )
+    if not isinstance(thinking, str) or thinking not in OMP_THINKING_LEVELS:
+        raise ValueError(
+            "omp needs inputs.thinking as one of "
+            f"{', '.join(OMP_THINKING_LEVELS)}, got {thinking!r}"
+        )
     return {"lane": OMP_LANE, "model": model, "thinking": thinking}
 
 
@@ -657,7 +669,10 @@ def _parse_return(envelope: dict, backend: str, text: str) -> dict:
     try:
         verdict, findings = selected(text)
     except ParseError as exc:
-        if not _jev_fallback_enabled(envelope):
+        # An omp reply without the reviewer agent's verdict line is a failure
+        # even with the fallback on: another adapter or Jev would infer a
+        # verdict the reviewer never wrote.
+        if backend == OMP_LANE or not _jev_fallback_enabled(envelope):
             return _result("failure", f"{backend}: {exc}", text, None)
         parsed = _try_other_adapters(backend, text)
         if parsed is None:

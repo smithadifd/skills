@@ -34,9 +34,12 @@ worked example above is the shape it expects, verbatim.
 A review run through `omp -p --model <id> --thinking=<level>` with the
 reviewer agent uses `--backend omp --model <id> --thinking <level>` (in an
 envelope: `inputs.model` and `inputs.thinking`). The reply must carry the
-agent's `## Verdict:` line, or the result is a failure. Both values are
-required and come only from the caller; the result records them, with the
-lane name, as `attribution`.
+agent's verdict line, exactly `## Verdict: APPROVE` or
+`## Verdict: REQUEST CHANGES`, or the result is a failure, even with
+`adapters.jev_fallback` on. Both values are required and come only from the
+caller: the model as a single token, the thinking level as one of `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `auto`. The result
+records them, with the lane name, as `attribution`.
 
 `REVIEW_PHASE_JEV_SHADOW=1` enables an advisory TypeSafe pass on parse-success
 returns. It sends only `jev_client.trim_payload`'s FINDINGS/VERDICT payload and
