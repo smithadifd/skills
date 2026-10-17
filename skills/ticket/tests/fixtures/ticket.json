@@ -1,0 +1,15 @@
+{
+  "key": "EK-14",
+  "title": "Add guarded ticket pass",
+  "status": "In Progress",
+  "updated_at": "2026-10-17T14:30:00Z",
+  "description": "Run one ticket from live orientation through approved outward work.",
+  "acceptance_criteria": [
+    "A plan card keeps review-gated pass evidence.",
+    "Plan and outward work require explicit approval."
+  ],
+  "links": [
+    {"kind": "figma", "url": "https://www.figma.com/file/example/ticket"},
+    {"kind": "confluence", "url": "https://example.atlassian.net/wiki/spaces/ENG/pages/14"}
+  ]
+}
