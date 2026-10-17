@@ -413,6 +413,14 @@ def test_fallback_refuses_cross_vocabulary_conflict(monkeypatch, backend, text):
         pytest.param(
             "## _Verdict_: _REQUEST CHANGES_", id="underscored-key-and-value-heading"
         ),
+        pytest.param(
+            "## **[Verdict]**: **[REQUEST CHANGES]**",
+            id="composed-key-and-value-heading",
+        ),
+        pytest.param("**Verdict: REQUEST CHANGES**", id="bold-full-label"),
+        pytest.param("## **Verdict: REQUEST CHANGES**", id="bold-full-heading"),
+        pytest.param("*Verdict: REQUEST CHANGES*", id="italic-full-label"),
+        pytest.param("`VERDICT: REQUEST CHANGES`", id="backticked-full-label"),
     ],
 )
 @pytest.mark.parametrize("reverse", [False, True], ids=["changes-first", "approve-first"])
@@ -432,6 +440,33 @@ def test_fallback_refuses_decorated_conflict(monkeypatch, decorated, reverse):
     )
     assert result["reason"].startswith("grok-notools: conflicting verdicts")
     assert result["artifacts"]["findings.json"] is None
+@pytest.mark.parametrize(
+    "backend", ["claude-fresh", "grok-notools"]
+)
+@pytest.mark.parametrize("unknown_first", [True, False], ids=["unknown-first", "unknown-last"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["approve-first", "changes-first"])
+def test_fallback_does_not_mask_a_conflict_with_an_unknown_verdict(
+    monkeypatch, backend, unknown_first, reverse
+):
+    conflicting = ["## Verdict: APPROVE", "## Verdict: REQUEST CHANGES"]
+    if reverse:
+        conflicting.reverse()
+    labels = ["VERDICT: MAYBE", *conflicting] if unknown_first else [
+        *conflicting,
+        "VERDICT: MAYBE",
+    ]
+    text = "\n\n".join(labels) + "\n"
+    monkeypatch.setattr(
+        review_phase,
+        "_consult_jev",
+        lambda *args: pytest.fail("Jev must not resolve conflicting verdicts"),
+    )
+    result = review_phase.run_phase(_envelope(backend, text, jev=True))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+
+
 
 
 @pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "cleared-first"])

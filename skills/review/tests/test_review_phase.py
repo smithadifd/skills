@@ -517,7 +517,22 @@ _DECORATED_REQUEST_CHANGES = [
     pytest.param("## `Verdict`: `REQUEST CHANGES`", id="backticked-key-and-value-heading"),
     pytest.param("## [Verdict]: [REQUEST CHANGES]", id="bracketed-key-and-value-heading"),
     pytest.param("## _Verdict_: _REQUEST CHANGES_", id="underscored-key-and-value-heading"),
+    pytest.param(
+        "## **[Verdict]**: **[REQUEST CHANGES]**",
+        id="composed-key-and-value-heading",
+    ),
 ]
+
+
+_FULL_SPAN_REQUEST_CHANGES = [
+    pytest.param("**Verdict: REQUEST CHANGES**", id="bold-full-label"),
+    pytest.param("## **Verdict: REQUEST CHANGES**", id="bold-full-heading"),
+    pytest.param("*Verdict: REQUEST CHANGES*", id="italic-full-label"),
+    pytest.param("`VERDICT: REQUEST CHANGES`", id="backticked-full-label"),
+]
+
+
+_ISSUE = "- `src/report.py:14` — the total skips the last row.\n"
 
 
 def _adapter_envelope(backend: str, text: str) -> dict:
@@ -527,6 +542,32 @@ def _adapter_envelope(backend: str, text: str) -> dict:
         else {}
     )
     return _envelope(backend, text, **extras)
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+        pytest.param("omp", review_phase.parse_omp, id="omp"),
+    ],
+)
+@pytest.mark.parametrize("decorated", _FULL_SPAN_REQUEST_CHANGES)
+@pytest.mark.parametrize("reverse", [False, True], ids=["changes-first", "approve-first"])
+def test_every_adapter_refuses_full_span_conflicting_verdicts(
+    backend, parser, decorated, reverse
+):
+    labels = [decorated, "## Verdict: APPROVE"]
+    if reverse:
+        labels.reverse()
+    text = "\n\n".join(labels) + "\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted full-span conflicting verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
 
 
 @pytest.mark.parametrize(
@@ -624,6 +665,126 @@ def test_every_adapter_rejects_an_unknown_verdict_value(backend, parser):
         f"{backend} ignored an unknown verdict value: {result['reason']}"
     )
     assert "unrecognized verdict" in result["reason"]
+@pytest.mark.parametrize(
+    "label, following, expected",
+    [
+        pytest.param(
+            "**Verdict: REQUEST CHANGES**",
+            "### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="bold-request-changes",
+        ),
+        pytest.param(
+            "## **Verdict: REQUEST CHANGES**",
+            "### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="heading-bold-request-changes",
+        ),
+        pytest.param(
+            "**VERDICT: REQUEST CHANGES**",
+            "FINDINGS:\n" + _ISSUE,
+            "changes_requested",
+            id="uppercase-bold-request-changes",
+        ),
+        pytest.param(
+            "*Verdict: REQUEST CHANGES*",
+            "### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="italic-request-changes",
+        ),
+        pytest.param(
+            "`VERDICT: REQUEST CHANGES`",
+            "FINDINGS:\n" + _ISSUE,
+            "changes_requested",
+            id="backticked-request-changes",
+        ),
+        pytest.param(
+            "**Verdict: APPROVE**",
+            "No bugs or security issues found.\n",
+            "approved",
+            id="bold-approve",
+        ),
+        pytest.param(
+            "**Verdict: REQUEST CHANGES**",
+            "Approve once the fix below lands.\n\n### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="request-changes-before-approve-prose",
+        ),
+        pytest.param(
+            "**Verdict: APPROVE**",
+            "Flagged nothing blocking; one note below.\n\n### Minor notes\n" + _ISSUE,
+            "approved",
+            id="approve-before-flagged-prose",
+        ),
+        pytest.param(
+            "## **Verdict: REQUEST CHANGES**",
+            "Cleared the earlier concern, but one bug remains.\n\n## FINDINGS\n" + _ISSUE,
+            "changes_requested",
+            id="request-changes-before-cleared-prose",
+        ),
+    ],
+)
+def test_claude_adapter_uses_the_value_inside_a_full_span_label(
+    label, following, expected
+):
+    verdict, _ = review_phase.parse_claude_fresh(f"{label}\n\n{following}")
+    assert verdict == expected
+
+
+def test_omp_accepts_an_agreeing_full_span_label():
+    text = (
+        "## Verdict: REQUEST CHANGES\n\n"
+        "**Verdict: REQUEST CHANGES**\n\n"
+        "### Issues\n"
+        + _ISSUE
+    )
+    verdict, findings = review_phase.parse_omp(text)
+    assert verdict == "changes_requested"
+    assert [(finding["file"], finding["line"]) for finding in findings] == [
+        ("src/report.py", 14)
+    ]
+
+
+def test_findings_bullet_named_verdict_is_not_a_label():
+    text = (
+        "## Verdict: APPROVE\n\n"
+        "### Minor notes\n"
+        "* Verdict: the earlier note still stands\n"
+        "* `src/report.py:14` — rename the total.\n"
+    )
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert len(findings) == 2
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+        pytest.param("omp", review_phase.parse_omp, id="omp"),
+    ],
+)
+@pytest.mark.parametrize("unknown_first", [True, False], ids=["unknown-first", "unknown-last"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["approve-first", "changes-first"])
+def test_mappable_conflict_precedes_an_unknown_verdict_error(
+    backend, parser, unknown_first, reverse
+):
+    conflicting = ["## Verdict: APPROVE", "## Verdict: REQUEST CHANGES"]
+    if reverse:
+        conflicting.reverse()
+    labels = ["VERDICT: MAYBE", *conflicting] if unknown_first else [
+        *conflicting,
+        "VERDICT: MAYBE",
+    ]
+    text = "\n\n".join(labels) + "\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
 
 def test_claude_clean_sentinel_does_not_conflict_with_a_request_changes_label():
     text = "No bugs or security issues found.\n\nVERDICT: REQUEST CHANGES\n"

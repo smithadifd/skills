@@ -143,6 +143,49 @@ _VERDICT_VALUE = re.compile(
 )
 
 
+def _peel_verdict_wrapper_prefix(text: str) -> tuple[str, list[str]]:
+    """Peel every adjacent wrapper prefix and return its closing sequence."""
+    closings: list[str] = []
+    while True:
+        wrapped = next(
+            (
+                (opening, closing)
+                for opening, closing in _VERDICT_WRAPPERS
+                if text.startswith(opening)
+                and len(text) > len(opening)
+                and not text[len(opening)].isspace()
+            ),
+            None,
+        )
+        if wrapped is None:
+            return text, closings
+        opening, closing = wrapped
+        text = text[len(opening):]
+        closings.append(closing)
+
+
+def _peel_leading_verdict_closings(
+    text: str, closings: list[str]
+) -> str | None:
+    for closing in reversed(closings):
+        text = text.lstrip()
+        if not text.startswith(closing):
+            return None
+        text = text[len(closing):]
+    return text.lstrip()
+
+
+def _peel_trailing_verdict_closings(
+    text: str, closings: list[str]
+) -> str | None:
+    for closing in closings:
+        text = text.rstrip()
+        if not text.endswith(closing):
+            return None
+        text = text[:-len(closing)]
+    return text.rstrip()
+
+
 def _verdict_label_value(line: str) -> tuple[str, bool] | None:
     """Return a verdict label's raw value and whether it is a Markdown heading."""
     text = line.strip()
@@ -150,33 +193,34 @@ def _verdict_label_value(line: str) -> tuple[str, bool] | None:
     if heading:
         text = text[heading.end():].lstrip()
 
-    closing = ""
-    for opening, candidate_closing in _VERDICT_WRAPPERS:
-        if text.startswith(opening):
-            text = text[len(opening):].lstrip()
-            closing = candidate_closing
-            break
-    if not text[:7].casefold() == "verdict":
+    text, closings = _peel_verdict_wrapper_prefix(text)
+    if text[:7].casefold() != "verdict":
         return None
     text = text[7:]
     if text and (text[0].isalnum() or text[0] == "-"):
         return None
     text = text.lstrip()
 
-    if closing:
-        if text.startswith(closing):
-            text = text[len(closing):].lstrip()
+    if closings:
+        after_key = _peel_leading_verdict_closings(text, closings)
+        if after_key is not None:
+            text = after_key
             if text.startswith(":"):
                 text = text[1:].lstrip()
             elif text:
                 return None
         elif text.startswith(":"):
             text = text[1:].lstrip()
-            if not text.startswith(closing):
-                return "", bool(heading)
-            text = text[len(closing):].lstrip()
+            after_colon = _peel_leading_verdict_closings(text, closings)
+            if after_colon is not None:
+                text = after_colon
+            else:
+                full_span = _peel_trailing_verdict_closings(text, closings)
+                if full_span is None:
+                    return None
+                text = full_span
         else:
-            return "", bool(heading)
+            return None
     elif text.startswith(":"):
         text = text[1:].lstrip()
     elif text:
@@ -193,20 +237,17 @@ def _normalize_verdict_value(
         r"\[\s*APPROVE\s*\|\s*REQUEST[ _-]+CHANGES\s*\]", text, re.IGNORECASE
     ):
         return APPROVED, "claude"
-    closing = ""
-    for opening, candidate_closing in _VERDICT_WRAPPERS:
-        if text.startswith(opening):
-            text = text[len(opening):].lstrip()
-            closing = candidate_closing
-            break
 
+    text, closings = _peel_verdict_wrapper_prefix(text)
     matched = _VERDICT_VALUE.match(text)
     if not matched:
         return None
     remainder = text[matched.end():]
-    if not closing and remainder.startswith("_"):
-        return None
-    if closing and not remainder.lstrip().startswith(closing):
+    if closings:
+        remainder = _peel_leading_verdict_closings(remainder, closings)
+        if remainder is None:
+            return None
+    elif remainder.startswith("_"):
         return None
 
     token = re.sub(r"[ _-]+", " ", matched.group(1).upper())
@@ -221,9 +262,12 @@ def _normalize_verdict_value(
     return CHANGES_REQUESTED, "claude"
 
 
-def _verdict_labels(lines: list[str]) -> list[tuple[str, str]]:
-    """Collect normalized outcome/vocabulary pairs from every verdict label."""
+def _verdict_labels(
+    lines: list[str],
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Collect normalized labels and the values that cannot be normalized."""
     labels: list[tuple[str, str]] = []
+    unrecognized: list[str] = []
     for index, line in enumerate(lines):
         labeled = _verdict_label_value(line)
         if labeled is None:
@@ -235,15 +279,17 @@ def _verdict_labels(lines: list[str]) -> list[tuple[str, str]]:
             )
         normalized = _normalize_verdict_value(value, heading=heading)
         if normalized is None:
-            shown = value or line.strip()
-            raise ParseError(f"unrecognized verdict value: {shown!r}")
-        labels.append(normalized)
-    return labels
+            unrecognized.append(value or line.strip())
+        else:
+            labels.append(normalized)
+    return labels, unrecognized
 
 
 def _extract_verdict(lines: list[str], vocabulary: str) -> str | None:
-    labels = _verdict_labels(lines)
+    labels, unrecognized = _verdict_labels(lines)
     _single_verdict([outcome for outcome, _ in labels])
+    if unrecognized:
+        raise ParseError(f"unrecognized verdict value: {unrecognized[0]!r}")
     return next(
         (outcome for outcome, family in labels if family == vocabulary), None
     )
