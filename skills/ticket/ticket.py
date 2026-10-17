@@ -309,9 +309,9 @@ class StoreAdapter(Protocol):
         phase: str,
         next_skills: Sequence[str] = (),
         refs: Sequence[str] = (),
-        *,
-        close: bool = False,
     ) -> None: ...
+
+    def confirm_close(self) -> None: ...
 
     def record_decision(self, decision: DecisionRecord) -> None: ...
 
@@ -512,8 +512,6 @@ class MarkdownStore:
         phase: str,
         next_skills: Sequence[str] = (),
         refs: Sequence[str] = (),
-        *,
-        close: bool = False,
     ) -> None:
         _validate_stamp(point, phase, next_skills, refs)
         card = self._load()
@@ -523,11 +521,19 @@ class MarkdownStore:
                 "phase": phase,
                 "next_skills": list(next_skills),
                 "refs": list(refs),
-                "close": close,
+                "close": False,
             }
         )
-        if close:
-            card["status"] = "closed"
+        self._save(card)
+
+    def confirm_close(self) -> None:
+        """Mark the last stamp as the close and the card closed."""
+
+        card = self._load()
+        if not card["stamps"]:
+            raise StoreUnavailable("there is no close stamp to confirm")
+        card["stamps"][-1]["close"] = True
+        card["status"] = "closed"
         self._save(card)
 
     def record_decision(self, decision: DecisionRecord) -> None:
@@ -717,8 +723,6 @@ class LedgerStore:
         phase: str,
         next_skills: Sequence[str] = (),
         refs: Sequence[str] = (),
-        *,
-        close: bool = False,
     ) -> None:
         _validate_stamp(point, phase, next_skills, refs)
         self._ensure_item()
@@ -728,8 +732,12 @@ class LedgerStore:
         if refs:
             payload["refs"] = list(refs)
         self._append("item.stopped", payload)
-        if close:
-            self._run("state", self.key, "--status", "closed")
+
+    def confirm_close(self) -> None:
+        """Mark the item closed; its last stop event reads back as the close."""
+
+        self._ensure_item()
+        self._run("state", self.key, "--status", "closed")
 
     def record_decision(self, decision: DecisionRecord) -> None:
         _validate_decision(decision)
@@ -895,6 +903,20 @@ def _has_go(card: Mapping[str, Any], gate: str, revision: int, key: str) -> bool
     return False
 
 
+def _plan_go_point(revision: int) -> str:
+    return f"Waiting at plan go for plan revision {revision}."
+
+
+def _outward_go_point(review_round: int) -> str:
+    return f"Waiting at outward go after review round {review_round}."
+
+
+def _has_stamp(card: Mapping[str, Any], point: str, phase: str) -> bool:
+    return any(
+        stamp.get("point") == point and stamp.get("phase") == phase for stamp in card.get("stamps") or ()
+    )
+
+
 def _reconcile(
     stored: Mapping[str, Any], ticket: Ticket, reviews: Sequence[Mapping[str, Any]]
 ) -> tuple[PlanCard, list[str], bool]:
@@ -1024,21 +1046,38 @@ class TicketPass:
         if card.get("status") == "closed":
             self._phase = "closed"
             return
+        stamps = card.get("stamps") or ()
+        if stamps and stamps[-1].get("phase") == "close":
+            self.reconciliation += ("a close stamp was written but never confirmed; the ticket is not closed",)
         if not stored:
             self._phase = "orient"
             return
         if changed:
             self._phase = "plan"
             return
+        # A hard stop is re-entered only when the store holds its stop stamp;
+        # otherwise the pass resumes at the step before the stop.
         if not _has_go(card, "plan", self._revision, self._ticket.key):
-            self._phase = "plan_go"
+            if _has_stamp(card, _plan_go_point(self._revision), "plan"):
+                self._phase = "plan_go"
+            else:
+                self.reconciliation += (
+                    f"no plan go stop stamp for plan revision {self._revision}; resuming at plan",
+                )
+                self._phase = "plan"
             return
         last = reviews[-1] if reviews else None
-        if (
+        passed = (
             last is not None
             and last.get("verdict") == "pass"
             and all(item.passes and item.review_round == last.get("round") for item in plan.acceptance_criteria)
-        ):
+        )
+        if passed and not _has_stamp(card, _outward_go_point(last.get("round")), "review"):
+            self.reconciliation += (
+                f"no outward go stop stamp for review round {last.get('round')}; resuming at build",
+            )
+            passed = False
+        if passed:
             self._phase = "outward_go"
         elif self._rounds >= MAX_REVIEW_ROUNDS:
             self._phase = "stopped"
@@ -1072,7 +1111,7 @@ class TicketPass:
         revision = self._revision + 1
         ref = self.store.record_plan(self._snapshot(plan, revision))
         self.store.write_stamp(
-            f"Waiting at plan go for plan revision {revision}.",
+            _plan_go_point(revision),
             "plan",
             ("ticket",),
             (ref,),
@@ -1171,7 +1210,7 @@ class TicketPass:
 
         if verdict == "pass":
             self.store.write_stamp(
-                f"Waiting at outward go after review round {review.round}.",
+                _outward_go_point(review.round),
                 "review",
                 ("ticket",),
                 (self._plan_ref, evidence),
@@ -1205,13 +1244,13 @@ class TicketPass:
         self._require_phase("outward_go")
         if not self.approved("outward"):
             raise GateRequired("outward go is required before close")
-        self.store.write_stamp(point, "close", next_skills, refs, close=True)
+        # The close stamp is written pending and confirmed only after the card
+        # reads back correctly, so a failed close never reads as closed later.
+        self.store.write_stamp(point, "close", next_skills, refs)
         card = self.store.read_card()
         problems: list[str] = []
         stamps = card.get("stamps") or []
         last = stamps[-1] if stamps else {}
-        if card.get("status") != "closed" or not last.get("close"):
-            problems.append("the card is not marked closed")
         if last.get("point") != point or last.get("phase") != "close":
             problems.append("the last stamp is not this close point")
         if list(last.get("next_skills") or ()) != list(next_skills):
@@ -1225,6 +1264,12 @@ class TicketPass:
             problems.append("the review rounds differ")
         if problems:
             raise StoreUnavailable("close read-back failed: " + "; ".join(problems))
+        self.store.confirm_close()
+        card = self.store.read_card()
+        stamps = card.get("stamps") or []
+        last = stamps[-1] if stamps else {}
+        if card.get("status") != "closed" or not last.get("close") or last.get("point") != point:
+            raise StoreUnavailable("close read-back failed: the card is not marked closed")
         self._phase = "closed"
 
     def more_info(self, destination: str, question: str, *, role: str | None = None) -> MoreInfoExit:
