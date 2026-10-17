@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -18,10 +18,31 @@ STEPS = ("orient", "research", "plan", "build", "review", "outward")
 INFO_EXITS = ("person", "research", "someone_else")
 OUTSIDE_EVENTS = ("merge", "reply", "ratification", "review", "release", "other")
 TAG_TYPES = ("ticket", "initiative", "team", "project")
+PLAN_SCHEMA = "ticket-plan-card/v1"
+MAX_REVIEW_ROUNDS = 3
 _SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _JSON_START = "<!-- ticket-card:v1\n"
 _JSON_END = "\n-->"
+# A ledger note that carries a plan-card snapshot starts with this prefix.
+_PLAN_NOTE = "ticket-plan-card/v1 "
+# What a stamp may point at: a path (absolute, or relative with a directory or
+# an extension, optionally :line or :start-end), a PR or issue (owner/repo#N or
+# #N), a branch (branch:<name>), a commit SHA, or a store event (event:<N>).
+_SEGMENT = r"[A-Za-z0-9_.@+~-]+"
+_REF_TARGET = re.compile(
+    "|".join(
+        (
+            rf"/(?:{_SEGMENT}/)*{_SEGMENT}(?::\d+(?:-\d+)?)?",
+            rf"(?:{_SEGMENT}/)+{_SEGMENT}(?::\d+(?:-\d+)?)?",
+            r"[A-Za-z0-9_.@+~-]*\.[A-Za-z0-9]+(?::\d+(?:-\d+)?)?",
+            r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[1-9][0-9]*",
+            r"branch:[A-Za-z0-9_./-]+",
+            r"[0-9a-f]{7,40}",
+            r"event:[1-9][0-9]*",
+        )
+    )
+)
 
 
 class TicketError(ValueError):
@@ -34,6 +55,10 @@ class GateRequired(TicketError):
 
 class StoreUnavailable(RuntimeError):
     """The configured store cannot be used safely."""
+
+    def __init__(self, message: str, *, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -100,6 +125,7 @@ class Criterion:
     text: str
     passes: bool = False
     review_evidence: str | None = None
+    review_round: int | None = None
 
 
 @dataclass
@@ -110,21 +136,29 @@ class PlanStep:
 
 
 class PlanCard:
-    """Acceptance criteria and explicit skip records for one ticket."""
+    """Acceptance criteria and explicit skip records for one ticket.
+
+    ``passes`` is not settable here: only ``TicketPass.record_review`` flips it,
+    after the store has recorded the review round the evidence names.
+    """
 
     def __init__(self, ticket: Ticket):
         self.key = ticket.key
         self.title = ticket.title
-        self.acceptance_criteria = [Criterion(text) for text in ticket.acceptance_criteria]
+        self._criteria = tuple(Criterion(text) for text in ticket.acceptance_criteria)
         self.steps = [PlanStep(name) for name in STEPS]
         self.diff_statement: str | None = None
+        self.open_questions: list[str] = []
 
-    def mark_passes(self, index: int, review_evidence: str | None) -> None:
-        evidence = (review_evidence or "").strip()
-        if not evidence:
-            raise TicketError("passes=true requires a review-evidence reference")
-        criterion = self.acceptance_criteria[index]
-        self.acceptance_criteria[index] = Criterion(criterion.text, True, evidence)
+    @property
+    def acceptance_criteria(self) -> tuple[Criterion, ...]:
+        return self._criteria
+
+    def add_open_question(self, question: str) -> None:
+        question = (question or "").strip()
+        if not question:
+            raise TicketError("an open question must be non-empty text")
+        self.open_questions.append(question)
 
     def skip_step(
         self,
@@ -150,14 +184,15 @@ class PlanCard:
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "schema": "ticket-plan-card/v1",
+            "schema": PLAN_SCHEMA,
             "key": self.key,
             "title": self.title,
-            "acceptance_criteria": [asdict(item) for item in self.acceptance_criteria],
+            "acceptance_criteria": [asdict(item) for item in self._criteria],
             "steps": [
                 {key: value for key, value in asdict(item).items() if value is not None}
                 for item in self.steps
             ],
+            "open_questions": list(self.open_questions),
         }
         if self.diff_statement is not None:
             result["diff_statement"] = self.diff_statement
@@ -165,10 +200,10 @@ class PlanCard:
 
     def render(self) -> str:
         lines = [f"# Plan — {self.key}: {self.title}", "", "## Acceptance criteria"]
-        for item in self.acceptance_criteria:
+        for item in self._criteria:
             line = f"- [ ] passes: {str(item.passes).lower()} — {item.text}"
             if item.review_evidence:
-                line += f" (review evidence: {item.review_evidence})"
+                line += f" (review round {item.review_round}: {item.review_evidence})"
             lines.append(line)
         lines.extend(("", "## Steps"))
         for step in self.steps:
@@ -178,6 +213,9 @@ class PlanCard:
                 lines.append(f"- {step.name}: {step.status}")
         if self.diff_statement:
             lines.extend(("", f"Diff: {self.diff_statement}"))
+        if self.open_questions:
+            lines.extend(("", "## Open questions"))
+            lines.extend(f"- {question}" for question in self.open_questions)
         return "\n".join(lines) + "\n"
 
 
@@ -186,6 +224,19 @@ def _one_sentence(text: str) -> bool:
         return False
     parts = [part for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
     return len(parts) == 1
+
+
+def _recorded_rounds(reviews: Sequence[Mapping[str, Any]]) -> dict[int, Mapping[str, Any]]:
+    return {review["round"]: review for review in reviews if type(review.get("round")) is int}
+
+
+def _verified(criterion: Criterion, rounds: Mapping[int, Mapping[str, Any]]) -> bool:
+    """A criterion passes only when its evidence names a round the store recorded."""
+
+    if not criterion.passes or type(criterion.review_round) is not int:
+        return False
+    review = rounds.get(criterion.review_round)
+    return review is not None and review.get("evidence") == criterion.review_evidence
 
 
 @dataclass(frozen=True)
@@ -238,6 +289,17 @@ class ReviewRecord:
         return {key: value for key, value in result.items() if value is not None}
 
 
+@dataclass(frozen=True)
+class TriedRecord:
+    what: str
+    phase: str
+    outcome: str | None = None
+    evidence: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {key: value for key, value in asdict(self).items() if value is not None}
+
+
 class StoreAdapter(Protocol):
     """The complete persistence boundary used by a ticket pass."""
 
@@ -254,6 +316,10 @@ class StoreAdapter(Protocol):
     def record_decision(self, decision: DecisionRecord) -> None: ...
 
     def record_review(self, review: ReviewRecord) -> None: ...
+
+    def record_plan(self, plan: Mapping[str, Any]) -> str: ...
+
+    def record_tried(self, tried: TriedRecord) -> None: ...
 
     def read_card(self) -> dict[str, Any]: ...
 
@@ -274,6 +340,14 @@ def _ref(value: str | None, name: str) -> None:
         raise TicketError(f"{name} must be a one-line reference of at most 300 characters")
 
 
+def _ref_target(value: str | None, name: str) -> None:
+    _ref(value, name)
+    if not _REF_TARGET.fullmatch(value):
+        raise TicketError(
+            f"{name} must be a path, PR or issue id, branch:<name>, commit SHA, or event:<N>: {value!r}"
+        )
+
+
 def _validate_stamp(
     point: str, phase: str, next_skills: Sequence[str], refs: Sequence[str]
 ) -> None:
@@ -289,7 +363,7 @@ def _validate_stamp(
     if len(refs) > 20:
         raise TicketError("refs may contain at most 20 references")
     for ref in refs:
-        _ref(ref, "ref")
+        _ref_target(ref, "ref")
 
 
 def _validate_decision(decision: DecisionRecord) -> None:
@@ -317,7 +391,7 @@ def _validate_decision(decision: DecisionRecord) -> None:
 
 
 def _validate_review(review: ReviewRecord) -> None:
-    if review.round < 1 or review.verdict not in ("pass", "changes"):
+    if type(review.round) is not int or review.round < 1 or review.verdict not in ("pass", "changes"):
         raise TicketError("invalid review record")
     if len(review.findings) > 20:
         raise TicketError("a review may record at most 20 findings")
@@ -329,6 +403,28 @@ def _validate_review(review: ReviewRecord) -> None:
         _ref(review.evidence, "review evidence")
 
 
+def _validate_plan(plan: Mapping[str, Any], key: str) -> None:
+    if not isinstance(plan, Mapping) or plan.get("schema") != PLAN_SCHEMA:
+        raise TicketError(f"a plan snapshot must carry schema {PLAN_SCHEMA}")
+    if plan.get("key") != key:
+        raise TicketError("plan snapshot belongs to another ticket")
+    revision = plan.get("revision")
+    if type(revision) is not int or revision < 1:
+        raise TicketError("a plan snapshot requires a revision of at least 1")
+    criteria = plan.get("acceptance_criteria")
+    if not isinstance(criteria, list) or not criteria:
+        raise TicketError("a plan snapshot requires its acceptance criteria")
+
+
+def _validate_tried(tried: TriedRecord) -> None:
+    _text(tried.what, "what")
+    _validate_phase(tried.phase)
+    if tried.outcome is not None:
+        _text(tried.outcome, "outcome")
+    if tried.evidence is not None:
+        _ref(tried.evidence, "tried evidence")
+
+
 def _blank_card(key: str, title: str) -> dict[str, Any]:
     return {
         "key": key,
@@ -337,6 +433,9 @@ def _blank_card(key: str, title: str) -> dict[str, Any]:
         "stamps": [],
         "decisions": [],
         "reviews": [],
+        "plan": None,
+        "plan_ref": None,
+        "tried": [],
     }
 
 
@@ -369,11 +468,20 @@ class MarkdownStore:
         if not self.path.exists():
             return _blank_card(self.key, self.title)
         body = self.path.read_text(encoding="utf-8")
-        start = body.find(_JSON_START)
-        end = body.find(_JSON_END, start + len(_JSON_START))
-        if start < 0 or end < 0:
+        # Only the block this adapter writes last counts. Recorded text is
+        # rendered escaped above it, and the JSON encoding keeps it on one line.
+        trimmed = body.rstrip("\n")
+        start = trimmed.rfind(_JSON_START)
+        if start < 0 or not trimmed.endswith(_JSON_END):
             raise StoreUnavailable(f"cannot read structured card data from {self.relative_path}")
-        return json.loads(body[start + len(_JSON_START) : end])
+        machine = trimmed[start + len(_JSON_START) : len(trimmed) - len(_JSON_END)]
+        try:
+            card = json.loads(machine)
+        except json.JSONDecodeError as exc:
+            raise StoreUnavailable(f"cannot read structured card data from {self.relative_path}") from exc
+        for name, value in _blank_card(self.key, self.title).items():
+            card.setdefault(name, value)
+        return card
 
     def _save(self, card: Mapping[str, Any]) -> None:
         self._check_ignored()
@@ -434,47 +542,98 @@ class MarkdownStore:
         card["reviews"].append(review.as_dict())
         self._save(card)
 
+    def record_plan(self, plan: Mapping[str, Any]) -> str:
+        _validate_plan(plan, self.key)
+        card = self._load()
+        ref = self.relative_path.as_posix()
+        card["plan"] = json.loads(json.dumps(plan))
+        card["plan_ref"] = ref
+        self._save(card)
+        return ref
+
+    def record_tried(self, tried: TriedRecord) -> None:
+        _validate_tried(tried)
+        card = self._load()
+        card["tried"].append(tried.as_dict())
+        self._save(card)
+
     def read_card(self) -> dict[str, Any]:
         return self._load()
 
 
+def _inline(value: Any) -> str:
+    """Render recorded text on one line with comment markers defused."""
+
+    text = " / ".join(str(value).splitlines())
+    return text.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+
+
 def _render_markdown_card(card: Mapping[str, Any]) -> str:
-    lines = [f"# {card['key']} — {card['title']}", "", f"Status: {card['status']}"]
+    lines = [
+        f"# {_inline(card['key'])} — {_inline(card['title'])}",
+        "",
+        f"Status: {_inline(card['status'])}",
+    ]
     lines.extend(("", "## Stop and close stamps"))
     if card["stamps"]:
         for stamp in card["stamps"]:
             label = "close" if stamp["close"] else "stop"
-            lines.append(f"- {label} [{stamp['phase']}]: {stamp['point']}")
+            lines.append(f"- {label} [{stamp['phase']}]: {_inline(stamp['point'])}")
             if stamp["next_skills"]:
-                lines.append(f"  next skills: {', '.join(stamp['next_skills'])}")
+                lines.append(f"  next skills: {_inline(', '.join(stamp['next_skills']))}")
             if stamp["refs"]:
-                lines.append(f"  refs: {', '.join(stamp['refs'])}")
+                lines.append(f"  refs: {_inline(', '.join(stamp['refs']))}")
     else:
         lines.append("(none)")
     lines.extend(("", "## Decision records"))
     if card["decisions"]:
         for decision in card["decisions"]:
             lines.append(
-                f"- {decision['standing']} [{decision['phase']}], {decision['who']}: "
-                f"{decision['verbatim']}"
+                f"- {decision['standing']} [{decision['phase']}], {_inline(decision['who'])}: "
+                f"{_inline(decision['verbatim'])}"
             )
-            lines.append(f"  effect: {decision['effect']}")
+            lines.append(f"  effect: {_inline(decision['effect'])}")
     else:
         lines.append("(none)")
     lines.extend(("", "## Review rounds"))
     if card["reviews"]:
         for review in card["reviews"]:
             lines.append(f"- round {review['round']}: {review['verdict']}")
-            lines.extend(f"  finding: {finding}" for finding in review["findings"])
+            lines.extend(f"  finding: {_inline(finding)}" for finding in review["findings"])
     else:
         lines.append("(none)")
+    lines.extend(("", "## Plan card"))
+    plan = card.get("plan")
+    if plan:
+        lines.append(f"Revision {plan['revision']}")
+        for item in plan["acceptance_criteria"]:
+            lines.append(f"- passes: {str(item['passes']).lower()} — {_inline(item['text'])}")
+        for question in plan.get("open_questions", []):
+            lines.append(f"- open question: {_inline(question)}")
+    else:
+        lines.append("(none)")
+    lines.extend(("", "## Tried"))
+    if card.get("tried"):
+        for tried in card["tried"]:
+            line = f"- [{tried['phase']}] {_inline(tried['what'])}"
+            if tried.get("outcome"):
+                line += f" — {_inline(tried['outcome'])}"
+            lines.append(line)
+    else:
+        lines.append("(none)")
+    # json.dumps escapes newlines, so recorded text cannot end this block early.
     machine = json.dumps(card, sort_keys=True, separators=(",", ":"))
     lines.extend(("", _JSON_START.rstrip("\n"), machine, _JSON_END.lstrip("\n"), ""))
     return "\n".join(lines)
 
 
 class LedgerStore:
-    """CLI-only adapter for an installed event ledger."""
+    """CLI-only adapter for an installed event ledger.
+
+    The CLI may require a writer identity in its own environment for writes.
+    This adapter never supplies one: the person or their wrapper exports it,
+    and a refused write surfaces as ``StoreUnavailable`` with the CLI's message.
+    """
 
     def __init__(
         self,
@@ -491,6 +650,9 @@ class LedgerStore:
         self.title = title
         self._ensured = False
 
+    def is_installed(self) -> bool:
+        return bool(self.cli) and os.path.isfile(self.cli) and os.access(self.cli, os.X_OK)
+
     def _invoke(self, *args: str) -> subprocess.CompletedProcess[str]:
         if not self.cli:
             raise StoreUnavailable("no ledger CLI is configured or available on PATH")
@@ -498,23 +660,27 @@ class LedgerStore:
         if self.db:
             command.extend(("--db", self.db))
         command.extend(args)
-        env = os.environ.copy()
-        env.setdefault("LEDGER_" + "HAR" + "NESS", "ticket")
         try:
-            return subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+            return subprocess.run(command, capture_output=True, text=True, check=False)
         except OSError as exc:
             raise StoreUnavailable(f"cannot execute ledger CLI: {exc}") from exc
 
-    def _run(self, *args: str) -> dict[str, Any]:
+    def _call(self, *args: str) -> tuple[int, dict[str, Any]]:
         result = self._invoke(*args)
         try:
             envelope = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             message = result.stderr.strip() or result.stdout.strip() or "invalid JSON response"
             raise StoreUnavailable(f"ledger CLI failed: {message}") from exc
-        if result.returncode != 0 or not envelope.get("ok"):
+        if not isinstance(envelope, dict):
+            raise StoreUnavailable("ledger CLI returned a non-object envelope")
+        return result.returncode, envelope
+
+    def _run(self, *args: str) -> dict[str, Any]:
+        returncode, envelope = self._call(*args)
+        if returncode != 0 or not envelope.get("ok"):
             error = envelope.get("error") or {}
-            raise StoreUnavailable(str(error.get("message") or result.stderr.strip() or "ledger error"))
+            raise StoreUnavailable(str(error.get("message") or "ledger error"), code=error.get("code"))
         return envelope["data"]
 
     def doctor(self) -> dict[str, Any]:
@@ -527,17 +693,22 @@ class LedgerStore:
             return False
         return True
 
+    def _card_envelope(self) -> dict[str, Any] | None:
+        """The CLI's card for this item, or None when the item does not exist yet."""
+
+        returncode, envelope = self._call("card", self.key)
+        if returncode == 0 and envelope.get("ok"):
+            return envelope["data"]
+        error = envelope.get("error") or {}
+        if error.get("code") == "not_found":
+            return None
+        raise StoreUnavailable(str(error.get("message") or "ledger card failed"), code=error.get("code"))
+
     def _ensure_item(self) -> None:
         if self._ensured:
             return
-        result = self._invoke("card", self.key)
-        if result.returncode == 0:
-            self._ensured = True
-            return
-        if result.returncode != 1:
-            message = result.stderr.strip() or result.stdout.strip() or "ledger card failed"
-            raise StoreUnavailable(message)
-        self._run("new", "--id", self.key, "--type", "ticket", "--title", self.title)
+        if self._card_envelope() is None:
+            self._run("new", "--id", self.key, "--type", "ticket", "--title", self.title)
         self._ensured = True
 
     def write_stamp(
@@ -576,6 +747,18 @@ class LedgerStore:
         self._ensure_item()
         self._append("review.recorded", review.as_dict())
 
+    def record_plan(self, plan: Mapping[str, Any]) -> str:
+        _validate_plan(plan, self.key)
+        self._ensure_item()
+        text = _PLAN_NOTE + json.dumps(plan, sort_keys=True, separators=(",", ":"))
+        data = self._append("item.note", {"text": text})
+        return f"event:{int(data['event']['id'])}"
+
+    def record_tried(self, tried: TriedRecord) -> None:
+        _validate_tried(tried)
+        self._ensure_item()
+        self._append("item.tried", tried.as_dict())
+
     def _append(self, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self._run(
             "append",
@@ -588,18 +771,9 @@ class LedgerStore:
         )
 
     def read_card(self) -> dict[str, Any]:
-        card_result = self._invoke("card", self.key)
-        if card_result.returncode == 1:
+        card = self._card_envelope()
+        if card is None:
             return _blank_card(self.key, self.title)
-        if card_result.returncode != 0:
-            raise StoreUnavailable(card_result.stderr.strip() or "ledger card failed")
-        try:
-            envelope = json.loads(card_result.stdout)
-        except json.JSONDecodeError as exc:
-            raise StoreUnavailable("ledger card returned invalid JSON") from exc
-        if not envelope.get("ok"):
-            raise StoreUnavailable(str((envelope.get("error") or {}).get("message") or "ledger error"))
-        card = envelope["data"]
         events = self._run("export-item", self.key)["events"]
         return _normalize_ledger_card(card, events)
 
@@ -613,6 +787,9 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
     decisions: list[dict[str, Any]] = []
     reviews: list[dict[str, Any]] = []
     stamps: list[dict[str, Any]] = []
+    tried: list[dict[str, Any]] = []
+    plan: dict[str, Any] | None = None
+    plan_ref: str | None = None
     for event in events:
         payload = dict(event["payload"])
         if event["kind"] == "decision.recorded":
@@ -633,6 +810,15 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
                     "close": False,
                 }
             )
+        elif event["kind"] == "item.tried":
+            payload.pop("source", None)
+            tried.append(payload)
+        elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_PLAN_NOTE):
+            try:
+                plan = json.loads(payload["text"][len(_PLAN_NOTE) :])
+            except json.JSONDecodeError as exc:
+                raise StoreUnavailable(f"ledger event {event['id']} holds an unreadable plan card") from exc
+            plan_ref = f"event:{int(event['id'])}"
     if stamps and card.get("status") == "closed":
         stamps[-1]["close"] = True
     return {
@@ -642,6 +828,9 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
         "stamps": stamps,
         "decisions": decisions,
         "reviews": reviews,
+        "plan": plan,
+        "plan_ref": plan_ref,
+        "tried": tried,
     }
 
 
@@ -653,12 +842,26 @@ def choose_store(
     cli: str | Path | None = None,
     db: str | Path | None = None,
 ) -> StoreAdapter:
-    """Use the CLI adapter only when its doctor check succeeds."""
+    """Use the ledger when its CLI is installed; markdown only when it is not.
+
+    An installed CLI whose doctor check fails is reported, never replaced by the
+    markdown card: a silent fallback would split one ticket across two stores.
+    """
 
     ledger = LedgerStore(key, title, cli=cli, db=db)
-    if ledger.is_available():
-        return ledger
-    return MarkdownStore(repo, key, title)
+    if not ledger.is_installed():
+        return MarkdownStore(repo, key, title)
+    try:
+        ledger.doctor()
+    except StoreUnavailable as exc:
+        if exc.code == "missing_db":
+            raise StoreUnavailable(
+                f"the ledger database does not exist yet ({exc}). Initialise it by "
+                "creating this ticket's item with the ledger CLI's `new` verb, then retry.",
+                code="missing_db",
+            ) from exc
+        raise
+    return ledger
 
 
 @dataclass(frozen=True)
@@ -668,17 +871,104 @@ class MoreInfoExit:
     drafted_ask: str | None = None
 
 
-@dataclass
-class TicketPass:
-    """Guarded transitions for one pass; outward actions remain caller-owned."""
+def _go_effect(gate: str, revision: int) -> str:
+    return f"The {gate} gate is approved for plan revision {revision}."
 
-    ticket: Ticket
-    store: StoreAdapter
-    resume_card: dict[str, Any] | None = None
-    phase: str = "orient"
-    plan: PlanCard | None = None
-    go_records: dict[str, str] = field(default_factory=dict)
-    review_round: int = 0
+
+def _has_go(card: Mapping[str, Any], gate: str, revision: int, key: str) -> bool:
+    """A gate is open only through a person's settled ratification in the store."""
+
+    if revision < 1:
+        return False
+    effect = _go_effect(gate, revision)
+    tag = {"type": "ticket", "id": key}
+    for decision in card.get("decisions") or ():
+        source = decision.get("source") or {}
+        if (
+            decision.get("effect") == effect
+            and decision.get("who_kind") == "person"
+            and decision.get("standing") == "settled"
+            and source.get("what") == "ratification"
+            and tag in (decision.get("tags") or ())
+        ):
+            return True
+    return False
+
+
+def _reconcile(
+    stored: Mapping[str, Any], ticket: Ticket, reviews: Sequence[Mapping[str, Any]]
+) -> tuple[PlanCard, list[str], bool]:
+    """Rebuild a plan from its snapshot against the fresh ticket.
+
+    Returns the plan, a list of flagged differences, and whether the
+    acceptance criteria changed (which needs a new plan and plan go).
+    """
+
+    plan = PlanCard(ticket)
+    flags: list[str] = []
+    changed = False
+    rounds = _recorded_rounds(reviews)
+    stored_criteria = {
+        item.get("text"): item for item in stored.get("acceptance_criteria") or () if isinstance(item, Mapping)
+    }
+    restored: list[Criterion] = []
+    for text in ticket.acceptance_criteria:
+        item = stored_criteria.get(text)
+        if item is None:
+            flags.append(f"acceptance criterion is new or changed on the ticket: {text}")
+            changed = True
+            restored.append(Criterion(text))
+            continue
+        candidate = Criterion(
+            text,
+            item.get("passes") is True,
+            item.get("review_evidence"),
+            item.get("review_round"),
+        )
+        if candidate.passes and not _verified(candidate, rounds):
+            flags.append(f"passes is not backed by a recorded review round, reset to false: {text}")
+            candidate = Criterion(text)
+        restored.append(candidate)
+    for text in stored_criteria:
+        if text not in ticket.acceptance_criteria:
+            flags.append(f"acceptance criterion was removed from the ticket: {text}")
+            changed = True
+    plan._criteria = tuple(restored)
+    for step_data in stored.get("steps") or ():
+        step = next((item for item in plan.steps if item.name == step_data.get("name")), None)
+        if step is None:
+            continue
+        if step_data.get("status") == "skipped" and step_data.get("skip"):
+            step.status, step.skip = "skipped", str(step_data["skip"])
+        elif step_data.get("status") in ("pending", "complete"):
+            step.status = step_data["status"]
+    if stored.get("diff_statement"):
+        plan.diff_statement = str(stored["diff_statement"])
+    plan.open_questions = [str(item) for item in stored.get("open_questions") or ()]
+    if stored.get("ticket_status") not in (None, ticket.status):
+        flags.append(f"ticket status changed: {stored['ticket_status']} -> {ticket.status}")
+    if stored.get("ticket_updated_at") not in (None, ticket.updated_at):
+        flags.append("ticket was updated since the plan card was written")
+    return plan, flags, changed
+
+
+class TicketPass:
+    """Guarded transitions for one pass; outward actions remain caller-owned.
+
+    The phase, the review-round count and the gates are read-only. Gates are
+    derived from go decisions the store recorded, never from session state.
+    """
+
+    def __init__(self, ticket: Ticket, store: StoreAdapter):
+        self._ticket = ticket
+        self.store = store
+        self.resume_card: dict[str, Any] | None = None
+        self.reconciliation: tuple[str, ...] = ()
+        self._phase = "orient"
+        self._plan: PlanCard | None = None
+        self._revision = 0
+        self._plan_ref: str | None = None
+        self._rounds = 0
 
     @classmethod
     def open(
@@ -690,23 +980,105 @@ class TicketPass:
         resume: bool = False,
     ) -> "TicketPass":
         ticket = source.pull(key)
-        prior = store.read_card() if resume else None
-        return cls(ticket=ticket, store=store, resume_card=prior)
+        session = cls(ticket, store)
+        if resume:
+            session._resume(store.read_card())
+        return session
+
+    @property
+    def ticket(self) -> Ticket:
+        return self._ticket
+
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    @property
+    def plan(self) -> PlanCard | None:
+        return self._plan
+
+    @property
+    def review_round(self) -> int:
+        return self._rounds
+
+    @property
+    def plan_revision(self) -> int:
+        return self._revision
+
+    def approved(self, gate: str) -> bool:
+        if gate not in ("plan", "outward"):
+            raise TicketError(f"unknown gate: {gate}")
+        return _has_go(self.store.read_card(), gate, self._revision, self._ticket.key)
+
+    def _resume(self, card: dict[str, Any]) -> None:
+        self.resume_card = card
+        reviews = list(card.get("reviews") or ())
+        self._rounds = len(reviews)
+        stored = card.get("plan")
+        if stored:
+            plan, flags, changed = _reconcile(stored, self._ticket, reviews)
+            self._plan = plan
+            self._revision = int(stored.get("revision") or 0)
+            self._plan_ref = card.get("plan_ref")
+            self.reconciliation = tuple(flags)
+        if card.get("status") == "closed":
+            self._phase = "closed"
+            return
+        if not stored:
+            self._phase = "orient"
+            return
+        if changed:
+            self._phase = "plan"
+            return
+        if not _has_go(card, "plan", self._revision, self._ticket.key):
+            self._phase = "plan_go"
+            return
+        last = reviews[-1] if reviews else None
+        if (
+            last is not None
+            and last.get("verdict") == "pass"
+            and all(item.passes and item.review_round == last.get("round") for item in plan.acceptance_criteria)
+        ):
+            self._phase = "outward_go"
+        elif self._rounds >= MAX_REVIEW_ROUNDS:
+            self._phase = "stopped"
+        else:
+            self._phase = "build"
+
+    def _snapshot(self, plan: PlanCard, revision: int) -> dict[str, Any]:
+        data = plan.as_dict()
+        data["revision"] = revision
+        data["ticket_status"] = self._ticket.status
+        if self._ticket.updated_at:
+            data["ticket_updated_at"] = self._ticket.updated_at
+        return data
 
     def finish_orient(self) -> None:
         self._require_phase("orient")
-        self.phase = "research"
+        self._phase = "research"
 
     def finish_research(self) -> None:
         self._require_phase("research")
-        self.phase = "plan"
+        self._phase = "plan"
 
     def present_plan(self, plan: PlanCard) -> None:
         self._require_phase("plan")
-        if plan.key != self.ticket.key:
+        if plan.key != self._ticket.key:
             raise TicketError("plan card belongs to another ticket")
-        self.plan = plan
-        self.phase = "plan_go"
+        if tuple(item.text for item in plan.acceptance_criteria) != self._ticket.acceptance_criteria:
+            raise TicketError("the plan card must carry the ticket's acceptance criteria, in order")
+        if any(item.passes for item in plan.acceptance_criteria):
+            raise TicketError("a presented plan starts with passes: false on every criterion")
+        revision = self._revision + 1
+        ref = self.store.record_plan(self._snapshot(plan, revision))
+        self.store.write_stamp(
+            f"Waiting at plan go for plan revision {revision}.",
+            "plan",
+            ("ticket",),
+            (ref,),
+        )
+        self._plan, self._revision, self._plan_ref = plan, revision, ref
+        self._phase = "plan_go"
 
     def record_go(self, gate: str, *, evidence: str, verbatim: str) -> None:
         expected = {"plan": "plan_go", "outward": "outward_go"}
@@ -723,20 +1095,22 @@ class TicketPass:
                 who_kind="person",
                 standing="settled",
                 source=DecisionSource("ratification", evidence),
-                effect=f"The {gate} gate is approved for this pass.",
-                tags=({"type": "ticket", "id": self.ticket.key},),
+                effect=_go_effect(gate, self._revision),
+                tags=({"type": "ticket", "id": self._ticket.key},),
                 verbatim=verbatim,
                 phase="plan" if gate == "plan" else "review",
                 evidence=evidence,
             )
         )
-        self.go_records[gate] = evidence
 
     def begin_build(self) -> None:
         self._require_phase("plan_go")
-        if "plan" not in self.go_records:
+        if not self.approved("plan"):
             raise GateRequired("plan go is required before build")
-        self.phase = "build"
+        self._phase = "build"
+
+    def record_tried(self, what: str, *, outcome: str | None = None, evidence: str | None = None) -> None:
+        self.store.record_tried(TriedRecord(what, self._store_phase(), outcome, evidence))
 
     def record_review(
         self,
@@ -747,49 +1121,111 @@ class TicketPass:
         reviewer: str = "fresh-context reviewer",
         passed_criteria: Sequence[int] = (),
     ) -> None:
-        if self.phase not in ("build", "review"):
-            raise TicketError(f"cannot record review during {self.phase}")
-        if self.plan is None:
+        if self._phase not in ("build", "review"):
+            raise TicketError(f"cannot record review during {self._phase}")
+        if self._plan is None:
             raise TicketError("review requires a plan card")
         if verdict not in ("pass", "changes"):
             raise TicketError("review verdict must be pass or changes")
-        evidence = evidence.strip()
-        if not evidence:
-            raise TicketError("review requires an evidence reference")
-        self.review_round += 1
-        if self.review_round > 3:
-            raise TicketError("review round cap is three")
+        evidence = (evidence or "").strip()
+        _ref_target(evidence, "review evidence")
+        count = len(self._plan.acceptance_criteria)
+        indices: list[int] = []
         for index in passed_criteria:
-            self.plan.mark_passes(index, evidence)
+            if type(index) is not int or not 0 <= index < count:
+                raise TicketError(f"criterion index out of range: {index!r}")
+            if index in indices:
+                raise TicketError(f"criterion index repeated: {index}")
+            indices.append(index)
+        if self._rounds >= MAX_REVIEW_ROUNDS:
+            raise TicketError("review round cap is three")
+        if verdict == "pass" and sorted(indices) != list(range(count)):
+            raise TicketError(
+                "a passing review must give evidence for every acceptance criterion in this round"
+            )
         review = ReviewRecord(
-            round=self.review_round,
+            round=self._rounds + 1,
             verdict=verdict,
             findings=tuple(findings),
             reviewer=reviewer,
             evidence=evidence,
         )
+        _validate_review(review)
+        before = self.store.read_card().get("reviews") or []
+        if len(before) != self._rounds:
+            raise StoreUnavailable("the store's review rounds changed outside this pass; resume to reload")
+
         self.store.record_review(review)
+        rounds = _recorded_rounds(self.store.read_card().get("reviews") or [])
+        if review.round not in rounds or len(rounds) != review.round:
+            raise StoreUnavailable(f"review round {review.round} was not recorded by the store")
+        self._rounds = review.round
+        criteria = list(self._plan.acceptance_criteria)
+        for index in indices:
+            candidate = Criterion(criteria[index].text, True, evidence, review.round)
+            if not _verified(candidate, rounds):
+                raise StoreUnavailable(f"review round {review.round} does not carry this evidence")
+            criteria[index] = candidate
+        self._plan._criteria = tuple(criteria)
+        self._plan_ref = self.store.record_plan(self._snapshot(self._plan, self._revision))
+
         if verdict == "pass":
-            if not all(item.passes for item in self.plan.acceptance_criteria):
-                raise TicketError("review cannot pass while acceptance criteria remain false")
-            self.phase = "outward_go"
-        elif self.review_round == 3:
+            self.store.write_stamp(
+                f"Waiting at outward go after review round {review.round}.",
+                "review",
+                ("ticket",),
+                (self._plan_ref, evidence),
+            )
+            self._phase = "outward_go"
+        elif review.round == MAX_REVIEW_ROUNDS:
             self.store.write_stamp(
                 "Review did not converge after round three.",
                 "review",
                 ("ticket", "review"),
-                (evidence,),
+                (self._plan_ref, evidence),
             )
-            self.phase = "stopped"
+            self._phase = "stopped"
         else:
-            self.phase = "build"
+            self._phase = "build"
 
-    def close(self, point: str, *, refs: Sequence[str] = ()) -> None:
+    def require_outward_go(self) -> None:
+        """Call before any outward action; the store must hold the outward go."""
+
         self._require_phase("outward_go")
-        if "outward" not in self.go_records:
+        if not self.approved("outward"):
+            raise GateRequired("outward go is required before any outward action")
+
+    def close(
+        self,
+        point: str,
+        *,
+        refs: Sequence[str] = (),
+        next_skills: Sequence[str] = (),
+    ) -> None:
+        self._require_phase("outward_go")
+        if not self.approved("outward"):
             raise GateRequired("outward go is required before close")
-        self.store.write_stamp(point, "close", (), refs, close=True)
-        self.phase = "closed"
+        self.store.write_stamp(point, "close", next_skills, refs, close=True)
+        card = self.store.read_card()
+        problems: list[str] = []
+        stamps = card.get("stamps") or []
+        last = stamps[-1] if stamps else {}
+        if card.get("status") != "closed" or not last.get("close"):
+            problems.append("the card is not marked closed")
+        if last.get("point") != point or last.get("phase") != "close":
+            problems.append("the last stamp is not this close point")
+        if list(last.get("next_skills") or ()) != list(next_skills):
+            problems.append("the next skills differ")
+        if list(last.get("refs") or ()) != list(refs):
+            problems.append("the references differ")
+        for gate in ("plan", "outward"):
+            if not _has_go(card, gate, self._revision, self._ticket.key):
+                problems.append(f"the {gate} go decision is missing")
+        if len(card.get("reviews") or ()) != self._rounds:
+            problems.append("the review rounds differ")
+        if problems:
+            raise StoreUnavailable("close read-back failed: " + "; ".join(problems))
+        self._phase = "closed"
 
     def more_info(self, destination: str, question: str, *, role: str | None = None) -> MoreInfoExit:
         if destination not in INFO_EXITS:
@@ -802,7 +1238,7 @@ class TicketPass:
             if not role:
                 raise TicketError("someone_else requires a role")
             waiting = f"waiting on {role}: {question}"
-            drafted = f"Could you help with {self.ticket.key}? {question}"
+            drafted = f"Could you help with {self._ticket.key}? {question}"
         else:
             waiting = f"waiting on {destination}: {question}"
             drafted = None
@@ -810,26 +1246,27 @@ class TicketPass:
             waiting,
             self._store_phase(),
             ("ticket",),
-            (),
+            (self._plan_ref,) if self._plan_ref else (),
         )
-        self.phase = "stopped"
+        self._phase = "stopped"
         return MoreInfoExit(destination, waiting, drafted)
 
     def _store_phase(self) -> str:
-        if self.phase == "plan_go":
+        if self._phase == "plan_go":
             return "plan"
-        if self.phase == "research":
+        if self._phase == "research":
             return "orient"
-        if self.phase == "outward_go":
+        if self._phase == "outward_go":
             return "review"
-        return self.phase if self.phase in PHASES else "close"
+        return self._phase if self._phase in PHASES else "close"
 
     def _require_phase(self, expected: str) -> None:
-        if self.phase != expected:
-            raise TicketError(f"expected phase {expected}, found {self.phase}")
+        if self._phase != expected:
+            raise TicketError(f"expected phase {expected}, found {self._phase}")
 
 
 __all__ = [
+    "Criterion",
     "DecisionRecord",
     "DecisionSource",
     "FileTicketSource",
@@ -845,5 +1282,6 @@ __all__ = [
     "TicketError",
     "TicketPass",
     "TicketSource",
+    "TriedRecord",
     "choose_store",
 ]
