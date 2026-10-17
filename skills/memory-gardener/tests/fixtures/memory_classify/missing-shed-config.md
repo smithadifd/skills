@@ -5,4 +5,4 @@ metadata:
   type: reference
 ---
 
-Settings were kept in `/nonexistent-garden/shed.conf` for the thermostat.
+Settings were kept in `/etc/garden-notes/shed.conf` for the thermostat.

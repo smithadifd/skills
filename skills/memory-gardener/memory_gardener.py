@@ -3406,18 +3406,27 @@ def render_file_budget_report(result):
 
 CLASSIFY_CLASSES = ("personal", "harness-fact", "decision", "project-gotcha", "stale")
 LOW_CONFIDENCE = "low-confidence"
-# A rules line counts as the duplicate of a note when it shares at least this
-# many significant words with the note's description AND at least this share
-# of them. Deliberately strict: a missed duplicate costs a human glance, a
-# false one would tell the owner a note is safe to drop.
-DUP_MIN_SHARED = 4
-DUP_MIN_SHARE = 0.6
-DUP_MIN_DESC_WORDS = 4
+# A rules line counts as the duplicate of a note only when the note's
+# description and the line share at least DUP_MIN_SHARED distinctive words AND
+# the Jaccard score of the two word sets (shared / union) is at least
+# DUP_MIN_JACCARD. The union makes the test symmetric: a long line that merely
+# contains the description's words, or a short line inside a long description,
+# scores low. Deliberately strict: a missed duplicate costs a human glance, a
+# false one would tell the owner a note is safe to drop. The values sit in the
+# gap between the loose matches seen in a first review (at most 4 shared words,
+# score 0.31 or less) and true restatements of a rule (5 or more shared words,
+# score 0.45 or more); a verbatim copy scores 1.0.
+DUP_MIN_SHARED = 5
+DUP_MIN_JACCARD = 0.4
 CLASSIFY_STOPWORDS = frozenset((
     "this that with from have been were will would should could when then than "
     "them they their there what which while about after before into over under "
     "only also each every does done just like more most much must never always "
     "note notes used uses using need needs want wants").split())
+# Words common to nearly every rules line; they never count toward a duplicate.
+CLASSIFY_GENERIC = frozenset((
+    "harness session sessions model models file files memory rule rules "
+    "standard standards claude").split())
 HARNESS_VOCAB = frozenset((
     "harness seat seats orchestrate orchestrator director builder reviewer "
     "worktree launchd cmux omp codex subagent subagents packet handback "
@@ -3429,18 +3438,33 @@ GOTCHA_CUES = ("gotcha", "workaround", "breaks", "fails", "failing", "bug",
                "crash", "error", "do not", "don't", "never", "must", "quirk",
                "silently", "mechanics")
 STALE_LINE_RE = re.compile(
-    r"^[\s>*_#-]*(?:status:\s*)?(resolved|superseded|obsolete|deprecated)\b",
+    r"^[\s>*_#-]*(status:\s*)?(resolved|superseded|obsolete|deprecated|replaced[- ]by)\b",
     re.IGNORECASE)
 STALE_STATUS_VALUES = ("resolved", "superseded", "obsolete", "deprecated",
                        "dead", "archived")
+# A marker in a title or description counts only when it leads the text: a
+# mid-sentence "superseded by" or "3 of 4 now RESOLVED" can sit in a note that
+# still states current truth.
+STALE_TEXT_RE = re.compile(
+    r"^\W*(resolved|superseded|obsolete|replaced[- ]by)\b", re.IGNORECASE)
+# A body line is a status line when it opens the body (its first few lines) or
+# is written as `Status: ...`; a RESOLVED line deep in a long note is history.
+STALE_BODY_LINES = 3
 BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 WORD_RE = re.compile(r"[a-z0-9][a-z0-9_-]{3,}")
 REPO_PATH_RE = re.compile(r"(?:^|[\s`(/~])(?:code|work)/([A-Za-z0-9_.-]+)")
+# A quoted path is only worth checking when it can name one real file: no
+# placeholder, glob or template syntax, not a URL, not a scratch location.
+PATH_TOKEN_RE = re.compile(r"^(~|/)[^\s]*/[^\s]+$")
+PATH_PLACEHOLDER_RE = re.compile(r"[<>*?{}\[\]$]|\.\.\.|://")
+PATH_SCRATCH_RE = re.compile(
+    r"^(?:/private)?/(?:tmp|var)/|/worktrees?/|/wt/|/scratch|/\.claude/worktrees/")
 
 
 def _sig_words(text):
     return {w for w in WORD_RE.findall(text.lower())
-            if w not in CLASSIFY_STOPWORDS}
+            if w not in CLASSIFY_STOPWORDS and w not in CLASSIFY_GENERIC
+            and w not in HARNESS_VOCAB}
 
 
 def _collect_md_lines(roots):
@@ -3469,40 +3493,63 @@ def _collect_md_lines(roots):
     return out
 
 
-def _find_duplicate(description, body, md_lines):
-    """`file:line` of the best-matching line in md_lines, or None. Two ways to
-    match: the description's significant words overlap a line (see DUP_*), or
-    two distinct backticked terms of the note both sit on one line."""
+def _find_duplicate(description, md_lines):
+    """`file:line` of the best-matching line in md_lines, or None. A line
+    matches only on a symmetric overlap with the description (see DUP_*), best
+    Jaccard score first, then most shared words, then the earliest line."""
     desc = _sig_words(description)
-    ticks = sorted({t.lower() for t in BACKTICK_RE.findall(body) if len(t) >= 5})
-    best = None  # (score, label, line)
-    for label, lineno, words, lowered in md_lines:
-        score = 0
-        if len(desc) >= DUP_MIN_DESC_WORDS:
-            shared = len(desc & words)
-            if shared >= DUP_MIN_SHARED and shared >= DUP_MIN_SHARE * len(desc):
-                score = shared
-        if len(ticks) >= 2 and sum(1 for t in ticks if t in lowered) >= 2:
-            score = max(score, 2)
-        if score and (best is None or score > best[0]):
-            best = (score, label, lineno)
-    return None if best is None else "%s:%d" % (best[1], best[2])
+    best = None  # (jaccard, shared, label, line)
+    for label, lineno, words, _lowered in md_lines:
+        shared = len(desc & words)
+        if shared < DUP_MIN_SHARED:
+            continue
+        jaccard = shared / len(desc | words)
+        if jaccard < DUP_MIN_JACCARD:
+            continue
+        if best is None or (jaccard, shared) > best[:2]:
+            best = (jaccard, shared, label, lineno)
+    return None if best is None else "%s:%d" % (best[2], best[3])
 
 
 def _stale_reason(fm_lines, body):
+    """Why a note is stale, or None. Only an explicit marker counts; whether a
+    quoted path still exists never decides the class (see _missing_path)."""
     status = (read_fm_field(fm_lines, "status") or "").strip().lower()
     if status in STALE_STATUS_VALUES:
         return "frontmatter status: %s" % status
     if read_fm_field(fm_lines, "superseded_by"):
         return "frontmatter superseded_by is set"
-    for ln in body.splitlines():
-        m = STALE_LINE_RE.match(ln)
+    title = next((ln.lstrip("# ") for ln in body.splitlines()
+                  if ln.startswith("#")), "")
+    for label, text in (("title", title), ("description",
+                        read_fm_field(fm_lines, "description") or "")):
+        m = STALE_TEXT_RE.search(text)
         if m:
-            return "marked %s" % m.group(1).upper()
-    paths = sorted({t for t in BACKTICK_RE.findall(body)
-                    if re.match(r"^(~|/)[^\s]*/[^\s]+$", t)})
-    if paths and not any(os.path.exists(os.path.expanduser(p)) for p in paths):
-        return "names a path that no longer exists: %s" % paths[0]
+            return "%s starts with %s" % (label, m.group(1).lower())
+    seen = 0
+    for ln in body.splitlines():
+        if not ln.strip():
+            continue
+        seen += 1
+        m = STALE_LINE_RE.match(ln)
+        if m and (m.group(1) or seen <= STALE_BODY_LINES):
+            return "marked %s" % m.group(2).upper()
+    return None
+
+
+def _missing_path(body):
+    """First quoted absolute or `~/` path that looks like one real file and is
+    missing, or None. Low-confidence evidence only, never a class."""
+    for t in sorted(set(BACKTICK_RE.findall(body))):
+        if not PATH_TOKEN_RE.match(t) or PATH_PLACEHOLDER_RE.search(t) \
+                or PATH_SCRATCH_RE.search(t):
+            continue
+        path = os.path.expanduser(t)
+        # `/api/v1/x` style routes: the first directory is not on this machine.
+        if not os.path.isdir(os.path.join("/", path.split("/")[1])):
+            continue
+        if not os.path.exists(path):
+            return t
     return None
 
 
@@ -3512,19 +3559,21 @@ def _note_repo(fm_lines, text, store_slug):
     repo = read_fm_field(fm_lines, "repo")
     if repo:
         return repo, True
-    m = REPO_PATH_RE.search(text)
-    if m:
-        return m.group(1).rstrip("."), True
+    for m in REPO_PATH_RE.finditer(text):
+        name = m.group(1).rstrip(".")
+        if re.search(r"[A-Za-z0-9]", name):
+            return name, True
     return store_slug, False
 
 
 def classify_note(name, text, md_lines, ledger_lines, store_slug):
     """-> (class, evidence, low_confidence_reason_or_None). Rules, in order:
-    1 stale marker or dead path -> stale; 2 type user -> personal;
-    3 duplicate found in a rules root -> harness-fact (with no rules root,
-    harness vocabulary stands in, flagged); 4 by metadata.type: feedback ->
-    personal, project -> decision or project-gotcha by cue count, reference and
-    mechanics -> project-gotcha; anything else decided by cues, flagged."""
+    1 explicit stale marker -> stale; 2 type user -> personal; 3 duplicate
+    found in a rules root -> harness-fact (never without a rules root);
+    4 by metadata.type: feedback -> personal, project -> decision or
+    project-gotcha by cue count, reference and mechanics -> project-gotcha;
+    anything else decided by cues, flagged. A quoted path that no longer
+    exists only adds a low-confidence reason."""
     fm_lines, body = split_frontmatter(text)
     ntype = (read_metadata_field(fm_lines, "type") or "").strip().lower()
     description = read_fm_field(fm_lines, "description") or ""
@@ -3535,29 +3584,33 @@ def classify_note(name, text, md_lines, ledger_lines, store_slug):
     if reason:
         return "stale", "reason: %s" % reason, None
 
+    missing = _missing_path(body)
+    if missing:
+        low.append("names a path that no longer exists: %s" % missing)
+
     if ntype == "user":
-        return "personal", "type=user", None
+        return "personal", "type=user", "; ".join(low) or None
 
     harness_words = sorted(w for w in HARNESS_VOCAB
                            if re.search(r"\b%s\b" % w, haystack))
     harness_like = len(harness_words) >= 2 and ntype != "project"
+    suffix = ""
     if md_lines is not None:
-        dup = _find_duplicate(description, body, md_lines)
+        dup = _find_duplicate(description, md_lines)
         if dup:
-            return "harness-fact", "duplicates: %s" % dup, None
+            return ("harness-fact", "duplicates: %s" % dup,
+                    "; ".join(low) or None)
+        if harness_like:
+            low.append("harness vocabulary but no duplicate found in the rules roots")
     elif harness_like:
-        return ("harness-fact", "duplicates: not searched",
-                "no --rules-root given; class rests on harness vocabulary (%s)"
-                % ", ".join(harness_words[:3]))
-
-    if harness_like:
-        low.append("harness vocabulary but no duplicate found in the rules roots")
+        suffix = "; duplicates: not searched"
+        low.append("harness vocabulary (%s) but no --rules-root given, so "
+                   "duplicates were not searched" % ", ".join(harness_words[:3]))
 
     decide = sum(1 for c in DECISION_CUES if c in haystack)
     gotcha = sum(1 for c in GOTCHA_CUES if c in haystack)
     if ntype == "feedback":
-        return ("personal", "type=feedback",
-                "; ".join(low) or None)
+        return ("personal", "type=feedback" + suffix, "; ".join(low) or None)
     if ntype == "project":
         cls = "decision" if decide > gotcha else "project-gotcha"
         if decide == gotcha:
@@ -3572,20 +3625,31 @@ def classify_note(name, text, md_lines, ledger_lines, store_slug):
         if ledger_lines is None:
             evidence = "ledger: none yet"
         else:
-            hit = _find_duplicate(description, body, ledger_lines)
+            hit = _find_duplicate(description, ledger_lines)
             evidence = "ledger: %s" % (hit or "no match")
             if not hit:
                 low.append("no matching ledger item")
-        return cls, evidence, "; ".join(low) or None
+        return cls, evidence + suffix, "; ".join(low) or None
     repo, confident = _note_repo(fm_lines, text, store_slug)
     if not confident:
         low.append("repo taken from the store name, not the note")
-    return cls, "repo: %s" % repo, "; ".join(low) or None
+    return cls, "repo: %s%s" % (repo, suffix), "; ".join(low) or None
+
+
+def _require_dir(path, what):
+    if not os.path.isdir(os.path.expanduser(path)):
+        raise ValueError("%s %r does not exist or is not a directory"
+                         % (what, path))
 
 
 def classify_store(memory_dir, rules_roots, ledger_roots):
     """Classify every fact note in memory_dir. Reads only; returns a dict with
-    sorted `entries` and per-class `counts`."""
+    sorted `entries` and per-class `counts`. Every input root must exist."""
+    _require_dir(memory_dir, "memory dir")
+    for r in rules_roots:
+        _require_dir(r, "--rules-root")
+    for r in ledger_roots:
+        _require_dir(r, "--ledger-root")
     md_lines = _collect_md_lines(rules_roots) if rules_roots else None
     ledger_lines = _collect_md_lines(ledger_roots) if ledger_roots else None
     store_slug = os.path.basename(os.path.dirname(
@@ -3625,14 +3689,32 @@ def render_classify_report(result, stamp=None):
     return "\n".join(out) + "\n"
 
 
+def _inside(parent, child):
+    return child == parent or os.path.commonpath([parent, child]) == parent
+
+
 def check_classify_out(memory_dir, out):
-    """Refuse a report path inside (or equal to) the store being classified, so
-    the report can never become a note of the store it describes."""
-    store = os.path.realpath(memory_dir)
-    target = os.path.realpath(out)
-    if target == store or os.path.commonpath([store, target]) == store:
+    """Refuse a report path inside (or equal to) the store being classified,
+    by its spelled path and by where it resolves, and refuse a symlink target,
+    so the report can never become a note of the store it describes or
+    overwrite a file through a link."""
+    if (_inside(os.path.abspath(memory_dir), os.path.abspath(out))
+            or _inside(os.path.realpath(memory_dir), os.path.realpath(out))):
         raise ValueError("--out %r is inside the memory dir being classified; "
                          "classify is report-only" % out)
+    if os.path.islink(out):
+        raise ValueError("--out %r is a symlink; refusing to write through it"
+                         % out)
+
+
+def write_classify_report(out, text):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(out, flags, 0o666)
+    except OSError as e:
+        raise ValueError("cannot write --out %r: %s" % (out, e.strerror))
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 # --------------------------------------------------------------------------- #
@@ -3839,14 +3921,17 @@ def main(argv=None):
             return 0
 
         if args.cmd == "classify":
+            from_env = bool(os.environ.get("MEMORY_GARDENER_DIR")) \
+                and memory_dir == _default_memory_dir()
+            _require_dir(memory_dir, "memory dir (from MEMORY_GARDENER_DIR)"
+                         if from_env else "memory dir")
             if args.out:
                 check_classify_out(memory_dir, os.path.expanduser(args.out))
             result = classify_store(memory_dir, args.rules_root, args.ledger_root)
             text = render_classify_report(
                 result, today.isoformat() if args.stamp else None)
             if args.out:
-                with open(os.path.expanduser(args.out), "w", encoding="utf-8") as f:
-                    f.write(text)
+                write_classify_report(os.path.expanduser(args.out), text)
                 sys.stderr.write("report written: %s\n" % args.out)
                 print(classify_count_line(result))
             else:
