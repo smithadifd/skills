@@ -312,6 +312,86 @@ def test_exact_approve_line_yields_approve():
     assert verdict == review_phase.APPROVED
 
 
+# --- two different verdicts are a conflict, in either order -------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "## Verdict: REQUEST CHANGES\n\nThe limit is ignored.\n\n## Verdict: APPROVE\n",
+            id="request-changes-then-approve",
+        ),
+        pytest.param(
+            "## Verdict: APPROVE\n\nThe limit is ignored.\n\n## Verdict: REQUEST CHANGES\n",
+            id="approve-then-request-changes",
+        ),
+    ],
+)
+def test_two_different_verdict_lines_are_a_conflict(text):
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        review_phase.parse_omp(text)
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith("omp: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "VERDICT: REQUEST CHANGES\n\n" + OMP_APPROVE,
+            id="request-changes-then-approve",
+        ),
+        pytest.param(
+            OMP_APPROVE + "\nVERDICT: REQUEST CHANGES\n",
+            id="approve-then-request-changes",
+        ),
+        pytest.param(
+            "VERDICT: APPROVE\n\n" + OMP_REQUEST_CHANGES,
+            id="approve-then-exact-request-changes",
+        ),
+        pytest.param(
+            OMP_REQUEST_CHANGES + "\nVERDICT: APPROVE\n",
+            id="exact-request-changes-then-approve",
+        ),
+    ],
+)
+def test_bare_label_that_disagrees_with_the_verdict_line_is_a_conflict(text):
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        review_phase.parse_omp(text)
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith("omp: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+    assert result["artifacts"]["review.md"] == text
+    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        pytest.param(OMP_APPROVE + "\nVERDICT: APPROVE\n", "approved", id="approve-twice"),
+        pytest.param(
+            "VERDICT: REQUEST CHANGES\n\n" + OMP_REQUEST_CHANGES,
+            "changes_requested",
+            id="request-changes-twice",
+        ),
+    ],
+)
+def test_bare_label_that_repeats_the_verdict_line_still_parses(text, expected):
+    verdict, _ = review_phase.parse_omp(text)
+    assert verdict == expected
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "success", result["reason"]
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == expected
+    assert review_phase.validate_findings(findings) == []
+    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
+
+
 # --- the fallback never rescues a failed omp parse ----------------------------
 
 

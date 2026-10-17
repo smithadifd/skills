@@ -29,7 +29,10 @@ is needed. Write the review to a file and run `python3 ~/.claude/skills/review/r
 whose `artifacts["findings.json"]` validates against `skills/review/findings.schema.json`
 (`--validate <findings.json>` re-checks one); the one-line bullet shape above,
 tag and `file:line` exact, is what its `claude-fresh` adapter parses — the
-worked example above is the shape it expects, verbatim.
+worked example above is the shape it expects, verbatim. A return that states
+two different verdicts, in either order, is a failure for every backend, even
+with `adapters.jev_fallback` on. The same verdict stated twice is not a
+conflict, though the `omp` backend still needs its verdict line exactly once.
 
 A review run through `omp -p --model <id> --thinking=<level>` with the
 reviewer agent uses `--backend omp --model <id> --thinking <level>` (in an

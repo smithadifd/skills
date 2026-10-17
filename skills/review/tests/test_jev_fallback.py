@@ -247,6 +247,80 @@ def test_flag_on_both_raise_resolve_error_fail_closed(monkeypatch):
     assert result["artifacts"]["findings.json"] is None
 
 
+def _claude_two_verdicts(first: str, second: str) -> str:
+    return (
+        f"## Verdict: {first}\n\n"
+        "### Issues\n"
+        "- `src/report.py:14` — the total skips the last row; include it in the sum.\n\n"
+        f"## Verdict: {second}\n"
+    )
+
+
+def _grok_two_verdicts(first: str, second: str) -> str:
+    return (
+        "## FINDINGS\n"
+        "- `src/report.py:14` — the total skips the last row.\n\n"
+        f"## VERDICT\n{first} — the first reading.\n\n"
+        f"## VERDICT\n{second} — the second reading.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "backend, text",
+    [
+        # The selected adapter raises the conflict itself.
+        pytest.param(
+            "claude-fresh", _claude_two_verdicts("REQUEST CHANGES", "APPROVE"),
+            id="claude-fresh-request-changes-then-approve",
+        ),
+        pytest.param(
+            "claude-fresh", _claude_two_verdicts("APPROVE", "REQUEST CHANGES"),
+            id="claude-fresh-approve-then-request-changes",
+        ),
+        pytest.param(
+            "grok-notools", _grok_two_verdicts("flagged", "cleared"),
+            id="grok-notools-flagged-then-cleared",
+        ),
+        pytest.param(
+            "grok-notools", _grok_two_verdicts("cleared", "flagged"),
+            id="grok-notools-cleared-then-flagged",
+        ),
+        # The selected adapter cannot parse the shape; the conflict surfaces
+        # in another adapter the fallback tries.
+        pytest.param(
+            "grok-notools", _claude_two_verdicts("REQUEST CHANGES", "APPROVE"),
+            id="grok-notools-reads-claude-request-changes-then-approve",
+        ),
+        pytest.param(
+            "grok-notools", _claude_two_verdicts("APPROVE", "REQUEST CHANGES"),
+            id="grok-notools-reads-claude-approve-then-request-changes",
+        ),
+        pytest.param(
+            "claude-fresh", _grok_two_verdicts("flagged", "cleared"),
+            id="claude-fresh-reads-grok-flagged-then-cleared",
+        ),
+    ],
+)
+def test_flag_on_verdict_conflict_stays_a_failure_and_never_asks_jev(
+    monkeypatch, backend, text
+):
+    _stub_secret(monkeypatch)
+    calls = []
+    payload = {"answers": {"verdict": {"choice": "APPROVE", "confidence": 0.95}}}
+
+    def approve(*a, **k):
+        calls.append(a)
+        return _Resp(payload)
+
+    monkeypatch.setattr(jev_client, "urlopen", approve)
+    result = review_phase.run_phase(_envelope(backend, text, jev=True))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+    assert "verdict_source" not in result
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "text, choice, expected_verdict",
     [

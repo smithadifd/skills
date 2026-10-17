@@ -43,6 +43,10 @@ Backends (one adapter each, chosen by the envelope's `inputs.backend`):
                    and thinking level; both are required, and the phase
                    result carries them as `attribution` with the lane name
 
+A return whose verdict labels disagree, in either order, fails for every
+backend (`VerdictConflict`), with or without the Jev fallback. Repeating the
+same verdict is not a conflict (omp still needs its exact line exactly once).
+
 The adapters normalise a return that a runner already obtained; dispatching
 the model (credentials, tools, pools) stays runner-owned, so an envelope
 whose `inputs` carry no `return_text` / `return_file` is `blocked`. The
@@ -98,6 +102,29 @@ CHANGES_REQUESTED = "changes_requested"
 
 class ParseError(ValueError):
     """The return text does not carry the shape this backend promises."""
+
+
+class VerdictConflict(ParseError):
+    """The return states two different verdicts, so neither one can be taken.
+
+    A failure even with `adapters.jev_fallback` on: another adapter or Jev
+    would pick one of two verdicts the reviewer wrote.
+    """
+
+
+def _single_verdict(verdicts: list[str]) -> str | None:
+    """The one verdict a return's verdict labels state, or None when it has none.
+
+    Every label counts, not the first or the last, so a later label never
+    overrides an earlier one: two labels that disagree raise VerdictConflict
+    whichever comes first. The same verdict repeated is still that verdict.
+    """
+    if len(set(verdicts)) > 1:
+        other = next(v for v in verdicts if v != verdicts[0])
+        raise VerdictConflict(
+            f"conflicting verdicts in the return: {verdicts[0]} and {other}"
+        )
+    return verdicts[0] if verdicts else None
 
 
 # --- text helpers shared by the adapters -------------------------------------
@@ -247,7 +274,7 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     lines = text.splitlines()
     bullets: list[str] | None = None
     unparsed = False
-    verdict: str | None = None
+    verdicts: list[str] = []
     i = 0
     while i < len(lines):
         heading = _HEADING.match(lines[i])
@@ -261,15 +288,16 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
         if title.startswith("VERDICT"):
             inline = _GROK_VERDICT_LABEL.match(lines[i])
             if inline:
-                verdict = inline.group(1).lower()
+                verdicts.append(inline.group(1).lower())
             else:
                 for candidate in lines[i + 1:]:
                     if candidate.strip():
                         matched = _GROK_VERDICT.match(candidate.strip())
                         if matched:
-                            verdict = matched.group(1).lower()
+                            verdicts.append(matched.group(1).lower())
                         break
         i += 1
+    verdict = _single_verdict(verdicts)
     if bullets is None:
         raise ParseError("no `## FINDINGS` section in the return")
     if unparsed:
@@ -300,18 +328,25 @@ _CLAUDE_SECTIONS = (
 )
 
 
-def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
-    """The reviewer agent's block, the headless `VERDICT:` shape, or the
-    `review` skill's tagged bullets."""
-    lines = text.splitlines()
-    verdict: str | None = None
+def _claude_verdict_labels(lines: list[str]) -> list[str]:
+    """The verdict of every `## Verdict:` heading and bare `VERDICT:` label, in order."""
+    labels: list[str] = []
     for line in lines:
         matched = _CLAUDE_VERDICT_HEADING.match(line) or _CLAUDE_VERDICT_LABEL.match(line)
         if matched:
             token = matched.group(1).upper()
-            verdict = CHANGES_REQUESTED if token.startswith("REQUEST") else APPROVED
-        elif _CLEAN_SENTINEL.match(line):
-            verdict = verdict or APPROVED
+            labels.append(CHANGES_REQUESTED if token.startswith("REQUEST") else APPROVED)
+    return labels
+
+
+def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
+    """The reviewer agent's block, the headless `VERDICT:` shape, or the
+    `review` skill's tagged bullets."""
+    lines = text.splitlines()
+    # The clean sentinel only stands in when there is no verdict label at all.
+    verdict = _single_verdict(_claude_verdict_labels(lines))
+    if verdict is None and any(_CLEAN_SENTINEL.match(line) for line in lines):
+        verdict = APPROVED
 
     collected: list[tuple[str, str]] = []  # (rule, bullet text)
     unparsed_sections: list[str] = []
@@ -386,8 +421,13 @@ def parse_omp(text: str) -> tuple[str, list[dict]]:
     The reviewer agent always writes `## Verdict: APPROVE | REQUEST CHANGES`,
     so a reply without that line (empty, cut off, or some other shape) is a
     parse failure rather than an approval inferred from the rest of the text.
+    A reply whose verdict labels disagree raises VerdictConflict.
     """
     lines = text.splitlines()
+    # Every verdict label in the reply must agree, whichever comes first: the
+    # exact lines, malformed ones, and bare `VERDICT:` labels, which the checks
+    # below do not see.
+    _single_verdict(_claude_verdict_labels(lines))
     exact = [m for m in (_OMP_VERDICT_LINE.fullmatch(l) for l in lines) if m]
     if not exact:
         raise ParseError(
@@ -407,16 +447,10 @@ def parse_omp(text: str) -> tuple[str, list[dict]]:
         raise ParseError(
             "malformed verdict line in the omp reply: " + repr(malformed[0])
         )
-    # The verdict comes from the exact line alone. The shared parser supplies
-    # the findings; if its looser patterns read a different verdict elsewhere
-    # in the reply, the reply contradicts itself and does not parse.
+    # The verdict comes from the exact line alone; the shared parser supplies
+    # the findings.
     verdict = CHANGES_REQUESTED if exact[0].group(1) == "REQUEST CHANGES" else APPROVED
-    shared_verdict, findings = parse_claude_fresh(text)
-    if shared_verdict != verdict:
-        raise ParseError(
-            "conflicting verdict in the omp reply: the verdict line says "
-            f"{verdict}, other lines say {shared_verdict}"
-        )
+    _, findings = parse_claude_fresh(text)
     return verdict, findings
 
 
@@ -698,10 +732,18 @@ def _parse_return(envelope: dict, backend: str, text: str) -> dict:
     except ParseError as exc:
         # An omp reply without the reviewer agent's verdict line is a failure
         # even with the fallback on: another adapter or Jev would infer a
-        # verdict the reviewer never wrote.
-        if backend == OMP_LANE or not _jev_fallback_enabled(envelope):
+        # verdict the reviewer never wrote. So is a return with two different
+        # verdicts: the fallback would pick one the reviewer also contradicted.
+        if (
+            backend == OMP_LANE
+            or isinstance(exc, VerdictConflict)
+            or not _jev_fallback_enabled(envelope)
+        ):
             return _result("failure", f"{backend}: {exc}", text, None)
-        parsed = _try_other_adapters(backend, text)
+        try:
+            parsed = _try_other_adapters(backend, text)
+        except VerdictConflict as exc:
+            return _result("failure", f"{backend}: {exc}", text, None)
         if parsed is None:
             return _consult_jev(backend, text)
         verdict, findings = parsed
@@ -728,6 +770,8 @@ def _try_other_adapters(backend: str, text: str) -> tuple[str, list[dict]] | Non
             continue
         try:
             return adapter(text)
+        except VerdictConflict:
+            raise
         except ParseError:
             continue
     return None

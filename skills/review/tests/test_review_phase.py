@@ -441,6 +441,115 @@ def test_claude_adapter_raises_when_a_section_does_not_parse_as_findings():
         review_phase.parse_claude_fresh(text)
 
 
+# --- a return that states two different verdicts is refused ------------------
+
+
+def _claude_two_verdicts(first: str, second: str) -> str:
+    return (
+        f"{first}\n\n"
+        "### Issues\n"
+        "- `src/report.py:14` — the total skips the last row; include it in the sum.\n\n"
+        f"{second}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        pytest.param(
+            "## Verdict: REQUEST CHANGES", "## Verdict: APPROVE",
+            id="request-changes-then-approve",
+        ),
+        pytest.param(
+            "## Verdict: APPROVE", "## Verdict: REQUEST CHANGES",
+            id="approve-then-request-changes",
+        ),
+        pytest.param(
+            "VERDICT: REQUEST CHANGES", "VERDICT: APPROVE",
+            id="label-request-changes-then-approve",
+        ),
+        pytest.param(
+            "VERDICT: APPROVE", "VERDICT: REQUEST CHANGES",
+            id="label-approve-then-request-changes",
+        ),
+        pytest.param(
+            "VERDICT: REQUEST CHANGES", "## Verdict: APPROVE WITH FINDINGS",
+            id="label-request-changes-then-heading-approve",
+        ),
+    ],
+)
+def test_claude_adapter_refuses_two_different_verdicts(first, second):
+    text = _claude_two_verdicts(first, second)
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        review_phase.parse_claude_fresh(text)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith("claude-fresh: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize(
+    "first, second, expected",
+    [
+        pytest.param("## Verdict: APPROVE", "VERDICT: APPROVE", "approved", id="approve-heading-and-label"),
+        pytest.param(
+            "## Verdict: APPROVE", "## Verdict: APPROVE WITH FINDINGS", "approved",
+            id="approve-and-approve-with-findings",
+        ),
+        pytest.param(
+            "## Verdict: REQUEST CHANGES", "## Verdict: REQUEST CHANGES", "changes_requested",
+            id="request-changes-twice",
+        ),
+    ],
+)
+def test_claude_adapter_accepts_the_same_verdict_twice(first, second, expected):
+    verdict, findings = review_phase.parse_claude_fresh(_claude_two_verdicts(first, second))
+    assert verdict == expected
+    assert [(f["file"], f["line"]) for f in findings] == [("src/report.py", 14)]
+
+
+def test_claude_clean_sentinel_does_not_conflict_with_a_request_changes_label():
+    text = "No bugs or security issues found.\n\nVERDICT: REQUEST CHANGES\n"
+    verdict, _ = review_phase.parse_claude_fresh(text)
+    assert verdict == "changes_requested"
+
+
+def _grok_two_verdicts(first: str, second: str) -> str:
+    return (
+        "## FINDINGS\n"
+        "- `src/report.py:14` — the total skips the last row.\n\n"
+        f"## VERDICT\n{first} — the first reading.\n\n"
+        f"## VERDICT\n{second} — the second reading.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(_grok_two_verdicts("flagged", "cleared"), id="flagged-then-cleared"),
+        pytest.param(_grok_two_verdicts("cleared", "flagged"), id="cleared-then-flagged"),
+        pytest.param(
+            "FINDINGS:\n- none\nVERDICT: flagged — one.\nVERDICT: cleared — two.\n",
+            id="label-flagged-then-cleared",
+        ),
+    ],
+)
+def test_grok_adapter_refuses_two_different_verdicts(text):
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        review_phase.parse_grok_notools(text)
+    result = review_phase.run_phase(_envelope("grok-notools", text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith("grok-notools: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize("token, expected", [("cleared", "approved"), ("flagged", "changes_requested")])
+def test_grok_adapter_accepts_the_same_verdict_twice(token, expected):
+    verdict, findings = review_phase.parse_grok_notools(_grok_two_verdicts(token, token))
+    assert verdict == expected
+    assert len(findings) == 1
+
+
 def test_run_phase_accepts_claude_clean_sentinel_inside_issues():
     result = review_phase.run_phase(_envelope("claude-fresh", CLAUDE_ISSUES_CLEAN))
     assert result["status"] == "success", result["reason"]
