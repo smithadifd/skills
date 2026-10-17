@@ -6,10 +6,10 @@ or fixture directories. Local conventions belong in the optional
 
 Two checks run. The tracked patterns below are person-neutral and always run.
 The deny list (names, hosts, employers) is never committed: it comes from the
-`NO_PERSON_DENY` environment variable, a grep-compatible alternation
-(`term1|term2|...`) matched case-insensitively against every tracked file
-except `LICENSE*`. A line that carries the repository's own `owner/repo` slug
-is not a hit. An unset or empty variable denies nothing; an invalid expression
+`NO_PERSON_DENY` environment variable, a grep extended regular
+expression (`term1|term2|...`) matched with `grep -inE` against every tracked file
+except `LICENSE*`. A line that carries the repository's own
+`github.com/owner/repo` URL is not a hit. An unset or empty variable denies nothing; an invalid expression
 fails the test. This file spells no denied term: the tests plant synthetic
 ones at run time.
 """
@@ -68,14 +68,24 @@ def test_shipped_files_carry_no_private_vocabulary():
     assert not hits, "private vocabulary in shipped topic files:\n" + "\n".join(hits)
 
 
+def _grep(expr, data):
+    return subprocess.run(
+        ["grep", "-a", "-i", "-n", "-E", "-e", expr], input=data, capture_output=True
+    )
+
+
 def deny_pattern(raw):
-    """Compile the deny expression; None when nothing is denied."""
+    """The deny expression, checked with grep; None when nothing is denied.
+
+    Matching uses the system grep so the expression means what it means to the
+    `grep -inE` that produces it, POSIX bracket classes included."""
     if not raw or not raw.strip():
         return None
-    try:
-        return re.compile(raw, re.I)
-    except re.error as exc:
-        raise AssertionError(f"{DENY_ENV} is not a valid regular expression: {exc}") from exc
+    result = _grep(raw, b"")
+    if result.returncode == 2:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise AssertionError(f"{DENY_ENV} is not a valid extended regular expression: {detail}")
+    return raw
 
 
 def own_slug(root):
@@ -117,11 +127,14 @@ def scan_tree(root, pattern, slug=None):
         path = root / rel
         if not path.is_file():
             continue
-        for lineno, line in enumerate(decode_for_scan(path.read_bytes()).splitlines(), 1):
-            if slug and slug.lower() in line.lower():
+        text = decode_for_scan(path.read_bytes()).encode("utf-8", "replace")
+        result = _grep(pattern, text)
+        assert result.returncode in (0, 1), result.stderr.decode("utf-8", "replace")
+        for raw_line in result.stdout.decode("utf-8", "replace").splitlines():
+            lineno, _, line = raw_line.partition(":")
+            if slug and f"github.com/{slug}".lower() in line.lower():
                 continue
-            if pattern.search(line):
-                hits.append(f"{rel}:{lineno}")
+            hits.append(f"{rel}:{lineno}")
     return hits
 
 
@@ -182,6 +195,16 @@ def test_scan_allows_the_own_slug_line(tmp_path):
         {"a.json": b'{"$id": "https://github.com/zzowner/zzrepo/x"}\n', "b.md": b"zzowner alone\n"},
     )
     assert scan_tree(tmp_path, deny_pattern("zzowner"), slug="zzowner/zzrepo") == ["b.md:1"]
+
+
+def test_scan_honours_posix_bracket_classes(tmp_path):
+    _scratch_repo(tmp_path, {"a.md": b"clean\nzz planted\n", "b.md": b"zzplanted\n"})
+    assert scan_tree(tmp_path, deny_pattern("zz[[:space:]]planted")) == ["a.md:2"]
+
+
+def test_scan_bare_slug_does_not_mask_a_denied_term(tmp_path):
+    _scratch_repo(tmp_path, {"a.md": b"zzdenied zzowner/zzrepo\n"})
+    assert scan_tree(tmp_path, deny_pattern("zzdenied"), slug="zzowner/zzrepo") == ["a.md:1"]
 
 
 def test_scan_does_not_skip_files_that_are_not_utf8(tmp_path):
