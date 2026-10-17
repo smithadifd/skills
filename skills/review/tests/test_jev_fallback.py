@@ -321,6 +321,141 @@ def test_flag_on_verdict_conflict_stays_a_failure_and_never_asks_jev(
     assert calls == []
 
 
+def _claude_failure_with_grok_verdict(reverse: bool) -> str:
+    blocks = [
+        (
+            "VERDICT: REQUEST CHANGES\n\n"
+            "## ISSUES\n"
+            "The total omits the last row.\n"
+        ),
+        (
+            "## FINDINGS\n"
+            "- none\n\n"
+            "## VERDICT\n"
+            "cleared — the total is complete.\n"
+        ),
+    ]
+    if reverse:
+        blocks.reverse()
+    return "\n".join(blocks)
+
+
+def _grok_failure_with_claude_verdict(reverse: bool) -> str:
+    labels = [
+        "VERDICT: flagged — the total omits the last row.",
+        "## Verdict: APPROVE",
+    ]
+    if reverse:
+        labels.reverse()
+    return "\n\n".join(labels) + "\n"
+
+
+@pytest.mark.parametrize(
+    "backend, text",
+    [
+        pytest.param(
+            "claude-fresh",
+            _claude_failure_with_grok_verdict(False),
+            id="claude-fresh-changes-then-cleared",
+        ),
+        pytest.param(
+            "claude-fresh",
+            _claude_failure_with_grok_verdict(True),
+            id="claude-fresh-cleared-then-changes",
+        ),
+        pytest.param(
+            "grok-notools",
+            _grok_failure_with_claude_verdict(False),
+            id="grok-notools-flagged-then-approve",
+        ),
+        pytest.param(
+            "grok-notools",
+            _grok_failure_with_claude_verdict(True),
+            id="grok-notools-approve-then-flagged",
+        ),
+    ],
+)
+def test_fallback_refuses_cross_vocabulary_conflict(monkeypatch, backend, text):
+    consulted = []
+
+    def consult(*args):
+        consulted.append(args)
+        raise AssertionError("Jev must not resolve a reply with conflicting verdicts")
+
+    monkeypatch.setattr(review_phase, "_consult_jev", consult)
+    result = review_phase.run_phase(_envelope(backend, text, jev=True))
+    assert result["status"] == "failure", (
+        f"{backend} fallback accepted cross-vocabulary verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+    assert consulted == []
+
+
+@pytest.mark.parametrize(
+    "decorated",
+    [
+        pytest.param("## Verdict: **REQUEST CHANGES**", id="bold-value-heading"),
+        pytest.param(
+            "## **Verdict**: **REQUEST CHANGES**", id="bold-key-and-value-heading"
+        ),
+        pytest.param(
+            "## **Verdict:** REQUEST CHANGES", id="bold-key-with-colon-heading"
+        ),
+        pytest.param("VERDICT: [REQUEST CHANGES]", id="bracketed-value-label"),
+        pytest.param("VERDICT: `REQUEST CHANGES`", id="backticked-value-label"),
+        pytest.param(
+            "## `Verdict`: `REQUEST CHANGES`", id="backticked-key-and-value-heading"
+        ),
+        pytest.param(
+            "## [Verdict]: [REQUEST CHANGES]", id="bracketed-key-and-value-heading"
+        ),
+        pytest.param(
+            "## _Verdict_: _REQUEST CHANGES_", id="underscored-key-and-value-heading"
+        ),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True], ids=["changes-first", "approve-first"])
+def test_fallback_refuses_decorated_conflict(monkeypatch, decorated, reverse):
+    labels = [decorated, "## Verdict: APPROVE"]
+    if reverse:
+        labels.reverse()
+    text = "\n\n".join(labels) + "\n"
+    monkeypatch.setattr(
+        review_phase,
+        "_consult_jev",
+        lambda *args: pytest.fail("Jev must not resolve conflicting verdicts"),
+    )
+    result = review_phase.run_phase(_envelope("grok-notools", text, jev=True))
+    assert result["status"] == "failure", (
+        f"fallback accepted decorated conflicting verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith("grok-notools: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "cleared-first"])
+def test_fallback_refuses_inline_grok_heading_conflict(monkeypatch, reverse):
+    labels = [
+        "## VERDICT: flagged — the total omits the last row.",
+        "## VERDICT\ncleared — the total is complete.",
+    ]
+    if reverse:
+        labels.reverse()
+    text = "## FINDINGS\n- none\n\n" + "\n\n".join(labels) + "\n"
+    monkeypatch.setattr(
+        review_phase,
+        "_consult_jev",
+        lambda *args: pytest.fail("Jev must not resolve conflicting verdicts"),
+    )
+    result = review_phase.run_phase(_envelope("claude-fresh", text, jev=True))
+    assert result["status"] == "failure", (
+        f"fallback accepted conflicting verdict headings: {result['reason']}"
+    )
+    assert result["reason"].startswith("claude-fresh: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+
+
 @pytest.mark.parametrize(
     "text, choice, expected_verdict",
     [

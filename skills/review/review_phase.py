@@ -127,6 +127,128 @@ def _single_verdict(verdicts: list[str]) -> str | None:
     return verdicts[0] if verdicts else None
 
 
+_VERDICT_HEADING = re.compile(r"^#{1,6}\s*")
+_VERDICT_WRAPPERS = (
+    ("**", "**"),
+    ("__", "__"),
+    ("*", "*"),
+    ("_", "_"),
+    ("`", "`"),
+    ("[", "]"),
+)
+_VERDICT_VALUE = re.compile(
+    r"(APPROVE(?:[ _-]+WITH[ _-]+FINDINGS)?|APPROVED|"
+    r"REQUEST[ _-]+CHANGES|cleared|flagged)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _verdict_label_value(line: str) -> tuple[str, bool] | None:
+    """Return a verdict label's raw value and whether it is a Markdown heading."""
+    text = line.strip()
+    heading = _VERDICT_HEADING.match(text)
+    if heading:
+        text = text[heading.end():].lstrip()
+
+    closing = ""
+    for opening, candidate_closing in _VERDICT_WRAPPERS:
+        if text.startswith(opening):
+            text = text[len(opening):].lstrip()
+            closing = candidate_closing
+            break
+    if not text[:7].casefold() == "verdict":
+        return None
+    text = text[7:]
+    if text and (text[0].isalnum() or text[0] == "-"):
+        return None
+    text = text.lstrip()
+
+    if closing:
+        if text.startswith(closing):
+            text = text[len(closing):].lstrip()
+            if text.startswith(":"):
+                text = text[1:].lstrip()
+            elif text:
+                return None
+        elif text.startswith(":"):
+            text = text[1:].lstrip()
+            if not text.startswith(closing):
+                return "", bool(heading)
+            text = text[len(closing):].lstrip()
+        else:
+            return "", bool(heading)
+    elif text.startswith(":"):
+        text = text[1:].lstrip()
+    elif text:
+        return None
+
+    return text, bool(heading)
+
+
+def _normalize_verdict_value(
+    value: str, *, heading: bool
+) -> tuple[str, str] | None:
+    text = value.strip()
+    if heading and re.fullmatch(
+        r"\[\s*APPROVE\s*\|\s*REQUEST[ _-]+CHANGES\s*\]", text, re.IGNORECASE
+    ):
+        return APPROVED, "claude"
+    closing = ""
+    for opening, candidate_closing in _VERDICT_WRAPPERS:
+        if text.startswith(opening):
+            text = text[len(opening):].lstrip()
+            closing = candidate_closing
+            break
+
+    matched = _VERDICT_VALUE.match(text)
+    if not matched:
+        return None
+    remainder = text[matched.end():]
+    if not closing and remainder.startswith("_"):
+        return None
+    if closing and not remainder.lstrip().startswith(closing):
+        return None
+
+    token = re.sub(r"[ _-]+", " ", matched.group(1).upper())
+    if token == "APPROVED" and not heading:
+        return None
+    if token in ("APPROVE", "APPROVE WITH FINDINGS", "APPROVED"):
+        return APPROVED, "claude"
+    if token == "CLEARED":
+        return APPROVED, "grok"
+    if token == "FLAGGED":
+        return CHANGES_REQUESTED, "grok"
+    return CHANGES_REQUESTED, "claude"
+
+
+def _verdict_labels(lines: list[str]) -> list[tuple[str, str]]:
+    """Collect normalized outcome/vocabulary pairs from every verdict label."""
+    labels: list[tuple[str, str]] = []
+    for index, line in enumerate(lines):
+        labeled = _verdict_label_value(line)
+        if labeled is None:
+            continue
+        value, heading = labeled
+        if not value:
+            value = next(
+                (item.strip() for item in lines[index + 1:] if item.strip()), ""
+            )
+        normalized = _normalize_verdict_value(value, heading=heading)
+        if normalized is None:
+            shown = value or line.strip()
+            raise ParseError(f"unrecognized verdict value: {shown!r}")
+        labels.append(normalized)
+    return labels
+
+
+def _extract_verdict(lines: list[str], vocabulary: str) -> str | None:
+    labels = _verdict_labels(lines)
+    _single_verdict([outcome for outcome, _ in labels])
+    return next(
+        (outcome for outcome, family in labels if family == vocabulary), None
+    )
+
+
 # --- text helpers shared by the adapters -------------------------------------
 
 # A markdown heading, or a bare section label (`FINDINGS:`, `VERDICT: …`) in
@@ -263,18 +385,12 @@ def _finding(text: str, rule: str, severity: str) -> dict:
 
 # --- backend adapters --------------------------------------------------------
 
-_GROK_VERDICT = re.compile(r"^`?\*{0,2}(cleared|flagged)\b", re.IGNORECASE)
-# The bare `VERDICT: flagged — …` shape carries the value on the heading's
-# own line, not the next one — the generic `_HEADING` match discards it.
-_GROK_VERDICT_LABEL = re.compile(r"^\s*\**VERDICT\**\s*:\s*\**\s*(cleared|flagged)\b", re.IGNORECASE)
-
-
 def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     """`## FINDINGS` bullets + `## VERDICT <cleared|flagged> — <sentence>`."""
     lines = text.splitlines()
+    verdict = _extract_verdict(lines, "grok")
     bullets: list[str] | None = None
     unparsed = False
-    verdicts: list[str] = []
     i = 0
     while i < len(lines):
         heading = _HEADING.match(lines[i])
@@ -285,19 +401,7 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
         if title.startswith("FINDINGS"):
             bullets, unparsed, i = _bullets(lines, i + 1)
             continue
-        if title.startswith("VERDICT"):
-            inline = _GROK_VERDICT_LABEL.match(lines[i])
-            if inline:
-                verdicts.append(inline.group(1).lower())
-            else:
-                for candidate in lines[i + 1:]:
-                    if candidate.strip():
-                        matched = _GROK_VERDICT.match(candidate.strip())
-                        if matched:
-                            verdicts.append(matched.group(1).lower())
-                        break
         i += 1
-    verdict = _single_verdict(verdicts)
     if bullets is None:
         raise ParseError("no `## FINDINGS` section in the return")
     if unparsed:
@@ -307,19 +411,10 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
         )
     if verdict is None:
         raise ParseError("no `## VERDICT` line reading cleared or flagged")
-    outcome = CHANGES_REQUESTED if verdict == "flagged" else APPROVED
-    severity = "error" if outcome == CHANGES_REQUESTED else "warning"
-    return outcome, [_finding(b, "finding", severity) for b in bullets]
+    severity = "error" if verdict == CHANGES_REQUESTED else "warning"
+    return verdict, [_finding(b, "finding", severity) for b in bullets]
 
 
-_CLAUDE_VERDICT_HEADING = re.compile(
-    r"^\s*#{1,6}\s*\**Verdict\**\s*:\s*\[?\s*(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)",
-    re.IGNORECASE,
-)
-_CLAUDE_VERDICT_LABEL = re.compile(
-    r"^\s*\**VERDICT\**\s*:\s*\**\s*(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)\b",
-    re.IGNORECASE,
-)
 _CLAUDE_SECTIONS = (
     ("ISSUES", "issue"),
     ("MINOR NOTES", "minor"),
@@ -328,23 +423,12 @@ _CLAUDE_SECTIONS = (
 )
 
 
-def _claude_verdict_labels(lines: list[str]) -> list[str]:
-    """The verdict of every `## Verdict:` heading and bare `VERDICT:` label, in order."""
-    labels: list[str] = []
-    for line in lines:
-        matched = _CLAUDE_VERDICT_HEADING.match(line) or _CLAUDE_VERDICT_LABEL.match(line)
-        if matched:
-            token = matched.group(1).upper()
-            labels.append(CHANGES_REQUESTED if token.startswith("REQUEST") else APPROVED)
-    return labels
-
-
 def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     """The reviewer agent's block, the headless `VERDICT:` shape, or the
     `review` skill's tagged bullets."""
     lines = text.splitlines()
     # The clean sentinel only stands in when there is no verdict label at all.
-    verdict = _single_verdict(_claude_verdict_labels(lines))
+    verdict = _extract_verdict(lines, "claude")
     if verdict is None and any(_CLEAN_SENTINEL.match(line) for line in lines):
         verdict = APPROVED
 
@@ -410,9 +494,6 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
 # a different token (`APPROVED`) or extra text on the line is not this agent's
 # block, so it does not count as the verdict line.
 _OMP_VERDICT_LINE = re.compile(r"## Verdict: (APPROVE|REQUEST CHANGES)[ \t]*")
-# Any line that reads as a verdict heading, loosely. Each one must be the exact
-# line above, so a malformed second verdict cannot ride along with a good one.
-_OMP_VERDICT_LIKE = re.compile(r"\s*#+\s*\**\s*Verdict\**\s*:", re.IGNORECASE)
 
 
 def parse_omp(text: str) -> tuple[str, list[dict]]:
@@ -424,33 +505,37 @@ def parse_omp(text: str) -> tuple[str, list[dict]]:
     A reply whose verdict labels disagree raises VerdictConflict.
     """
     lines = text.splitlines()
-    # Every verdict label in the reply must agree, whichever comes first: the
-    # exact lines, malformed ones, and bare `VERDICT:` labels, which the checks
-    # below do not see.
-    _single_verdict(_claude_verdict_labels(lines))
-    exact = [m for m in (_OMP_VERDICT_LINE.fullmatch(l) for l in lines) if m]
+    exact = [
+        matched
+        for line in lines
+        if (matched := _OMP_VERDICT_LINE.fullmatch(line))
+    ]
     if not exact:
+        _extract_verdict(lines, "claude")
         raise ParseError(
             "no verdict line in the omp reply: expected "
             "`## Verdict: APPROVE | REQUEST CHANGES`"
         )
+    # The shared parser checks all vocabularies once and supplies the findings.
+    _, findings = parse_claude_fresh(text)
     if len(exact) > 1:
         raise ParseError(
             f"{len(exact)} verdict lines in the omp reply: expected exactly one "
             "`## Verdict: APPROVE | REQUEST CHANGES`"
         )
     malformed = [
-        l for l in lines
-        if _OMP_VERDICT_LIKE.match(l) and not _OMP_VERDICT_LINE.fullmatch(l)
+        line
+        for line in lines
+        if (labeled := _verdict_label_value(line)) is not None
+        and labeled[1]
+        and not _OMP_VERDICT_LINE.fullmatch(line)
     ]
     if malformed:
         raise ParseError(
             "malformed verdict line in the omp reply: " + repr(malformed[0])
         )
-    # The verdict comes from the exact line alone; the shared parser supplies
-    # the findings.
+    # The verdict comes from the exact line alone.
     verdict = CHANGES_REQUESTED if exact[0].group(1) == "REQUEST CHANGES" else APPROVED
-    _, findings = parse_claude_fresh(text)
     return verdict, findings
 
 

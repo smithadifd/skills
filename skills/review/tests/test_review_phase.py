@@ -508,6 +508,123 @@ def test_claude_adapter_accepts_the_same_verdict_twice(first, second, expected):
     assert [(f["file"], f["line"]) for f in findings] == [("src/report.py", 14)]
 
 
+_DECORATED_REQUEST_CHANGES = [
+    pytest.param("## Verdict: **REQUEST CHANGES**", id="bold-value-heading"),
+    pytest.param("## **Verdict**: **REQUEST CHANGES**", id="bold-key-and-value-heading"),
+    pytest.param("## **Verdict:** REQUEST CHANGES", id="bold-key-with-colon-heading"),
+    pytest.param("VERDICT: [REQUEST CHANGES]", id="bracketed-value-label"),
+    pytest.param("VERDICT: `REQUEST CHANGES`", id="backticked-value-label"),
+    pytest.param("## `Verdict`: `REQUEST CHANGES`", id="backticked-key-and-value-heading"),
+    pytest.param("## [Verdict]: [REQUEST CHANGES]", id="bracketed-key-and-value-heading"),
+    pytest.param("## _Verdict_: _REQUEST CHANGES_", id="underscored-key-and-value-heading"),
+]
+
+
+def _adapter_envelope(backend: str, text: str) -> dict:
+    extras = (
+        {"model": "example-model", "thinking": "medium"}
+        if backend == "omp"
+        else {}
+    )
+    return _envelope(backend, text, **extras)
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+        pytest.param("omp", review_phase.parse_omp, id="omp"),
+    ],
+)
+@pytest.mark.parametrize("decorated", _DECORATED_REQUEST_CHANGES)
+@pytest.mark.parametrize("reverse", [False, True], ids=["changes-first", "approve-first"])
+def test_every_adapter_refuses_decorated_conflicting_verdicts(
+    backend, parser, decorated, reverse
+):
+    labels = [decorated, "## Verdict: APPROVE"]
+    if reverse:
+        labels.reverse()
+    text = "\n\n".join(labels) + "\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted decorated conflicting verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+        pytest.param("omp", review_phase.parse_omp, id="omp"),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "approve-first"])
+def test_every_adapter_refuses_cross_vocabulary_conflict(backend, parser, reverse):
+    labels = [
+        "VERDICT: flagged — the total omits the last row.",
+        "## Verdict: APPROVE",
+    ]
+    if reverse:
+        labels.reverse()
+    text = "\n\n".join(labels) + "\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted cross-vocabulary verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+        pytest.param("omp", review_phase.parse_omp, id="omp"),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "cleared-first"])
+def test_every_adapter_refuses_inline_grok_heading_conflict(backend, parser, reverse):
+    labels = [
+        "## VERDICT: flagged — the total omits the last row.",
+        "## VERDICT\ncleared — the total is complete.",
+    ]
+    if reverse:
+        labels.reverse()
+    text = "## FINDINGS\n- none\n\n" + "\n\n".join(labels) + "\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted conflicting verdict headings: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+        pytest.param("omp", review_phase.parse_omp, id="omp"),
+    ],
+)
+def test_every_adapter_rejects_an_unknown_verdict_value(backend, parser):
+    text = "## Verdict: APPROVE\n\nVERDICT: MAYBE\n"
+    with pytest.raises(review_phase.ParseError, match="unrecognized verdict"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} ignored an unknown verdict value: {result['reason']}"
+    )
+    assert "unrecognized verdict" in result["reason"]
+
 def test_claude_clean_sentinel_does_not_conflict_with_a_request_changes_label():
     text = "No bugs or security issues found.\n\nVERDICT: REQUEST CHANGES\n"
     verdict, _ = review_phase.parse_claude_fresh(text)
