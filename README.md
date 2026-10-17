@@ -4,7 +4,7 @@ This repository contains reusable Claude Code skills for common tasks and agents
 
 ## Before you start
 
-You need Claude Code, `git`, and `bash`. Python 3 is required for `handoff`, `kickoff`, `memory-gardener`, `pickup`, `retro`, `sharpen`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
+You need Claude Code, `git`, and `bash`. Python 3 is required for `handoff`, `kickoff`, `memory-gardener`, `pickup`, `retro`, `sharpen`, `ticket`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
 
 This is a private repository. If you've been invited as a collaborator, clone it using the URL provided with your access, then run the commands below from the clone:
 
@@ -31,6 +31,7 @@ cd skills
 | `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. |
 | `tdd` | Applies a test-first loop when you change behavior yourself: a failing test, the smallest passing change, then a refactor, with the red-then-green evidence handed to the reviewer. |
 | `teach` | Explains how a codebase works with a system overview, component tour, and traced example. |
+| `ticket` | Runs one ticket from live orientation through approved planning, build and review, outward approval, and a durable resume card. |
 | `topic` | Keeps the notes for an ongoing, focused discussion in one file. |
 
 ## Agents
@@ -65,6 +66,7 @@ Which skill or agent to reach for at each step of delivering a change:
 - Debug: `debug` reproduces a bug, isolates the cause and fixes it behind its own failing test. Like `tdd`, it never calls a fix done without a test that failed first.
 - Review: `review` checks your changes for bugs and security problems. `reviewer` is an independent second pair of eyes that shows what it ran.
 - Ship: `pr` prepares the pull request with the project's conventions.
+- End to end: `ticket` carries one ticket from orientation through an approved plan, build and review, and the outward approval, and keeps a resume card so a later pass picks up where it stopped.
 - Continue: `handoff` writes a resume note, `pickup` resumes from it, and `topic` keeps the notes for a long-running discussion in one file.
 - Learn: `retro` reads a finished session and proposes changes to your setup.
 - Housekeeping: `memory-gardener` tidies a Claude memory directory. `humanizer` revises prose to sound natural, and `humanizer-finance` does the same for market and financial writing.
