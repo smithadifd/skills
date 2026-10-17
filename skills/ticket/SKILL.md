@@ -48,12 +48,13 @@ provided local ticket file.
 
 ### Store
 
-Both stores implement exactly six calls:
+Both stores implement exactly seven calls:
 
-- `write_stamp(point, phase, next_skills, refs, close=False)` — stop or close.
+- `write_stamp(point, phase, next_skills, refs)` — a stop, or a pending close.
   Each ref is a path, a PR or issue id (`owner/repo#N` or `#N`),
   `branch:<name>`, a commit SHA, or a store event (`event:<N>`); content is
   never copied into a ref;
+- `confirm_close()` — marks the last stamp as the close and the ticket closed;
 - `record_decision(decision)` — `who`, `who_kind`, optional `relayed_by`,
   `standing`, outside `source`, `effect`, tags, verbatim words, phase, and
   evidence reference;
@@ -102,8 +103,12 @@ edit an ignore file silently. Never stage or commit `.ticket/`.
    against the fresh ticket and lists every difference in `reconciliation`. A
    new, changed, or removed acceptance criterion sends the pass back to the plan
    step for a new plan card and a new plan go; a criterion whose `passes` is not
-   backed by a recorded review round is reset to false. State every flagged
-   difference before reusing the plan, and read the card's referenced paths or ids.
+   backed by a recorded review round is reset to false. A resume re-enters plan
+   go or outward go only when the store holds that stop's stamp for the plan
+   revision or review round; otherwise it resumes at plan or build and flags
+   why. An unconfirmed close stamp is flagged and the ticket stays open. State
+   every flagged difference before reusing the plan, and read the card's
+   referenced paths or ids.
 5. Identify assumptions and focused research questions. Do not start building.
 
 ## 2. Research
@@ -177,9 +182,10 @@ request, Jira comment, status change, message, merge, release, or deploy. Call
 
 After approval, perform only the listed outward actions under the target
 repository's rules. Then call `close(point, refs=…, next_skills=…)`: it writes
-the close stamp and reads the card back to confirm the stop point, both go
-decisions, the review rounds, next skills, and references. A mismatch raises
-and leaves the pass open; repair the card before reporting the ticket closed.
+a pending close stamp and reads the card back to confirm the stop point, both
+go decisions, the review rounds, next skills, and references; only then does
+it confirm the close. A mismatch raises and leaves the ticket open, in the
+store and on resume; repair the card before reporting the ticket closed.
 
 ## More-information exits
 

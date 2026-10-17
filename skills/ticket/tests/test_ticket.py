@@ -218,6 +218,43 @@ def test_a_failed_stop_stamp_does_not_expose_the_stop():
     assert session.phase == "plan"
 
 
+def test_resume_enters_a_hard_stop_only_when_its_stamp_is_stored():
+    # Sol probe: the plan snapshot is stored but the plan go stamp is refused.
+    class FailPlanStamp(MemoryStore):
+        def write_stamp(self, *args, **kwargs):
+            raise ticket.StoreUnavailable("stamp refused")
+
+    store = FailPlanStamp()
+    session = ticket.TicketPass.open(KEY, source(), store)
+    session.finish_orient()
+    session.finish_research()
+    with pytest.raises(ticket.StoreUnavailable):
+        session.present_plan(ticket.PlanCard(session.ticket))
+    assert store.card["plan"]["revision"] == 1
+    assert store.card["stamps"] == []
+    resumed = resume(store)
+    assert (session.phase, resumed.phase) == ("plan", "plan")
+    assert "no plan go stop stamp for plan revision 1; resuming at plan" in resumed.reconciliation
+
+    # Sol probe: a passing review is stored but the outward go stamp is refused.
+    class FailOutwardStamp(MemoryStore):
+        def write_stamp(self, point, phase, next_skills=(), refs=()):
+            if point.startswith("Waiting at outward go"):
+                raise ticket.StoreUnavailable("stamp refused")
+            super().write_stamp(point, phase, next_skills, refs)
+
+    store = FailOutwardStamp()
+    session = to_build(store)
+    with pytest.raises(ticket.StoreUnavailable):
+        session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    assert len(store.card["reviews"]) == 1
+    resumed = resume(store)
+    assert (session.phase, resumed.phase) == ("build", "build")
+    assert "no outward go stop stamp for review round 1; resuming at build" in resumed.reconciliation
+    with pytest.raises(ticket.TicketError):
+        resumed.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+
+
 def test_review_changes_continue_without_person_until_round_cap():
     store = MemoryStore()
     session = to_build(store)
@@ -406,6 +443,86 @@ def test_public_api_and_attribute_assignment_cannot_forge_gates_or_passes():
     assert (resumed.phase, resumed.plan, resumed.review_round) == ("orient", None, 0)
 
 
+def at_plan_revision_two(store):
+    """A pass whose current plan is revision 2, so revision 1 is a real older plan."""
+
+    live = fixture_ticket()
+    earlier = ticket.Ticket(
+        live.key,
+        live.title,
+        live.status,
+        live.description,
+        (live.acceptance_criteria[0], "An earlier wording of the second criterion."),
+        live.links,
+        live.updated_at,
+    )
+    first = ticket.TicketPass.open(KEY, StaticSource(earlier), store)
+    first.finish_orient()
+    first.finish_research()
+    first.present_plan(ticket.PlanCard(earlier))
+    session = resume(store)
+    assert session.phase == "plan"
+    session.present_plan(ticket.PlanCard(session.ticket))
+    assert (session.plan_revision, session.phase) == (2, "plan_go")
+    return session
+
+
+def one_fault_go(gate, fault):
+    """The person's settled ratification of a gate at revision 2, wrong in one field only."""
+
+    fields = dict(
+        who="the person",
+        who_kind="person",
+        standing="settled",
+        source=ticket.DecisionSource("ratification", "conversation:go"),
+        effect=f"The {gate} gate is approved for plan revision 2.",
+        tags=({"type": "ticket", "id": KEY},),
+        verbatim="Go.",
+        phase="plan" if gate == "plan" else "review",
+    )
+    if fault == "role":
+        fields.update(who="API owner", who_kind="role", relayed_by="the person")
+    elif fault == "lean":
+        fields.update(standing="lean")
+    elif fault == "source":
+        fields.update(source=ticket.DecisionSource("reply", "conversation:go"))
+    elif fault == "tag":
+        fields.update(tags=({"type": "ticket", "id": "EK-OTHER"},))
+    elif fault == "older_revision":
+        fields.update(effect=f"The {gate} gate is approved for plan revision 1.")
+    else:
+        assert fault == "none"
+    return ticket.DecisionRecord(**fields)
+
+
+GO_FAULTS = ("role", "lean", "source", "tag", "older_revision")
+
+
+@pytest.mark.parametrize("fault", GO_FAULTS + ("none",))
+def test_each_go_check_alone_keeps_every_gate_shut(fault):
+    def refused(call):
+        if fault == "none":
+            call()
+        else:
+            with pytest.raises(ticket.GateRequired):
+                call()
+
+    store = MemoryStore()
+    session = at_plan_revision_two(store)
+    store.record_decision(one_fault_go("plan", fault))
+    refused(session.begin_build)
+
+    store = MemoryStore()
+    session = at_plan_revision_two(store)
+    session.record_go("plan", evidence="conversation:plan-go", verbatim="Go.")
+    session.begin_build()
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    store.record_decision(one_fault_go("outward", fault))
+    refused(session.require_outward_go)
+    refused(lambda: session.close("Done.", refs=("example/repo#14",)))
+    assert session.phase == ("closed" if fault == "none" else "outward_go")
+
+
 def test_review_that_the_store_does_not_record_flips_nothing():
     class DropsReviews(MemoryStore):
         def record_review(self, review):
@@ -432,8 +549,8 @@ def test_invalid_pass_is_refused_before_anything_is_written():
 
 def test_close_reads_the_card_back_and_stays_open_on_mismatch():
     class LosesRefs(MemoryStore):
-        def write_stamp(self, point, phase, next_skills=(), refs=(), *, close=False):
-            super().write_stamp(point, phase, next_skills, () if close else refs, close=close)
+        def write_stamp(self, point, phase, next_skills=(), refs=()):
+            super().write_stamp(point, phase, next_skills, () if phase == "close" else refs)
 
     store = LosesRefs()
     session = to_build(store)
@@ -442,6 +559,7 @@ def test_close_reads_the_card_back_and_stays_open_on_mismatch():
     with pytest.raises(ticket.StoreUnavailable, match="references differ"):
         session.close("Done.", refs=("example/repo#14",), next_skills=("ticket",))
     assert session.phase == "outward_go"
+    assert store.card["status"] == "open"
 
     good = MemoryStore()
     session = to_build(good)
@@ -550,8 +668,8 @@ def exercise_store(store):
         "close",
         ("ticket",),
         ("reviews/round-1.md", "example/repo#14"),
-        close=True,
     )
+    store.confirm_close()
     card = store.read_card()
     assert card.pop("plan_ref") == plan_ref
     return card
@@ -614,6 +732,38 @@ def test_full_pass_through_markdown_and_fake_ledger_matches(tmp_path, monkeypatc
             stamp["refs"] = [ref for ref in stamp["refs"] if not ref.startswith((".ticket/", "event:"))]
     assert ledger_card == markdown_card
     assert markdown_card["status"] == "closed"
+
+
+@pytest.mark.parametrize("kind", ("markdown", "ledger"))
+def test_a_failed_close_is_not_closed_in_the_store_or_on_resume(kind, tmp_path, monkeypatch):
+    # Sol probe: the store drops the close stamp's references.
+    if kind == "markdown":
+
+        class Lossy(ticket.MarkdownStore):
+            def write_stamp(self, point, phase, next_skills=(), refs=()):
+                super().write_stamp(point, phase, next_skills, () if phase == "close" else refs)
+
+        store = Lossy(init_ignored_repo(tmp_path), KEY, TITLE)
+    else:
+
+        class Lossy(ticket.LedgerStore):
+            def write_stamp(self, point, phase, next_skills=(), refs=()):
+                super().write_stamp(point, phase, next_skills, () if phase == "close" else refs)
+
+        store = Lossy(KEY, TITLE, cli=fake_ledger(tmp_path, monkeypatch), db=tmp_path / "ledger.db")
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    session.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    with pytest.raises(ticket.StoreUnavailable, match="references differ"):
+        session.close("Done.", refs=("example/repo#14",), next_skills=("ticket",))
+    assert session.phase == "outward_go"
+    card = store.read_card()
+    assert card["status"] == "open"
+    assert card["stamps"][-1]["close"] is False
+
+    resumed = resume(store)
+    assert resumed.phase == "outward_go"
+    assert "a close stamp was written but never confirmed; the ticket is not closed" in resumed.reconciliation
 
 
 def test_choose_store_uses_markdown_when_no_ledger_cli_is_installed(tmp_path):
