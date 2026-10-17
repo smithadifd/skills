@@ -669,7 +669,7 @@ def exercise_store(store):
         ("ticket",),
         ("reviews/round-1.md", "example/repo#14"),
     )
-    store.confirm_close()
+    store.confirm_close(0, "Ready after review.")
     card = store.read_card()
     assert card.pop("plan_ref") == plan_ref
     return card
@@ -764,6 +764,100 @@ def test_a_failed_close_is_not_closed_in_the_store_or_on_resume(kind, tmp_path, 
     resumed = resume(store)
     assert resumed.phase == "outward_go"
     assert "a close stamp was written but never confirmed; the ticket is not closed" in resumed.reconciliation
+
+
+def concrete_store(kind, tmp_path, monkeypatch, *mixins):
+    if kind == "markdown":
+        cls = type("Store", (*mixins, ticket.MarkdownStore), {})
+        return cls(init_ignored_repo(tmp_path), KEY, TITLE)
+    cls = type("Store", (*mixins, ticket.LedgerStore), {})
+    return cls(KEY, TITLE, cli=fake_ledger(tmp_path, monkeypatch), db=tmp_path / "ledger.db")
+
+
+def approved_for_close(store):
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    session.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    return session
+
+
+def last_two(store):
+    return [(stamp["point"], stamp["close"]) for stamp in store.read_card()["stamps"][-2:]]
+
+
+UNCONFIRMED = "a close stamp was written but never confirmed; the ticket is not closed"
+CLOSED_INVALID = "the store is marked closed but the close does not validate: its final stamp is not the confirmed close"
+
+
+class Interleaves:
+    """Sol probe: a stop lands between the close read-back and the confirm."""
+
+    def confirm_close(self, position, point):
+        self.write_stamp("Concurrent stop.", "review")
+        super().confirm_close(position, point)
+
+
+@pytest.mark.parametrize("kind", ("markdown", "ledger"))
+def test_a_stop_between_read_back_and_confirm_is_refused(kind, tmp_path, monkeypatch):
+    store = concrete_store(kind, tmp_path, monkeypatch, Interleaves)
+    session = approved_for_close(store)
+    with pytest.raises(ticket.StoreUnavailable, match="no longer the pending close"):
+        session.close("Done.", refs=("example/repo#14",))
+    assert session.phase == "outward_go"
+    assert store.read_card()["status"] == "open"
+    assert last_two(store) == [("Done.", False), ("Concurrent stop.", False)]
+
+    resumed = resume(store)
+    assert resumed.phase == "outward_go"
+    assert UNCONFIRMED in resumed.reconciliation
+
+
+class MarkdownClosesWithoutMark:
+    """Confirm returns cleanly but stores only the closed status."""
+
+    def confirm_close(self, position, point):
+        card = self._load()
+        card["status"] = "closed"
+        self._save(card)
+
+
+class LedgerClosesWithoutMark:
+    """Confirm returns cleanly but never names the stop it closed."""
+
+    def confirm_close(self, position, point):
+        self._run("state", self.key, "--status", "closed")
+
+
+@pytest.mark.parametrize(
+    "kind, mixin", (("markdown", MarkdownClosesWithoutMark), ("ledger", LedgerClosesWithoutMark))
+)
+def test_a_confirm_whose_read_back_fails_does_not_resume_as_closed(kind, mixin, tmp_path, monkeypatch):
+    store = concrete_store(kind, tmp_path, monkeypatch, mixin)
+    session = approved_for_close(store)
+    with pytest.raises(ticket.StoreUnavailable, match="not marked closed"):
+        session.close("Done.", refs=("example/repo#14",))
+    assert session.phase == "outward_go"
+    assert store.read_card()["status"] == "closed"
+
+    resumed = resume(store)
+    assert resumed.phase == "outward_go"
+    assert CLOSED_INVALID + "; the ticket is not closed" in resumed.reconciliation
+    assert UNCONFIRMED in resumed.reconciliation
+
+
+@pytest.mark.parametrize("kind", ("markdown", "ledger"))
+def test_a_closed_store_with_a_later_stop_does_not_resume_as_closed(kind, tmp_path, monkeypatch):
+    store = concrete_store(kind, tmp_path, monkeypatch)
+    session = approved_for_close(store)
+    session.close("Done.", refs=("example/repo#14",))
+    assert resume(store).phase == "closed"
+
+    store.write_stamp("Later stop.", "review", ("ticket",))
+    assert store.read_card()["status"] == "closed"
+    assert last_two(store) == [("Done.", True), ("Later stop.", False)]
+    resumed = resume(store)
+    assert resumed.phase == "outward_go"
+    assert CLOSED_INVALID + "; the ticket is not closed" in resumed.reconciliation
 
 
 def test_choose_store_uses_markdown_when_no_ledger_cli_is_installed(tmp_path):
