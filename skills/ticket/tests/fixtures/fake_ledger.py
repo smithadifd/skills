@@ -42,6 +42,13 @@ def main():
 
     known = {"doctor", "new", "append", "card", "export-item", "state"}
     verb = next((arg for arg in args if arg in known), None)
+    if os.environ.get("FAKE_LEDGER_MISSING_DB"):
+        envelope(error={"code": "missing_db", "message": "database does not exist: fake.db"})
+        return 1
+    refusal = os.environ.get("FAKE_LEDGER_REFUSE_WRITES")
+    if refusal and verb in {"new", "append", "state"}:
+        envelope(error={"code": "refused", "message": refusal})
+        return 3
     if verb == "doctor":
         envelope({"path": str(state_path), "schema_version": 5})
         return 0
