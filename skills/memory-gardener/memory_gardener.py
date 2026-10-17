@@ -3708,13 +3708,30 @@ def check_classify_out(memory_dir, out):
 
 
 def write_classify_report(out, text):
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    """Write the report to a new file beside `out`, then rename it onto `out`,
+    so an existing inode (a hard link to a store note, say) is never opened
+    or truncated."""
+    if os.path.islink(out):
+        raise ValueError("--out %r is a symlink; refusing to write through it"
+                         % out)
+    out_dir = os.path.dirname(os.path.abspath(out))
+    tmp = None
     try:
-        fd = os.open(out, flags, 0o666)
+        fd, tmp = tempfile.mkstemp(prefix=".classify-", suffix=".tmp",
+                                   dir=out_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, out)
+        tmp = None
     except OSError as e:
         raise ValueError("cannot write --out %r: %s" % (out, e.strerror))
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #

@@ -465,10 +465,10 @@ Notes are the top-level `*.md` files other than `MEMORY.md` and the
 `MEMORY.<topic>.md` shard indexes. The report opens with a `counts:` line (one
 count per class plus the total), then one line per note, sorted by filename:
 `class | note | evidence [| low-confidence: why]`. The output is deterministic
-(no clock in the body; `--stamp` adds a single `generated:` header line), so a
-rerun on an unchanged store is byte-identical. A note's class never depends on
-the filesystem; only a `low-confidence` reason can mention a quoted path that is
-missing, so that one reason can change when files appear or vanish.
+(no clock in the body; `--stamp` adds a single `generated:` header line). The
+class of each note is determined by the store's content alone. The report text
+is not: a `low-confidence` reason can mention a quoted path that is missing, so
+that one reason can change when the referenced file appears or vanishes.
 
 | Class | Meaning | Evidence on the line |
 |---|---|---|

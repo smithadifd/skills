@@ -4621,6 +4621,25 @@ def test_classify_out_refuses_a_symlink_target(tmp_path, capsys):
     assert "symlink" in capsys.readouterr().err
 
 
+def test_classify_out_hard_link_to_a_store_note_leaves_the_store_unchanged(tmp_path):
+    # Outside the store, --out may be a hard link to a note. The report is
+    # renamed onto the path, so the linked inode is never truncated. The run
+    # succeeds (exit 0) and the link becomes an ordinary report file.
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    note = sorted(p for p in store.iterdir()
+                  if p.suffix == ".md" and p.name != "MEMORY.md")[0]
+    link = tmp_path / "outside-link.md"
+    os.link(note, link)
+    before = _tree_hashes(store)
+    rc = mg.main(["classify", "--dir", str(store), "--out", str(link)])
+    assert rc == 0
+    assert _tree_hashes(store) == before
+    assert link.read_text().startswith("# Memory classification")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "memory", "outside-link.md"]
+
+
 def test_classify_report_writer_does_not_follow_a_symlink(tmp_path):
     target = tmp_path / "keep.md"
     target.write_text("keep")
