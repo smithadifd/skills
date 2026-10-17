@@ -194,7 +194,6 @@ PRIVATE_VOCABULARY = (
     r"contract: v3",
     r"(?i:foundry)",
     r"(?i:claude-toolkit)",
-    r"\bAndrew\b",
     r"\bAstra\b",
     r"(?i:\bnotion\b)",
     r"\borchestrate\b",
@@ -204,12 +203,18 @@ PRIVATE_VOCABULARY = (
 def test_shipped_public_files_name_no_private_vocabulary():
     # The shipped files are the playbook and the resolver. This test file is
     # excluded because it has to spell the vocabulary it rejects.
+    # Personal names and hosts come from the shared deny expression, never from
+    # this file.
+    patterns = list(PRIVATE_VOCABULARY)
+    deny = os.environ.get("NO_PERSON_DENY", "").strip()
+    if deny:
+        patterns.append(f"(?i:{deny})")
     hits = []
     for name in ("SKILL.md", "paths.py"):
         for number, line in enumerate(
             (SKILL_DIR / name).read_text(encoding="utf-8").splitlines(), start=1
         ):
-            for pattern in PRIVATE_VOCABULARY:
+            for pattern in patterns:
                 if re.search(pattern, line):
                     hits.append(f"{name}:{number}: {pattern}: {line.strip()}")
     assert not hits, "PUBLIC-TEXT: private vocabulary in shipped kickoff files:\n" + "\n".join(hits)

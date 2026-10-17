@@ -817,7 +817,7 @@ stores — has zero suggestions).
   genuinely dense one-liner near the threshold is fine — judge it. It reads the
   note's line from whichever index owns it, so shard-resident notes are covered;
   before that fix `index_summary_len` was 0 for every note outside `MEMORY.md`,
-  which made the signal structurally blind to 92 of the live store's 173 notes —
+  which made the signal structurally blind to every note held in a shard —
   including the ones with the worst lines, since the shards are gardened least.
 - **KEEP writes nothing *to the fact file* — but it can still fix an index
   line.** A `KEEP` entry carrying an `index_line` rebuilds that line and leaves

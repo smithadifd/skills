@@ -707,7 +707,7 @@ def read_all_index_lines(memory_dir):
     `balloon_index` heuristic can see shard-resident notes at all: keying only
     off MEMORY.md reported a summary length of 0 for every one of them, which
     silently made every note outside the core immune to the index-sickness
-    signal — on the live store that was 92 of 173 notes, including the ones
+    signal — and that covered every shard-resident note, including the ones
     with the WORST index lines. Read-only."""
     lines = {}
     core = {}
