@@ -54,7 +54,9 @@ Both stores implement exactly seven calls:
   Each ref is a path, a PR or issue id (`owner/repo#N` or `#N`),
   `branch:<name>`, a commit SHA, or a store event (`event:<N>`); content is
   never copied into a ref;
-- `confirm_close()` — marks the last stamp as the close and the ticket closed;
+- `confirm_close(position, point)` — marks the pending close stamp at that
+  position as the close and the ticket closed, and refuses, changing nothing,
+  when that stamp is no longer the last one;
 - `record_decision(decision)` — `who`, `who_kind`, optional `relayed_by`,
   `standing`, outside `source`, `effect`, tags, verbatim words, phase, and
   evidence reference;
