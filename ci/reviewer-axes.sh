@@ -35,7 +35,11 @@ standards_at=$(first_line "$standards")
 
 require 'scope' 'report only correctness and requirement gaps'
 require 'round-1 mutation' 'Round 1 of a code change runs a targeted mutation'
-require 'docs exemption' 'Docs-only changes are exempt from the mutation'
-require 'delta review' 'Delta review (round 2 and later)'
+require 'round-1 executable owner' 'whenever you can execute one'
+require 'mutation routing' 'route the mutation to a lane that can execute'
+require 'mutation fallback' 'this review carries the mutation'
+require 'docs exemption' 'Docs-only changes need no mutation'
+require 'delta review heading' 'Delta review (round 2 and later)'
+require 'operative delta review' 'Review the change since the last reviewed commit'
 
-printf 'PASS: reviewer text states spec-then-standards axes, scope, round-1 mutation, docs exemption and delta review\n'
+printf 'PASS: reviewer text states spec-then-standards axes, scope, mutation ownership and routing, docs exemption, and operative delta review\n'

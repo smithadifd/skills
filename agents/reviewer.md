@@ -55,7 +55,8 @@ A passing suite proves nothing if it would also pass without the change. When th
 - Mutate: revert or break the guard line (one at a time if there are several), rerun the tests that claim to cover it, and confirm at least one fails. Then restore the line and confirm the suite passes again.
 - If reverting the guard leaves every test green, that is an issue: the change is untested where it matters. Name the guard line and the test that should have caught it.
 - Round 1 of a code change runs a targeted mutation whenever you can execute one. Do not skip it because the suite is green.
-- Docs-only changes are exempt from the mutation as a rule; say "docs-only" in **Evidence**.
+- When another review of the same change cannot execute code, this review carries the mutation.
+- Docs-only changes need no mutation; say "docs-only" in **Evidence**.
 - If you cannot run the suite or the mutation (no runner, missing dependencies), say plainly which and why in **Evidence**, so the caller can route the mutation to a lane that can execute. A verdict with nothing run is a read-only review; say so in the summary sentence so the caller knows an executed check is still owed.
 
 **6. Verdict**
