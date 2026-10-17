@@ -1,7 +1,7 @@
 ---
 name: memory-gardener
 kind: portable
-version: 1.3.0
+version: 1.4.0
 description: >
   SUPERVISED, report-first reconciliation of the Claude memory dir
   (~/.claude/projects/<proj>/memory/): fact files classified for staleness, resolved
@@ -13,7 +13,7 @@ description: >
   up MEMORY.md", "the memory index is bloated", "check the memory budget", "is the index
   over budget", "shard the memory index", "prune dead memories", or "run the memory
   gardener". NEVER run unattended, from a queue, or with --apply before the report
-  is reviewed — the sole exception is the read-only `budget` check.
+  is reviewed — the sole exceptions are the read-only `budget` and `classify` checks.
 ---
 
 # Memory Gardener
@@ -85,7 +85,7 @@ helper never classifies; the model never hand-edits YAML.
 | Source | Path | Used for |
 |---|---|---|
 | Memory dir | `~/.claude/projects/<project>/memory/` | the fact files + `MEMORY.md` index (the thing being gardened) |
-| Helper | `~/.claude/skills/memory-gardener/memory_gardener.py` | scan / report / apply / budget / shard / filebudget (stdlib-only, offline) |
+| Helper | `~/.claude/skills/memory-gardener/memory_gardener.py` | scan / report / apply / budget / shard / filebudget / classify (stdlib-only, offline) |
 | Plan | a scratch `plan.json` you write from the scan | the reviewed set of verdicts; shared by report and apply |
 | Reports | `~/.claude/logs/memory-gardener/` | the only write target of `report`; a same-day re-run claims `<date>-2.md`, never overwrites |
 | Fixture | `skills/memory-gardener/tests/fixtures/memory/` | invented fake memories for the tests (no real content) |
@@ -438,6 +438,63 @@ python3 memory_gardener.py shard --dir … --taxonomy my-shards.json \
 - **Only index files change.** `shard` never touches a fact `*.md` file — only
   MEMORY.md (rewritten as the core) plus the new `MEMORY.<topic>.md` shards and
   the archive backup. Fact-file frontmatter stays additive-only, untouched here.
+
+## Migration classification (`classify` — read-only report)
+
+`classify` sorts every note in one memory dir into exactly one of five homes, so
+a reviewed list exists before any supervised move. It is the report half only:
+it never moves, rewrites, archives or deletes a note, opens nothing for writing
+except an explicit `--out`, and refuses an `--out` path inside the memory dir it
+is classifying (exit 2).
+
+```bash
+python3 memory_gardener.py classify --dir ~/.claude/projects/<proj>/memory \
+  --rules-root ~/.claude/rules --rules-root <dir-of-standards> \
+  [--ledger-root <dir-of-ledger-items>] [--out report.md] [--stamp]
+```
+
+Notes are the top-level `*.md` files other than `MEMORY.md` and the
+`MEMORY.<topic>.md` shard indexes. The report opens with a `counts:` line (one
+count per class plus the total), then one line per note, sorted by filename:
+`class | note | evidence [| low-confidence: why]`. The output is deterministic
+(no clock in the body; `--stamp` adds a single `generated:` header line), so a
+rerun on an unchanged store is byte-identical.
+
+| Class | Meaning | Evidence on the line |
+|---|---|---|
+| `personal` | about the owner; belongs in the personal store | `type=user` / `type=feedback` |
+| `harness-fact` | already written in a rule or standard; the note can go | `duplicates: <root>/<file>:<line>` |
+| `decision` | a recorded choice; belongs in the ledger | `ledger: <root>/<file>:<line>`, `ledger: no match`, or `ledger: none yet` when no `--ledger-root` is given |
+| `project-gotcha` | a fact about one repo; belongs in that repo | `repo: <name>` |
+| `stale` | dead; archive it | `reason: ...` |
+
+Rules, applied in order (the first that fires wins):
+
+1. **stale** — frontmatter `status` is resolved/superseded/obsolete/deprecated/
+   dead/archived, or `superseded_by` is set, or a line of the body starts with
+   RESOLVED/SUPERSEDED/OBSOLETE/DEPRECATED, or every absolute or `~/` path the
+   note quotes in backticks no longer exists.
+2. **personal** — `metadata.type: user`.
+3. **harness-fact** — a line in a `--rules-root` directory (any `*.md`,
+   searched recursively) shares at least 4 significant words and at least 60% of
+   the note's `description` words, or two distinct backticked terms of the note
+   sit on one rules line. Not applied to `type: project`. With no `--rules-root`
+   there is nothing to search, so a non-project note using two or more harness
+   words (seat, director, builder, worktree, handback, ...) is tagged
+   `harness-fact` with `duplicates: not searched` and flagged `low-confidence`.
+   There is no built-in rules path.
+4. **By `metadata.type`** — `feedback` → `personal`; `project` → `decision` when
+   decision cues (decided, ratified, ADR, outcome, ...) outnumber gotcha cues
+   (gotcha, workaround, never, fails, ...), else `project-gotcha`; `reference`
+   and `mechanics` → `project-gotcha`. A missing or other type is decided by the
+   same cue count.
+
+Where the rules cannot decide, the line carries `low-confidence` and a reason:
+an unmatched type, a project note with equal cue counts, a decision with no
+matching ledger item, a `harness-fact` standing on vocabulary alone, a
+harness-sounding note with no duplicate in the searched roots, or a repo taken
+from the store's own name because the note names none. The repo comes from a
+frontmatter `repo` field, else a `code/<name>` or `work/<name>` path in the note.
 
 ## Per-file harness truncation budget (`filebudget` — read-only, schedulable)
 

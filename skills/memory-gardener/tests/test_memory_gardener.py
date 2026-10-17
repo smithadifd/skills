@@ -4320,3 +4320,123 @@ def test_default_dir_reaches_the_cli(monkeypatch, tmp_path, capsys):
     rc = mg.main(["scan", "--today", "2026-07-08"])
     assert rc == 0
     assert "hedge-trimmer-schedule" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# classify (report-only migration classification)
+# --------------------------------------------------------------------------- #
+
+CLASSIFY_STORE = os.path.join(HERE, "fixtures", "memory_classify")
+CLASSIFY_RULES = os.path.join(HERE, "fixtures", "classify_rules")
+CLASSIFY_LEDGER = os.path.join(HERE, "fixtures", "classify_ledger")
+
+
+def _tree_hashes(root):
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            p = os.path.join(dirpath, name)
+            out[os.path.relpath(p, root)] = mg.file_sha256(p)
+    return out
+
+
+def _classify(rules=(CLASSIFY_RULES,), ledger=(CLASSIFY_LEDGER,)):
+    result = mg.classify_store(CLASSIFY_STORE, list(rules), list(ledger))
+    return {e["note"]: e for e in result["entries"]}, result
+
+
+def test_classify_assigns_each_class_from_a_fixture_note():
+    by_note, _ = _classify()
+    assert by_note["user-prefers-tea.md"]["class"] == "personal"
+    assert by_note["terse-answers.md"]["class"] == "personal"
+    assert by_note["review-before-merge.md"]["class"] == "harness-fact"
+    assert by_note["shed-roof-choice.md"]["class"] == "decision"
+    assert by_note["hose-reel-gotcha.md"]["class"] == "project-gotcha"
+    assert by_note["old-fence-plan.md"]["class"] == "stale"
+    assert by_note["missing-shed-config.md"]["class"] == "stale"
+
+
+def test_classify_skips_index_and_shard_files():
+    by_note, _ = _classify()
+    assert "MEMORY.md" not in by_note
+    assert "MEMORY.tools.md" not in by_note
+    assert len(by_note) == 8
+
+
+def test_classify_harness_fact_carries_rules_file_line():
+    by_note, _ = _classify()
+    assert by_note["review-before-merge.md"]["evidence"] == \
+        "duplicates: classify_rules/house-rules.md:3"
+    assert by_note["review-before-merge.md"]["low_confidence"] is None
+
+
+def test_classify_per_class_evidence():
+    by_note, _ = _classify()
+    assert by_note["shed-roof-choice.md"]["evidence"] == \
+        "ledger: classify_ledger/items.md:3"
+    assert by_note["hose-reel-gotcha.md"]["evidence"] == "repo: garden-app"
+    assert by_note["old-fence-plan.md"]["evidence"] == "reason: marked RESOLVED"
+    assert "/nonexistent-garden/shed.conf" in \
+        by_note["missing-shed-config.md"]["evidence"]
+
+
+def test_classify_without_rules_root_flags_harness_fact_low_confidence():
+    by_note, _ = _classify(rules=(), ledger=())
+    e = by_note["seat-worktree-habit.md"]
+    assert e["class"] == "harness-fact"
+    assert e["evidence"] == "duplicates: not searched"
+    assert e["low_confidence"]
+    assert by_note["shed-roof-choice.md"]["evidence"] == "ledger: none yet"
+
+
+def test_classify_with_rules_root_but_no_duplicate_is_not_harness_fact():
+    by_note, _ = _classify()
+    e = by_note["seat-worktree-habit.md"]
+    assert e["class"] == "personal"
+    assert e["low_confidence"]
+
+
+def test_classify_report_count_line_matches_entries():
+    _, result = _classify()
+    text = mg.render_classify_report(result)
+    assert text.splitlines()[1] == (
+        "counts: personal=3 harness-fact=1 decision=1 project-gotcha=1 "
+        "stale=2 total=8")
+    body = [ln for ln in text.splitlines() if " | " in ln]
+    assert len(body) == 8
+    assert body == sorted(body, key=lambda ln: ln.split(" | ")[1])
+
+
+def test_classify_cli_rerun_is_byte_identical(tmp_path):
+    outs = []
+    for i in range(2):
+        out = tmp_path / ("r%d.md" % i)
+        rc = mg.main(["classify", "--dir", CLASSIFY_STORE,
+                      "--rules-root", CLASSIFY_RULES, "--out", str(out)])
+        assert rc == 0
+        outs.append(out.read_bytes())
+    assert outs[0] == outs[1]
+
+
+def test_classify_refuses_out_inside_the_store(tmp_path, capsys):
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    before = _tree_hashes(store)
+    for target in (store / "report.md", store / "sub" / "report.md"):
+        rc = mg.main(["classify", "--dir", str(store), "--out", str(target)])
+        assert rc == 2
+        assert not target.exists()
+    assert "inside the memory dir" in capsys.readouterr().err
+    assert _tree_hashes(store) == before
+
+
+def test_classify_changes_no_file_in_the_store(tmp_path):
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    before = _tree_hashes(store)
+    rc = mg.main(["classify", "--dir", str(store),
+                  "--rules-root", CLASSIFY_RULES,
+                  "--out", str(tmp_path / "report.md")])
+    assert rc == 0
+    assert _tree_hashes(store) == before
