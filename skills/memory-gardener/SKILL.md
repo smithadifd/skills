@@ -43,7 +43,7 @@ helper never classifies; the model never hand-edits YAML.
 - **Two scheduled exceptions: `budget` and `filebudget`.** Both are pure
   read-only checks — no `--apply`, cannot mutate. `budget` measures MEMORY.md's
   own wholesale-load token/line cost and, when over, *prints* a shard proposal.
-  `filebudget` (added 2026-07-28) checks the DIFFERENT, harder ceiling the
+  `filebudget` checks the DIFFERENT, harder ceiling the
   harness itself enforces on EVERY memory file across ALL stores — see
   "Per-file harness truncation budget" below. Both are safe to run on a
   schedule: periodic dry-runs that alert on their own exit code. What `budget`
@@ -216,7 +216,7 @@ helper consumes:
   documented never-silently-dropped behaviour. DEAD files have their index line
   dropped automatically, again from the file that holds it.
   **Rewriting a SHARD's lines also refreshes that shard's JIT pointer in the
-  core** (`refresh_shard_pointer`, added 2026-09-06) — changing a shard changes
+  core** (`refresh_shard_pointer`) — changing a shard changes
   its load cost, and the always-loaded core advertises that cost. Nothing else
   refreshes it: `propose_extend` refreshes a pointer only for a shard it MOVES
   bullets into and explicitly leaves an untouched shard's pointer byte-identical,
@@ -297,7 +297,7 @@ python3 memory_gardener.py budget --taxonomy my-shards.json         # override g
   invoice — the ceiling is generous enough to absorb the imprecision.
 - **Budget.** Configurable `--max-tokens` (default **4500**) and `--max-lines`
   (default **100**). Over on *either* axis = over budget.
-  **Retuned 2026-09-06 from 2500/40**, which assumed a ~40-note index landing at
+  **Retuned from 2500/40**, which assumed a ~40-note index landing at
   800–1200 tok. Once a store is sharded, the CORE holds the always-loaded working
   set, and at ~80 notes the old ceiling was arithmetically unreachable: the bullet
   + `[title](file.md)` link overhead alone runs ~86 chars/line, so the links with
@@ -415,8 +415,8 @@ python3 memory_gardener.py shard --dir … --taxonomy my-shards.json \
   for a move apply rejects. There is deliberately no override: the fix is to trim
   the destination's index lines, or split the taxonomy so the overflow spreads
   across more shards.
-  The notes-headroom figure is the one that matters. On the live store a
-  chartered extend put `MEMORY.fleet.md` at 20,038 B — comfortably inside
+  The notes-headroom figure is the one that matters. On a real store an
+  extend put one shard at 20,038 B — comfortably inside
   25,000, and *room for ~18 more notes* against a shard that gains roughly one a
   day. "Inside the cap" and "worth doing" are different questions.
 - **Backs up first, and the backup is sacrosanct.** The memory dir is
@@ -443,10 +443,10 @@ python3 memory_gardener.py shard --dir … --taxonomy my-shards.json \
 
 `budget` above polices MEMORY.md's own wholesale-load token cost — a
 JIT-sharding concern with its own tuned defaults (4500 tok / 100 lines).
-`filebudget` (added 2026-07-28) checks a **different, harder** ceiling: the
+`filebudget` checks a **different, harder** ceiling: the
 Claude Code runtime itself silently truncates **any** memory file — not just
 MEMORY.md — once it exceeds **200 lines OR 25,000 bytes**
-(the Claude Code runtime's per-file memory load limit, measured 2026-07-25). Content past
+(the Claude Code runtime's per-file memory load limit). Content past
 the cap is loaded behind a single `WARNING` line and is otherwise
 **unreachable, with no error**. `filebudget` is the tripwire for that ceiling,
 across every store, every file.
@@ -469,7 +469,7 @@ python3 memory_gardener.py filebudget --json
   yet truncating) so a file gets attention before it silently loses content,
   not after.
 - **`memory/docs/` and `memory/archive/` are EXCLUDED from `OVER`/`WARN`.**
-  Verified against the real stores on 2026-07-28: a naive scan hit 8 files, and
+  Verified against real stores: a naive scan hit 8 files, and
   every one was a false positive — the `docs/*-full.md` bodies are the
   pointer-refactor's own OUTPUT (deliberately oversized; that's the whole
   point of moving them out of the wholesale-loaded set) and
@@ -494,9 +494,7 @@ python3 memory_gardener.py filebudget --json
 
 ## Pointer-memory refactor (`pointerize` plan field — mutating, via `apply`)
 
-Mechanizes the 2026-07-25 hand sweep (`fleet-roadmap`, `skylight-integration`,
-`feed-condenser`, `router-syslog`, `agentic-tooling-roadmap` — the five
-largest notes of one real memory dir, as the
+Mechanizes a manual sweep of the largest notes in a real memory dir (the
 format spec): move an oversized note's body to `memory/docs/<stem>-full.md`
 and leave a short pointer at the file's **original basename**, so inbound
 `[[wikilinks]]` and index links need **zero repair**.
@@ -645,11 +643,9 @@ surfaces these as **suggestions only**; nothing is auto-applied.
 - **Feed it into the existing mechanism.** A suggestion the model verifies
   becomes a normal plan entry's `wikilink_repairs: [{"from": ..., "to": ...}]`
   — no new apply-side code; `repair_wikilinks` already handles it.
-- **Verified against the real corpus 2026-07-28** (see the PR for the full
-  finding): two of the ticket's six cited targets are genuine, currently-live
-  mismatches in the hoard store (`[[feedback-self-review]]` →
-  `feedback_self_review.md`, `[[project-onboarding-overhaul]]` →
-  `project_onboarding_overhaul.md`); the other four are dangling for reasons
+- **Verified against a real corpus**: two of the six reported targets were genuine
+  mismatches in a real store (for example `[[feedback-review]]` →
+  `feedback_review.md`); the other four are dangling for reasons
   this normalizer correctly declines to "fix" (a missing prefix, a cross-store
   reference, or no matching file at all).
 
@@ -732,7 +728,7 @@ reproduced), fact-note byte-identity across an apply, the drift guard
 no-silent-clobber guard (+ `--force` override), and the on-disk
 `archive/MEMORY.pre-shard-<date>.md` backup.
 
-The `filebudget` tests (added 2026-07-28, all `tmp_path`-synthetic — no real
+The `filebudget` tests (all `tmp_path`-synthetic — no real
 fixture bloat) cover: byte-vs-char measurement on multi-byte content, the OR
 selection (a file over on lines only and one over on bytes only, both flagged
 independently), the 180–200 warn band's edges (183 → WARN, 200 → WARN not
@@ -779,7 +775,7 @@ released), and the no-loss comparison proven to catch flattened nested lists and
 de-indented code while tolerating trailing whitespace, CRLF, and to count
 duplicate lines as a multiset.
 
-The shard-aware index tests (2026-09-06, all reproduced against the live store
+The shard-aware index tests (all reproduced against a real store
 before being written) cover: `INDEX_LINE_RE` matching a title that carries its
 own bracketed run (``[`/model` … `[1m]`](…)``) while still keying off the FIRST
 link when the SUMMARY carries a second one (a greedy match-to-the-last-`](`
@@ -809,7 +805,7 @@ shape (`[[feedback-self-review]]` → `feedback_self_review.md`), leaving an
 exactly-resolving link alone, refusing to fabricate a repair across a missing
 prefix or a different store, flagging genuine ambiguity when two live files
 share a normalized key, and `scan()` surfacing the new key end-to-end (with a
-regression check that the shipped fixture — matching the real non-hoard
+regression check that the shipped fixture — matching the real
 stores — has zero suggestions).
 
 ## Gotchas
@@ -821,7 +817,7 @@ stores — has zero suggestions).
   genuinely dense one-liner near the threshold is fine — judge it. It reads the
   note's line from whichever index owns it, so shard-resident notes are covered;
   before that fix `index_summary_len` was 0 for every note outside `MEMORY.md`,
-  which made the signal structurally blind to 92 of the live store's 173 notes —
+  which made the signal structurally blind to every note held in a shard —
   including the ones with the worst lines, since the shards are gardened least.
 - **KEEP writes nothing *to the fact file* — but it can still fix an index
   line.** A `KEEP` entry carrying an `index_line` rebuilds that line and leaves
