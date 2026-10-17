@@ -233,6 +233,10 @@ check_agent_unknown() {
   printf 'PASS: unknown agent name was rejected\n'
 }
 
+check_reviewer_axes() {
+  "$repo_dir/ci/reviewer-axes.sh"
+}
+
 case ${1-} in
   install-all) check_install_all ;;
   install-one) check_install_one ;;
@@ -244,6 +248,7 @@ case ${1-} in
   uninstall-agents) check_uninstall_agents ;;
   agent-traversal) check_agent_traversal ;;
   agent-unknown) check_agent_unknown ;;
+  reviewer-axes) check_reviewer_axes ;;
   '')
     check_install_all
     check_install_one
@@ -254,6 +259,7 @@ case ${1-} in
     check_uninstall_agents
     check_agent_traversal
     check_agent_unknown
+    check_reviewer_axes
     ;;
   *)
     printf 'Unknown check: %s\n' "$1" >&2
