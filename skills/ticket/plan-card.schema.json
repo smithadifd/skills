@@ -10,6 +10,10 @@
     "key": {"type": "string", "minLength": 1},
     "title": {"type": "string", "minLength": 1},
     "diff_statement": {"type": "string", "minLength": 1},
+    "revision": {"type": "integer", "minimum": 1},
+    "ticket_status": {"type": "string"},
+    "ticket_updated_at": {"type": "string"},
+    "open_questions": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "acceptance_criteria": {
       "type": "array",
       "minItems": 1,
@@ -20,13 +24,18 @@
         "properties": {
           "text": {"type": "string", "minLength": 1},
           "passes": {"type": "boolean", "default": false},
-          "review_evidence": {"type": ["string", "null"]}
+          "review_evidence": {"type": ["string", "null"]},
+          "review_round": {"type": ["integer", "null"], "minimum": 1}
         },
         "allOf": [
           {
             "if": {"properties": {"passes": {"const": true}}},
             "then": {
-              "properties": {"review_evidence": {"type": "string", "minLength": 1}}
+              "properties": {
+                "review_evidence": {"type": "string", "minLength": 1},
+                "review_round": {"type": "integer", "minimum": 1}
+              },
+              "required": ["review_evidence", "review_round"]
             }
           }
         ]

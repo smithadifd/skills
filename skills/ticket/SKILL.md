@@ -48,22 +48,43 @@ provided local ticket file.
 
 ### Store
 
-Both stores implement exactly four calls:
+Both stores implement exactly six calls:
 
-- `write_stamp(point, phase, next_skills, refs, close=False)` — stop or close,
-  with file and PR references kept as paths or ids rather than copied content;
+- `write_stamp(point, phase, next_skills, refs, close=False)` — stop or close.
+  Each ref is a path, a PR or issue id (`owner/repo#N` or `#N`),
+  `branch:<name>`, a commit SHA, or a store event (`event:<N>`); content is
+  never copied into a ref;
 - `record_decision(decision)` — `who`, `who_kind`, optional `relayed_by`,
   `standing`, outside `source`, `effect`, tags, verbatim words, phase, and
   evidence reference;
 - `record_review(review)` — round, verdict, findings, reviewer, and evidence;
-- `read_card()` — the ticket's resume card.
+- `record_plan(plan)` — the latest plan-card snapshot (criteria with `passes`
+  and review evidence, skips, diff statement, open questions, revision);
+  returns the ref the store keeps it under, which the stop stamps cite;
+- `record_tried(tried)` — what was tried, its outcome, phase, and evidence;
+- `read_card()` — the ticket's resume card: stamps, decisions, reviews, the
+  plan snapshot and its ref, and what was tried.
 
-Use the event-ledger adapter only when `ledger` is on `PATH`, or
-`TICKET_LEDGER_CLI` names the configured executable, and `ledger doctor`
-succeeds for the configured database. Invoke only that CLI. Never import its
-Python package or read its database directly.
+The plan card is a dedicated store record rather than a file a stamp points
+at, so the store alone decides what a resume trusts: a file outside the store
+could change or vanish without the store knowing.
 
-Otherwise use `<target-repo>/.ticket/<key>.md`. Before every write, the markdown
+Use the event-ledger adapter when `ledger` is on `PATH`, or `TICKET_LEDGER_CLI`
+names the configured executable. Invoke only that CLI. Never import its Python
+package or read its database directly. `ledger doctor` must succeed for the
+configured database. When it fails, report the CLI's message and stop; do not
+fall back to the markdown card, which would split the ticket across two stores.
+A database that does not exist yet (`missing_db`) is initialised by creating
+this ticket's item once with the CLI's own `new` verb (`ledger --db <path> new
+--id <key> --type ticket --title <title>`), then retrying.
+
+The ledger CLI may require a writer identity in its environment before it
+accepts writes. This skill never sets one. When a write is refused, the adapter
+raises `StoreUnavailable` with the CLI's message: tell the person to export the
+writer-identity variable that message names (in their shell or the wrapper that
+starts the session), then retry.
+
+With no ledger CLI installed, use `<target-repo>/.ticket/<key>.md`. Before every write, the markdown
 adapter runs `git check-ignore` for that card. If it is not ignored, stop and
 say: add `.ticket/` to the target repository's ignore rules, then retry. Do not
 edit an ignore file silently. Never stage or commit `.ticket/`.
@@ -75,8 +96,14 @@ edit an ignore file silently. Never stage or commit `.ticket/`.
    pull-request template, relevant code, and verification commands when they
    exist. Team and repository conventions win over defaults here.
 3. Follow the ticket's Figma and Confluence links as described above.
-4. Read the resume card and its referenced paths or ids on a resume. Reconcile
-   it against the fresh ticket; state every changed fact before reusing a plan.
+4. On a resume, `TicketPass.open(..., resume=True)` pulls the ticket, then reads
+   the card and rebuilds the pass from it: the plan snapshot, the review-round
+   count, the recorded go decisions, and the phase. It reconciles the plan
+   against the fresh ticket and lists every difference in `reconciliation`. A
+   new, changed, or removed acceptance criterion sends the pass back to the plan
+   step for a new plan card and a new plan go; a criterion whose `passes` is not
+   backed by a recorded review round is reset to false. State every flagged
+   difference before reusing the plan, and read the card's referenced paths or ids.
 5. Identify assumptions and focused research questions. Do not start building.
 
 ## 2. Research
@@ -107,9 +134,13 @@ the plan go.
 
 ## 4. Plan go — hard stop
 
-Present the plan card and ask the person to approve, change, or take a
-more-information exit. Stop. Do not edit product files or dispatch
-`builder-core` until explicit approval is recorded with `record_go("plan", …)`.
+`present_plan(plan)` records the plan snapshot and writes a stop stamp at plan
+go before the pass reports that phase, so ending the session here leaves a
+resume card at this point. Present the plan card and ask the person to
+approve, change, or take a more-information exit. Stop. Do not edit product
+files or dispatch `builder-core` until explicit approval is recorded with
+`record_go("plan", …)`. Gates are read from the person's go decisions in the
+store, never from session state.
 
 ## 5. Build and review
 
@@ -123,25 +154,32 @@ After plan go:
    standards second.
 3. When the target repository has `scripts/verify.sh`, the reviewer runs it in
    addition to the repository's required checks.
-4. Only a review-evidence path or id may flip an acceptance criterion's
-   `passes` field. A passing verdict is invalid while any criterion remains
-   false.
-5. Record each review round. Send findings back to `builder-core`, then use a
-   fresh-context review of the delta. Continue without asking the person.
-6. Stop after a passing review or after round three. At the cap, stamp the
+4. Record each round with `record_review(verdict, evidence=…,
+   passed_criteria=…)`. It is the only way `passes` flips: the store records
+   the round first, and each listed criterion then cites that recorded round
+   and its evidence path or id. A passing verdict must list every criterion;
+   an invalid one is refused before anything is written and spends no round.
+5. Send findings back to `builder-core`, then use a fresh-context review of
+   the delta. Continue without asking the person.
+6. Stop after a passing review or after round three. The cap counts every
+   round the store holds for the ticket, across resumes. At the cap, stamp the
    unresolved findings and exact next evidence needed; do not start round four.
 
 ## 6. Outward go — hard stop
 
-When review passes, show the final diff summary, verification evidence,
-acceptance-criterion evidence, decision records, and every proposed outward
-action. Stop. Nothing may leave the machine before explicit approval is
-recorded with `record_go("outward", …)`: no push, pull request, Jira comment,
-status change, message, merge, release, or deploy.
+A passing review records the plan snapshot and writes a stop stamp at outward
+go before the pass reports that phase. Show the final diff summary,
+verification evidence, acceptance-criterion evidence, decision records, and
+every proposed outward action. Stop. Nothing may leave the machine before
+explicit approval is recorded with `record_go("outward", …)`: no push, pull
+request, Jira comment, status change, message, merge, release, or deploy. Call
+`require_outward_go()` before each outward action; it checks the store.
 
 After approval, perform only the listed outward actions under the target
-repository's rules. Then write the close stamp and read the card back once to
-confirm its stop point, decisions, review rounds, next skills, and references.
+repository's rules. Then call `close(point, refs=…, next_skills=…)`: it writes
+the close stamp and reads the card back to confirm the stop point, both go
+decisions, the review rounds, next skills, and references. A mismatch raises
+and leaves the pass open; repair the card before reporting the ticket closed.
 
 ## More-information exits
 
@@ -159,9 +197,9 @@ references. Every later resume starts with the live ticket pull.
 
 ## Close and optional reflection
 
-At any stop or close, persist what was tried, decisions and their effects, open
-questions, branch or PR ids, review rounds and findings, current point, next
-skills, and references. Decision words are verbatim: a role's position uses
+At any stop or close, persist what was tried (`record_tried`), decisions and
+their effects, open questions (on the plan card), branch or PR ids, review
+rounds and findings, current point, next skills, and references. Decision words are verbatim: a role's position uses
 `who_kind: role` plus `relayed_by`; never attribute that position to the relay.
 A lean becomes settled only through a cited outside event.
 
