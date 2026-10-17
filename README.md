@@ -4,7 +4,7 @@ This repository contains reusable Claude Code skills for common tasks and agents
 
 ## Before you start
 
-You need Claude Code, `git`, and `bash`. Python 3 is required for `kickoff`, `memory-gardener`, `sharpen`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
+You need Claude Code, `git`, and `bash`. Python 3 is required for `kickoff`, `memory-gardener`, `sharpen`, `ticket`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
 
 This is a private repository. If you've been invited as a collaborator, clone it using the URL provided with your access, then run the commands below from the clone:
 
@@ -26,6 +26,7 @@ cd skills
 | `shape` | Tests a proposed design for risks and missing considerations before implementation. |
 | `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. |
 | `teach` | Explains how a codebase works with a system overview, component tour, and traced example. |
+| `ticket` | Runs one ticket from live orientation through approved planning, build and review, outward approval, and a durable resume card. |
 | `topic` | Keeps the notes for an ongoing, focused discussion in one file. |
 
 ## Agents
