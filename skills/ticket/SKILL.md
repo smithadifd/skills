@@ -96,28 +96,34 @@ ignore file silently. Never stage or commit `.ticket/`.
 
 ### One writer per ticket
 
-A ticket has at most one live writer at a time, whichever store holds it.
-Every store write takes the ticket for the length of that write and releases
-it on every exit path, including an exception:
+A ticket has at most one live writer at a time, whichever store holds it. A
+second writer is refused with `TicketHeld`, which names the ticket and the
+writer that holds it or wrote first (`writer` label, process id, and handle),
+and nothing of the refused write is stored. Nothing waits for a lock. Pass
+`writer=` to the store or to `choose_store` to label this session; the default
+is `user@host`.
 
-- **markdown** — an exclusive lock on `.ticket/<key>.md.lock`, held across
-  the whole read, change and replace of the card. The holder writes its name
-  into the lock file. The operating system drops the lock if the holding
-  process dies.
-- **ledger** — the CLI's `claim` verb on the ticket's status row, which
-  refuses atomically when another owner holds it. Releasing the claim restores
-  the status the row had before it (a close releases to `closed`). Readers see
-  that earlier status while a write is in flight.
-
-The lock or claim is never waited for. When another writer holds the ticket,
-the write raises `TicketHeld` naming the ticket and the holder (`writer`
-label, process id, and handle), and nothing is written. Tell the person who
-holds it and retry after that writer finishes. Pass `writer=` to the store or
-to `choose_store` to label this session; the default is `user@host`. If a
-ledger claim outlives a crashed writer, the refusal keeps naming it: once the
-person confirms that writer is gone, set the status back with the CLI's
-`state` verb (`ledger state <key> --status open`, or `closed` for a closed
-ticket).
+- **markdown** — every write holds `.ticket/<key>.md.lock` across the whole
+  read, change and replace of the card, and releases it on every exit path,
+  including an exception. The writer prepares a new file that already carries
+  its name and its exclusive lock, then links it into place, so the lock file
+  names its holder from the moment it exists until the holder removes it.
+  When a writer is refused, retry after the named writer finishes. If the
+  holding process dies, the next writer replaces the lock file it left. A lock
+  path that is a symbolic link, is not a regular file, or has more than one
+  link is refused untouched: check what it points at, remove it, and retry.
+- **ledger** — the precondition is the ticket's revision, the newest ledger
+  event of the ticket a store handle has accounted for. `TicketPass.open`
+  reads the card, which pins the revision for the pass; the pass's own writes
+  move it, later reads do not. A write is refused when the ticket holds a
+  newer event, naming whoever wrote it, and each append carries an idempotency
+  key built from the revision, so of two writers that read the same revision
+  only the first append lands. A refused pass has nothing to clean up: open
+  a new store handle and resume, which shows the other writer's changes, and
+  decide with the person whether to continue. The adapter claims nothing. It
+  never changes the ticket's status, owner, claim or blocked-by fields, except
+  that a confirmed close sets the status to `closed` and keeps the other three.
+  A ticket someone has claimed for work stays claimed and can still be written.
 
 ## 1. Orient
 

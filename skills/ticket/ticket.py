@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
@@ -72,12 +73,9 @@ class StoreUnavailable(RuntimeError):
 class TicketHeld(StoreUnavailable):
     """Another writer holds the ticket; this write was refused, not queued."""
 
-    def __init__(self, key: str, holder: str):
-        super().__init__(
-            f"ticket {key} already has a live writer: {holder}. This write was refused, "
-            "not queued; retry after that writer finishes.",
-            code="held",
-        )
+    def __init__(self, key: str, holder: str, *, detail: str | None = None):
+        detail = detail or "This write was refused, not queued; retry after that writer finishes."
+        super().__init__(f"ticket {key} already has a live writer: {holder}. {detail}", code="held")
         self.key = key
         self.holder = holder
 
@@ -498,9 +496,14 @@ class MarkdownStore:
     """Ignored ``.ticket/<key>.md`` fallback with embedded structured data.
 
     Every write holds ``.ticket/<key>.md.lock`` for the whole read, change and
-    replace. The lock is taken without waiting: when another writer holds it,
-    the write is refused with that writer's name. The operating system drops
-    the lock if the holding process dies, and every exit path releases it.
+    replace. A writer prepares a new file that already holds its name and its
+    exclusive ``flock``, then links it into place: owning the lock and naming
+    the owner happen in one step. The node keeps that name until the owner
+    removes it at release, so every refusal names the live holder. Nothing is
+    ever written through the lock path, and a node there that is not a
+    regular, singly-linked file is refused. The lock is taken without
+    waiting. If the holding process dies, the operating system drops its
+    ``flock`` and the next writer replaces the stale node.
     """
 
     def __init__(self, repo: str | Path, key: str, title: str, *, writer: str | None = None):
@@ -529,26 +532,127 @@ class MarkdownStore:
         self._check_ignored()
         self._ensure_directory()
         try:
-            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError as exc:
-            raise StoreUnavailable(f"cannot open the write lock for ticket {self.key}: {exc}") from exc
+            raise StoreUnavailable(f"cannot open .ticket as a directory for ticket {self.key}: {exc}") from exc
         try:
+            fd = self._acquire(directory)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
-                    raise TicketHeld(self.key, _lock_holder(fd)) from None
-                raise StoreUnavailable(f"cannot take the write lock for ticket {self.key}: {exc}") from exc
-            try:
-                os.ftruncate(fd, 0)
-                os.pwrite(fd, self.holder.encode("utf-8"), 0)
                 self._depth = 1
                 yield
             finally:
                 self._depth = 0
-                with contextlib.suppress(OSError):
-                    os.ftruncate(fd, 0)
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                self._release(directory, fd)
+        finally:
+            os.close(directory)
+
+    def _acquire(self, directory: int) -> int:
+        """Link a named, locked node into place as the lock; return its descriptor."""
+
+        name = self.lock_path.name
+        temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory,
+            )
+        except OSError as exc:
+            raise StoreUnavailable(f"cannot create the write lock for ticket {self.key}: {exc}") from exc
+        placed = False
+        try:
+            os.write(fd, self.holder.encode("utf-8"))
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # A bounded number of tries: each retry means the node changed under
+            # this writer (released, or replaced as stale) between two calls.
+            for _ in range(8):
+                try:
+                    os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                except FileExistsError:
+                    placed = self._replace_stale(directory, temporary, name)
+                else:
+                    placed = True
+                if placed:
+                    return fd
+            raise StoreUnavailable(
+                f"the write lock for ticket {self.key} kept changing while it was being taken; retry"
+            )
+        except OSError as exc:
+            raise StoreUnavailable(f"cannot take the write lock for ticket {self.key}: {exc}") from exc
+        finally:
+            # After a link the temporary name is a second link to the lock;
+            # after a replace it no longer exists. Either way it goes.
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=directory)
+            if not placed:
+                os.close(fd)
+
+    def _replace_stale(self, directory: int, temporary: str, name: str) -> bool:
+        """Refuse a live or unsafe lock node; replace a stale one. False means retry."""
+
+        try:
+            other = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise self._unsafe_node("a symbolic link") from None
+            raise
+        try:
+            node = os.fstat(other)
+            if not stat.S_ISREG(node.st_mode):
+                raise self._unsafe_node("not a regular file")
+            try:
+                fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                    # Only the owner ever holds this node's exclusive lock, and
+                    # the node carried the owner's name before it was linked.
+                    raise TicketHeld(self.key, _lock_holder(other)) from None
+                raise
+            node = os.fstat(other)
+            if node.st_nlink == 0:
+                # Its owner removed it at release after this writer opened it.
+                return False
+            if node.st_nlink != 1:
+                raise self._unsafe_node(f"linked {node.st_nlink} times")
+            # No live owner: the writer that left this node has exited. Replace
+            # it under the directory's own lock, held only for the check and
+            # the rename, so two writers cannot both replace the same node.
+            fcntl.flock(directory, fcntl.LOCK_EX)
+            try:
+                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (node.st_dev, node.st_ino):
+                    return False
+                os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                return True
+            except FileNotFoundError:
+                return False
+            finally:
+                fcntl.flock(directory, fcntl.LOCK_UN)
+        finally:
+            os.close(other)
+
+    def _unsafe_node(self, what: str) -> StoreUnavailable:
+        return StoreUnavailable(
+            f"{self.relative_path.as_posix()}.lock is {what}, so it was not used as a lock and nothing "
+            "was written. Check what it points at, remove it, and retry.",
+            code="unsafe_lock",
+        )
+
+    def _release(self, directory: int, fd: int) -> None:
+        """Remove the lock node while still holding it, then drop the hold."""
+
+        try:
+            mine = os.fstat(fd)
+            current = os.stat(self.lock_path.name, dir_fd=directory, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (mine.st_dev, mine.st_ino):
+                os.unlink(self.lock_path.name, dir_fd=directory)
+        except OSError:
+            # A node left behind is unlocked once fd closes, so the next
+            # writer replaces it as stale.
+            pass
         finally:
             os.close(fd)
 
@@ -681,13 +785,13 @@ class MarkdownStore:
 
 
 def _lock_holder(fd: int) -> str:
-    """The name the current lock holder wrote into the lock file."""
+    """The name the lock holder wrote into its node before linking it into place."""
 
     try:
         name = os.pread(fd, 4096, 0).decode("utf-8", "replace").strip()
     except OSError:
         name = ""
-    return name or "a writer that has not recorded its name yet"
+    return name or "a writer whose lock file carries no name"
 
 
 def _inline(value: Any) -> str:
@@ -763,10 +867,20 @@ class LedgerStore:
     This adapter never supplies one: the person or their wrapper exports it,
     and a refused write surfaces as ``StoreUnavailable`` with the CLI's message.
 
-    Every write first claims the ticket's status row with the CLI's ``claim``
-    verb, which refuses atomically when another owner holds it. A refused
-    claim is reported with the holder's name, never retried. The write then
-    releases the claim by restoring the status the row had before the claim.
+    One writer per ticket rests on a precondition on the ticket's revision,
+    the newest ledger event of the ticket this handle has accounted for. The
+    handle's first read pins it (a pass reads the card when it opens), and
+    only the handle's own writes move it; later reads do not. Every write
+    first checks that the ticket holds no newer event, and refuses, naming
+    that event's writer, when it does. Every append then carries the
+    idempotency key ``ticket-write/<key>/after/<revision>``. The CLI stores a
+    key once and refuses a different event under it, so when two writers
+    passed the check from the same revision, only the first append lands and
+    the second is refused by the first one's name.
+
+    The adapter claims nothing and never writes the ticket's status, owner,
+    claim or blocked-by fields, except to mark the ticket closed; that write
+    carries the owner, claim and blocked-by fields over unchanged.
     """
 
     def __init__(
@@ -785,54 +899,9 @@ class LedgerStore:
         self.title = title
         self.holder = _writer_name(writer)
         self._ensured = False
-        self._depth = 0
-        self._release_to: str | None = None
-
-    @contextlib.contextmanager
-    def _writing(self) -> Iterator[None]:
-        """Hold this ticket's claim for one write; refuse if another owner holds it."""
-
-        if self._depth:
-            self._depth += 1
-            try:
-                yield
-            finally:
-                self._depth -= 1
-            return
-        self._ensure_item()
-        try:
-            claimed = self._run("claim", self.key, "--owner", self.holder)
-        except StoreUnavailable as exc:
-            if exc.code == "claimed":
-                raise TicketHeld(self.key, self._claim_holder(str(exc))) from exc
-            raise
-        self._release_to = None
-        try:
-            events = self._run("export-item", self.key)["events"]
-            self._release_to = _status_before(events, int(claimed["event"]["id"]))
-            self._depth = 1
-            yield
-        finally:
-            self._depth = 0
-            target, self._release_to = self._release_to, None
-            if target is None:
-                raise StoreUnavailable(
-                    f"ticket {self.key} is still claimed by {self.holder}: its earlier status "
-                    "could not be read. Set it back with the ledger CLI's state verb."
-                )
-            self._run("state", self.key, "--status", target)
-
-    def _claim_holder(self, message: str) -> str:
-        """Who holds the claim, from the CLI's refusal or, failing that, the card."""
-
-        _, _, named = message.partition("claimed by ")
-        if named.strip():
-            return named.strip()
-        try:
-            card = self._card_envelope() or {}
-        except StoreUnavailable:
-            card = {}
-        return str(card.get("owner") or card.get("claim") or "an owner the ledger did not name")
+        # The ticket revision this handle has accounted for; None until it
+        # first reads or writes the ticket.
+        self._seen: int | None = None
 
     def is_installed(self) -> bool:
         return bool(self.cli) and os.path.isfile(self.cli) and os.access(self.cli, os.X_OK)
@@ -888,12 +957,49 @@ class LedgerStore:
             return None
         raise StoreUnavailable(str(error.get("message") or "ledger card failed"), code=error.get("code"))
 
+    def _events(self) -> list[dict[str, Any]]:
+        return self._run("export-item", self.key)["events"]
+
     def _ensure_item(self) -> None:
         if self._ensured:
             return
         if self._card_envelope() is None:
-            self._run("new", "--id", self.key, "--type", "ticket", "--title", self.title)
+            try:
+                created = self._run("new", "--id", self.key, "--type", "ticket", "--title", self.title)
+            except StoreUnavailable as exc:
+                # Another writer created the item since this handle looked; the
+                # revision check that follows refuses this write by its name.
+                if exc.code != "conflict":
+                    raise
+            else:
+                if not self._seen:
+                    self._seen = int((created.get("event") or {}).get("id") or 0)
         self._ensured = True
+
+    def _current_events(self) -> list[dict[str, Any]]:
+        """The ticket's events, refusing when any is newer than this handle's revision."""
+
+        self._ensure_item()
+        events = self._events()
+        if self._seen is None:
+            self._seen = _revision(events)
+        newer = [event for event in events if int(event["id"]) > self._seen]
+        if newer:
+            raise self._stale(newer[-1])
+        return events
+
+    def _stale(self, event: Mapping[str, Any] | None) -> TicketHeld:
+        if event is None:
+            return TicketHeld(self.key, "another writer the ledger did not name")
+        return TicketHeld(
+            self.key,
+            _event_writer(event),
+            detail=(
+                f"It wrote ledger event {int(event['id'])} after this pass read the ticket, so this "
+                "write was refused, not queued. Resume the ticket from a new store handle to read "
+                "that writer's changes before writing again."
+            ),
+        )
 
     def write_stamp(
         self,
@@ -908,88 +1014,129 @@ class LedgerStore:
             payload["skills"] = list(next_skills)
         if refs:
             payload["refs"] = list(refs)
-        with self._writing():
-            self._append("item.stopped", payload)
+        self._append("item.stopped", payload)
 
     def confirm_close(self, position: int, point: str) -> None:
         """Name that pending close's stop event as the close, then mark the item closed.
 
-        The check, the close note and the closed status all happen under one
-        claim; releasing that claim is the write that sets the status closed.
+        Both appends follow the revision the check read, so a stop that lands
+        after the check refuses the close instead of following it.
         """
 
-        with self._writing():
-            events = self._run("export-item", self.key)["events"]
-            stops = [event for event in events if event["kind"] == "item.stopped"]
-            _require_pending_close([event["payload"] for event in stops], position, point)
-            self._append("item.note", {"text": f"{_CLOSE_NOTE}{int(stops[position]['id'])}"})
-            self._release_to = "closed"
+        events = self._current_events()
+        stops = [event for event in events if event["kind"] == "item.stopped"]
+        _require_pending_close([event["payload"] for event in stops], position, point)
+        self._append("item.note", {"text": f"{_CLOSE_NOTE}{int(stops[position]['id'])}"})
+        self._append("item.state", {**_carried_state(events), "status": "closed"})
 
     def record_decision(self, decision: DecisionRecord) -> None:
         _validate_decision(decision)
-        with self._writing():
-            source_data = self._append("outside.recorded", decision.source.as_dict())
-            source_event_id = int(source_data["event"]["id"])
-            payload = decision.as_dict()
-            payload.pop("source")
-            payload["source"] = decision.source.ref
-            payload["source_event_id"] = source_event_id
-            self._append("decision.recorded", payload)
+        source_data = self._append("outside.recorded", decision.source.as_dict())
+        source_event_id = int(source_data["event"]["id"])
+        payload = decision.as_dict()
+        payload.pop("source")
+        payload["source"] = decision.source.ref
+        payload["source_event_id"] = source_event_id
+        self._append("decision.recorded", payload)
 
     def record_review(self, review: ReviewRecord) -> None:
         _validate_review(review)
-        with self._writing():
-            self._append("review.recorded", review.as_dict())
+        self._append("review.recorded", review.as_dict())
 
     def record_plan(self, plan: Mapping[str, Any]) -> str:
         _validate_plan(plan, self.key)
         text = _PLAN_NOTE + json.dumps(plan, sort_keys=True, separators=(",", ":"))
-        with self._writing():
-            data = self._append("item.note", {"text": text})
+        data = self._append("item.note", {"text": text})
         return f"event:{int(data['event']['id'])}"
 
     def record_tried(self, tried: TriedRecord) -> None:
         _validate_tried(tried)
-        with self._writing():
-            self._append("item.tried", tried.as_dict())
+        self._append("item.tried", tried.as_dict())
 
     def _append(self, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self._run(
-            "append",
-            "--kind",
-            kind,
-            "--item",
-            self.key,
-            "--payload",
-            json.dumps(payload, sort_keys=True, separators=(",", ":")),
-        )
+        """Append one event only if the ticket is still at this handle's revision."""
+
+        self._current_events()
+        body = dict(payload)
+        if kind in _NAMED_KINDS:
+            # The writer's name rides on the event, so a refused writer can be
+            # told who wrote first, and two writers never send the same event.
+            body["source"] = self.holder
+        idempotency_key = f"ticket-write/{self.key}/after/{self._seen}"
+        try:
+            data = self._run(
+                "append",
+                "--kind",
+                kind,
+                "--item",
+                self.key,
+                "--idempotency-key",
+                idempotency_key,
+                "--payload",
+                json.dumps(body, sort_keys=True, separators=(",", ":")),
+            )
+        except StoreUnavailable as exc:
+            if exc.code != "conflict":
+                raise
+            first = next(
+                (event for event in self._events() if event.get("idempotency_key") == idempotency_key),
+                None,
+            )
+            raise self._stale(first) from exc
+        self._seen = int(data["event"]["id"])
+        return data
 
     def read_card(self) -> dict[str, Any]:
         card = self._card_envelope()
         if card is None:
+            if self._seen is None:
+                self._seen = 0
             return _blank_card(self.key, self.title)
-        events = self._run("export-item", self.key)["events"]
+        events = self._events()
+        if self._seen is None:
+            self._seen = _revision(events)
         return _normalize_ledger_card(card, events)
 
 
-def _status_before(events: Sequence[Mapping[str, Any]], event_id: int | None = None) -> str:
-    """The ticket's status just before ``event_id`` (or now), ignoring write claims."""
+# Event kinds whose payload may carry a ``source``; the adapter puts the
+# writer's name there. A decision's ``source`` is its outside event's ref.
+_NAMED_KINDS = frozenset(
+    ("item.stopped", "item.note", "item.tried", "item.state", "review.recorded", "outside.recorded")
+)
+_HOLDER = re.compile(r".+ \(pid \d+, handle [0-9a-f]{6}\)")
 
-    status = "open"
+
+def _revision(events: Sequence[Mapping[str, Any]]) -> int:
+    return max((int(event["id"]) for event in events), default=0)
+
+
+def _event_writer(event: Mapping[str, Any]) -> str:
+    """Name who wrote an event: the adapter's writer name, else the CLI's attribution."""
+
+    payload = event.get("payload") or {}
+    named = payload.get("source") if event.get("kind") in _NAMED_KINDS else None
+    if isinstance(named, str) and _HOLDER.fullmatch(named):
+        return named
+    who = event.get("actor") or event.get("harness") or event.get("session")
+    if who:
+        return f"{who} (ledger event {int(event['id'])})"
+    return f"the writer of ledger event {int(event['id'])}"
+
+
+def _carried_state(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The owner, claim and blocked-by fields of the ticket's latest state event."""
+
+    latest: Mapping[str, Any] = {}
     for event in events:
-        if event_id is not None and int(event["id"]) >= event_id:
-            break
-        payload = event.get("payload") or {}
-        if event["kind"] == "item.created" and payload.get("status"):
-            status = str(payload["status"])
-        elif event["kind"] == "item.state" and payload.get("status") not in (None, "claimed"):
-            status = str(payload["status"])
-    return status
+        if event["kind"] == "item.state":
+            latest = event.get("payload") or {}
+    return {name: latest[name] for name in ("owner", "claim", "blocked_by") if latest.get(name)}
 
 
 def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    # The adapter's writer name rides in ``source``; it is not card content.
     outside = {
-        int(event["id"]): event["payload"]
+        int(event["id"]): {name: value for name, value in event["payload"].items() if name != "source"}
         for event in events
         if event["kind"] == "outside.recorded"
     }
@@ -1009,6 +1156,7 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
             payload["source"] = dict(outside.get(int(source_id), {})) if source_id else {}
             decisions.append(payload)
         elif event["kind"] == "review.recorded":
+            payload.pop("source", None)
             payload.setdefault("findings", [])
             reviews.append(payload)
         elif event["kind"] == "item.stopped":
@@ -1034,8 +1182,7 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
         elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_CLOSE_NOTE):
             named = payload["text"][len(_CLOSE_NOTE) :]
             close_id = int(named) if named.isdigit() else None
-    # A write in progress shows as claimed; the ticket's status is the one under it.
-    status = card["status"] if card.get("status") != "claimed" else _status_before(events)
+    status = card["status"]
     # Only the stop the latest close note names is the close, and only while closed.
     if status == "closed" and close_id in stop_ids:
         stamps[stop_ids.index(close_id)]["close"] = True
@@ -1238,8 +1385,11 @@ class TicketPass:
     ) -> "TicketPass":
         ticket = source.pull(key)
         session = cls(ticket, store)
+        # Every open reads the card, which pins the store's view of the ticket
+        # for this pass; a store refuses a write made from an older view.
+        card = store.read_card()
         if resume:
-            session._resume(store.read_card())
+            session._resume(card)
         return session
 
     @property
