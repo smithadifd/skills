@@ -3716,9 +3716,6 @@ def write_classify_report(out, text):
     a group-readable one. One no-follow stat decides: missing keeps the
     private mode; a non-regular target or any other stat failure is refused
     and the report is not written."""
-    if os.path.islink(out):
-        raise ValueError("--out %r is a symlink; refusing to write through it"
-                         % out)
     out_dir = os.path.dirname(os.path.abspath(out))
     tmp = None
     try:

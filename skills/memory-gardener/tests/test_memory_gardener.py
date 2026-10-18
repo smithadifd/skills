@@ -4691,22 +4691,12 @@ def test_classify_report_keeps_existing_group_readable_mode(tmp_path):
     assert out.read_text() == "report\n"
 
 
-def test_classify_report_refuses_a_symlink_target_and_writes_nothing(
-        tmp_path, monkeypatch):
-    """The mode-stat refuses a symlink even if the opening islink check does
-    not see it; the referent is untouched and no report is written."""
+def test_classify_report_refuses_a_symlink_target_and_writes_nothing(tmp_path):
     target = tmp_path / "keep.md"
     target.write_text("keep")
     link = tmp_path / "link.md"
     link.symlink_to(target)
-    real_islink = os.path.islink
 
-    def hide_out_symlink(path):
-        if os.path.abspath(path) == os.path.abspath(str(link)):
-            return False
-        return real_islink(path)
-
-    monkeypatch.setattr(os.path, "islink", hide_out_symlink)
     with pytest.raises(ValueError):
         mg.write_classify_report(str(link), "report\n")
     assert target.read_text() == "keep"
@@ -4716,25 +4706,46 @@ def test_classify_report_refuses_a_symlink_target_and_writes_nothing(
 
 def test_classify_report_refuses_symlink_swapped_in_before_mode_stat(
         tmp_path, monkeypatch):
-    """A symlink planted after the opening islink check must not donate its
-    0755 mode onto the report, and must not be written through."""
+    """The sole target stat catches a symlink planted at its write boundary."""
     out = tmp_path / "report.md"
     keep = tmp_path / "keep.md"
     keep.write_text("keep")
-    real_islink = os.path.islink
+    real_lstat = os.lstat
+    target_lstats = []
 
-    def islink_then_plant(path):
+    def lstat_and_plant(path):
         if os.path.abspath(path) == os.path.abspath(str(out)):
-            if not real_islink(path):
+            target_lstats.append(path)
+            if list(tmp_path.glob(".classify-*.tmp")):
                 out.symlink_to(keep)
-            return False
-        return real_islink(path)
+        return real_lstat(path)
 
-    monkeypatch.setattr(os.path, "islink", islink_then_plant)
+    monkeypatch.setattr(mg.os, "lstat", lstat_and_plant)
     with pytest.raises(ValueError):
         mg.write_classify_report(str(out), "report\n")
+    assert target_lstats == [str(out)]
     assert keep.read_text() == "keep"
-    assert stat.S_ISLNK(os.lstat(str(out)).st_mode)
+    assert stat.S_ISLNK(real_lstat(str(out)).st_mode)
+    assert not list(tmp_path.glob(".classify-*"))
+
+
+def test_classify_report_refuses_target_stat_permission_error(
+        tmp_path, monkeypatch):
+    out = tmp_path / "report.md"
+    real_lstat = os.lstat
+    target_lstats = []
+
+    def denied_lstat(path):
+        if os.path.abspath(path) == os.path.abspath(str(out)):
+            target_lstats.append(path)
+            raise PermissionError("stat denied")
+        return real_lstat(path)
+
+    monkeypatch.setattr(mg.os, "lstat", denied_lstat)
+    with pytest.raises(ValueError, match="cannot write --out"):
+        mg.write_classify_report(str(out), "report\n")
+    assert target_lstats == [str(out)]
+    assert not out.exists()
     assert not list(tmp_path.glob(".classify-*"))
 
 
