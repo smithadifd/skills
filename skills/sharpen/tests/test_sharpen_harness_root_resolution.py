@@ -763,6 +763,99 @@ def test_cwd_option_reaches_configured_resolver(tmp_path):
     assert result.stderr == ""
 
 
+def test_configured_root_absent_refusal_propagates_with_message(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    resolver.write_text(
+        """
+class HarnessRootAbsent(LookupError):
+    pass
+
+
+class ResolverRootAbsent(HarnessRootAbsent):
+    pass
+
+
+def resolve(config, cwd=None):
+    raise ResolverRootAbsent("choose a root explicitly")
+
+
+def resolve_relative(paths, subkey, value):
+    raise AssertionError("resolve_relative must not run after a root refusal")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+
+    assert result.returncode != 0, "a configured no-root refusal must stop sharpen"
+    assert result.stdout == "", "a refused resolution must not print fallback paths"
+    assert "choose a root explicitly" in result.stderr, (
+        "the configured resolver's corrective message must reach the caller"
+    )
+    assert "degrading to standalone resolution" not in result.stderr
+
+
+def test_configured_resolver_runtime_failure_degrades_to_standalone(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _create_default_sources(home)
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    resolver.write_text(
+        """
+def resolve(config, cwd=None):
+    raise RuntimeError("resolver exploded")
+
+
+def resolve_relative(paths, subkey, value):
+    raise AssertionError("resolve_relative must not run after resolve fails")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        encoding="utf-8",
+    )
+
+    result = _run_paths(
+        script,
+        home=home,
+        cwd=tmp_path,
+        args=("--config", str(config)),
+    )
+    actual = _resolved_output(
+        result,
+        "other configured resolver runtime failures must degrade",
+    )
+
+    expected = {
+        "roadmaps": str(home / ".claude" / "roadmaps"),
+        "standards": str(home / ".claude" / "standards"),
+    }
+    for key, (subdir, filename) in SOURCE_KEYS.items():
+        expected[key] = str(home / ".claude" / subdir / filename)
+    assert actual == expected, "a runtime failure must use all standalone defaults"
+    assert result.stderr.splitlines() == [
+        f"config_path: harness_root.resolver {resolver} "
+        "(RuntimeError: resolver exploded) — degrading to standalone resolution"
+    ]
+
+
 def test_missing_configured_resolver_degrades_once_to_standalone(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
