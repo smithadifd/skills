@@ -333,6 +333,8 @@ python3 memory_gardener.py budget --taxonomy my-shards.json         # override g
   store-local file is a config error (exit 2), never permission to fall through
   to defaults. Taxonomy JSON has the shape
   `{"shards":[{"name","label","keywords":[…]}]}`; unmatched notes stay in core.
+  Brand-specific keywords belong in a user's own `--taxonomy` file; the
+  built-in defaults use generic category words.
 - **It's a PROPOSAL, not an edit.** `budget` never writes the shard files or
   touches memory. The actual split — moving lines into `MEMORY.<topic>.md`,
   writing the core pointers — is performed by the **`shard`** subcommand below

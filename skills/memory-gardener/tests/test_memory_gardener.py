@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 from datetime import date
 
 import pytest
@@ -742,6 +743,61 @@ def test_default_taxonomy_classifies_real_topic_shapes():
     assert mg.classify_shard("ai-coding-tasks-pipeline", mg.DEFAULT_SHARD_TAXONOMY) == "automation"
     assert mg.classify_shard("op-tcc-appdata-gate", mg.DEFAULT_SHARD_TAXONOMY) == "secrets"
     assert mg.classify_shard("foundry", mg.DEFAULT_SHARD_TAXONOMY) is None
+
+
+def test_default_taxonomy_classifies_generic_note_stems():
+    tax = mg.DEFAULT_SHARD_TAXONOMY
+    assert [name for name, _label, _keys in tax] == [
+        "fleet", "infra", "automation", "secrets",
+    ]
+    assert mg.classify_shard("vpn-exit-node-setup", tax) == "infra"
+    assert mg.classify_shard("media-server-update", tax) == "infra"
+    assert mg.classify_shard("nas-backup-plan", tax) == "infra"
+    assert mg.classify_shard("password-manager-migration", tax) == "secrets"
+    assert mg.classify_shard("sync-folder-layout", tax) == "secrets"
+    assert mg.classify_shard("podcast-feed-refresh", tax) == "automation"
+    assert mg.classify_shard("streaming-library-index", tax) == "automation"
+    assert mg.classify_shard("broker-trade-digest", tax) == "automation"
+
+
+def test_default_taxonomy_has_zero_no_person_deny_hits():
+    # Same grep flags as skills/topic/tests/test_public_vocabulary.py:_grep.
+    blob = "\n".join(
+        "\n".join((name, label, *keys))
+        for name, label, keys in mg.DEFAULT_SHARD_TAXONOMY
+    ).encode("utf-8")
+    plant = "zz" + "no-such-taxonomy-term"
+    plant_result = subprocess.run(
+        ["grep", "-a", "-i", "-n", "-E", "-e", plant],
+        input=blob,
+        capture_output=True,
+    )
+    assert plant_result.returncode == 1, plant_result.stdout
+    deny = os.environ.get("NO_PERSON_DENY", "").strip()
+    if deny:
+        probe = subprocess.run(
+            ["grep", "-a", "-i", "-n", "-E", "-e", deny],
+            input=b"",
+            capture_output=True,
+        )
+        if probe.returncode == 2:
+            detail = probe.stderr.decode("utf-8", "replace").strip()
+            raise AssertionError(
+                "NO_PERSON_DENY is not a valid extended regular expression: %s"
+                % detail
+            )
+        result = subprocess.run(
+            ["grep", "-a", "-i", "-n", "-E", "-e", deny],
+            input=blob,
+            capture_output=True,
+        )
+        assert result.returncode in (0, 1), result.stderr.decode(
+            "utf-8", "replace"
+        )
+        hits = result.stdout.decode("utf-8", "replace").splitlines()
+        assert not hits, (
+            "NO_PERSON_DENY hits in default taxonomy:\n" + "\n".join(hits)
+        )
 
 
 # --------------------------------------------------------------- taxonomy I/O
