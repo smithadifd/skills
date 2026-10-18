@@ -202,6 +202,10 @@ def _resolve_with_module(
     return resolved
 
 
+def _is_missing_root_refusal(exc: Exception) -> bool:
+    return any(cls.__name__ == "HarnessRootAbsent" for cls in type(exc).__mro__)
+
+
 def resolve_paths(
     config_path: Path | None = None, *, cwd: Path | None = None
 ) -> dict[str, Path]:
@@ -222,6 +226,8 @@ def resolve_paths(
                 raise ValueError("path must be absolute or ~-prefixed")
             return _resolve_with_module(resolver_path, config, cwd)
         except Exception as exc:
+            if _is_missing_root_refusal(exc):
+                raise
             sys.stderr.write(
                 f"config_path: harness_root.resolver {resolver_path} "
                 f"({type(exc).__name__}: {exc}) — degrading to standalone resolution\n"

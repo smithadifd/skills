@@ -6,6 +6,6 @@ review/tests/test_standalone.py 4 # assertions reject configured project-specifi
 sharpen/SKILL.md 7 # standalone and opt-in path-resolution contract terminology
 sharpen/config.json 2 # path-resolution contract keys and resolver note
 sharpen/paths.py 5 # path-resolution contract, override, and degradation keys
-sharpen/tests/test_sharpen_harness_root_resolution.py 33 # standalone and opt-in resolution assertions and contract names
+sharpen/tests/test_sharpen_harness_root_resolution.py 36 # standalone and opt-in resolution assertions and contract names
 topic/tests/test_topics_dir.py 9 # assertions reject configured project-specific paths
 kickoff/tests/test_kickoff_paths.py 1 # environment cleanup and absence assertions reject project-specific paths

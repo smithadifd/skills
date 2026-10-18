@@ -76,8 +76,10 @@ replaces the shipped one.
 Set `harness_root.resolver` to an absolute or `~`-prefixed Python file to opt in
 to delegated resolution. Its module must provide `resolve(config, cwd=)` and
 `resolve_relative(paths, subkey, value)`; `--cwd` forwards a working directory
-to `resolve`. Import, contract, or runtime failures emit one configuration line
-and degrade to the unchanged standalone resolution.
+to `resolve`. If the configured resolver reports that no root is set,
+`paths.py` refuses with that resolver's message. Other import, contract, or
+runtime failures emit one configuration line and degrade to the unchanged
+standalone resolution.
 
 **Install-specific routing is optional and lives outside this skill.** An install
 that keeps its own process documents (how questions get routed here, how a brief is
