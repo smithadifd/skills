@@ -3711,8 +3711,11 @@ def write_classify_report(out, text):
     or truncated.
 
     Keep mkstemp's private mode when `out` does not exist. When it does,
-    copy the existing target's mode onto the new file so a rewrite never
-    widens a private report and never tightens a group-readable one."""
+    copy the existing target's mode (without setuid/setgid/sticky) onto the
+    new file so a rewrite never widens a private report and never tightens
+    a group-readable one. One no-follow stat decides: missing keeps the
+    private mode; a non-regular target or any other stat failure is refused
+    and the report is not written."""
     if os.path.islink(out):
         raise ValueError("--out %r is a symlink; refusing to write through it"
                          % out)
@@ -3724,11 +3727,14 @@ def write_classify_report(out, text):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         try:
-            mode = stat.S_IMODE(os.lstat(out).st_mode)
-        except OSError:
+            st = os.lstat(out)
+        except FileNotFoundError:
             pass
         else:
-            os.chmod(tmp, mode)
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(
+                    "--out %r is not a regular file; refusing to write" % out)
+            os.chmod(tmp, stat.S_IMODE(st.st_mode) & 0o777)
         os.replace(tmp, out)
         tmp = None
     except OSError as e:

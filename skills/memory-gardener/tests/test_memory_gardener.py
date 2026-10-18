@@ -9,6 +9,7 @@ fixture memory dir.
 import os
 import re
 import shutil
+import stat
 from datetime import date
 
 import pytest
@@ -4687,6 +4688,84 @@ def test_classify_report_keeps_existing_group_readable_mode(tmp_path):
     finally:
         os.umask(previous)
     assert oct(mode) == oct(0o644)
+    assert out.read_text() == "report\n"
+
+
+def test_classify_report_refuses_a_symlink_target_and_writes_nothing(
+        tmp_path, monkeypatch):
+    """The mode-stat refuses a symlink even if the opening islink check does
+    not see it; the referent is untouched and no report is written."""
+    target = tmp_path / "keep.md"
+    target.write_text("keep")
+    link = tmp_path / "link.md"
+    link.symlink_to(target)
+    real_islink = os.path.islink
+
+    def hide_out_symlink(path):
+        if os.path.abspath(path) == os.path.abspath(str(link)):
+            return False
+        return real_islink(path)
+
+    monkeypatch.setattr(os.path, "islink", hide_out_symlink)
+    with pytest.raises(ValueError):
+        mg.write_classify_report(str(link), "report\n")
+    assert target.read_text() == "keep"
+    assert stat.S_ISLNK(os.lstat(str(link)).st_mode)
+    assert not list(tmp_path.glob(".classify-*"))
+
+
+def test_classify_report_refuses_symlink_swapped_in_before_mode_stat(
+        tmp_path, monkeypatch):
+    """A symlink planted after the opening islink check must not donate its
+    0755 mode onto the report, and must not be written through."""
+    out = tmp_path / "report.md"
+    keep = tmp_path / "keep.md"
+    keep.write_text("keep")
+    real_islink = os.path.islink
+
+    def islink_then_plant(path):
+        if os.path.abspath(path) == os.path.abspath(str(out)):
+            if not real_islink(path):
+                out.symlink_to(keep)
+            return False
+        return real_islink(path)
+
+    monkeypatch.setattr(os.path, "islink", islink_then_plant)
+    with pytest.raises(ValueError):
+        mg.write_classify_report(str(out), "report\n")
+    assert keep.read_text() == "keep"
+    assert stat.S_ISLNK(os.lstat(str(out)).st_mode)
+    assert not list(tmp_path.glob(".classify-*"))
+
+
+def test_classify_report_strips_setuid_from_existing_mode(tmp_path, monkeypatch):
+    """An existing 04644 target must be applied as 0644 — never setuid.
+    macOS chmod(2) drops setuid on a non-executable file, so the 04644 is
+    injected at the lstat boundary and the chmod argument is the observable."""
+    out = tmp_path / "report.md"
+    out.write_text("old\n")
+    os.chmod(out, 0o644)
+    real_lstat = os.lstat
+    seen = []
+
+    def lstat_with_setuid(path):
+        st = real_lstat(path)
+        if os.path.abspath(path) == os.path.abspath(str(out)):
+            fields = list(st)
+            fields[stat.ST_MODE] = (st.st_mode & ~0o7777) | 0o4644
+            return os.stat_result(fields)
+        return st
+
+    def chmod_spy(path, mode, *args, **kwargs):
+        seen.append(mode)
+        return real_chmod(path, mode, *args, **kwargs)
+
+    real_chmod = os.chmod
+    monkeypatch.setattr(os, "lstat", lstat_with_setuid)
+    monkeypatch.setattr(os, "chmod", chmod_spy)
+    mg.write_classify_report(str(out), "report\n")
+    assert seen == [0o644]
+    assert oct(stat.S_IMODE(real_lstat(str(out)).st_mode)) == oct(0o644)
     assert out.read_text() == "report\n"
 
 
