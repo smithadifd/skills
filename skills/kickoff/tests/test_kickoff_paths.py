@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -141,10 +142,107 @@ def test_skill_invocation_uses_installed_path():
     assert "python3 ~/.claude/skills/kickoff/paths.py --slug <slug>" in skill, (
         "INSTALL-PATH: kickoff instructions must invoke the installed resolver"
     )
+    assert "topic_convention" in skill, (
+        "LOCAL-CONVENTIONS: kickoff must tell the reader to consult the optional "
+        "topic convention path"
+    )
+
+
+def test_topic_convention_path_follows_topics_dir(tmp_path):
+    copied_skills = _copy_skills(tmp_path, "topic", "kickoff")
+    home = tmp_path / "home"
+    target = tmp_path / "override-topics"
+    override = home / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(json.dumps({"topics_dir": str(target)}), encoding="utf-8")
+
+    process = _run(copied_skills / "kickoff", home, "conv")
+
+    assert process.returncode == 0
+    payload = json.loads(process.stdout)
+    assert Path(payload["topic_convention"]) == target / "README.md", (
+        "LOCAL-CONVENTIONS: convention path must derive from topic's resolved topics_dir"
+    )
+
+
+def test_topic_convention_absent_is_silent_in_both_modes(tmp_path):
+    for names in (("kickoff",), ("topic", "kickoff")):
+        root = tmp_path / "-".join(names)
+        root.mkdir()
+        copied_skills = _copy_skills(root, *names)
+        home = root / "home"
+        home.mkdir()
+
+        process = _run(copied_skills / "kickoff", home)
+
+        assert process.returncode == 0
+        payload = json.loads(process.stdout)
+        assert Path(payload["topic_convention"]) == (
+            home / ".claude" / "topics" / "README.md"
+        )
+        assert "README.md" not in process.stderr, (
+            "LOCAL-CONVENTIONS: an absent convention file must not produce a notice"
+        )
+
+
+PRIVATE_VOCABULARY = (
+    r"\bCHART\b",
+    r"(?i:\bchart-wave\b)",
+    r"(?i:\bwaves?\b)",
+    r"\bSoT\b",
+    r"\bROLL\b",
+    r"contract: v3",
+    r"(?i:foundry)",
+    r"(?i:claude-toolkit)",
+    r"\bAstra\b",
+    r"(?i:\bnotion\b)",
+    r"\borchestrate\b",
+)
+
+
+def test_shipped_public_files_name_no_private_vocabulary():
+    # The shipped files are the playbook and the resolver. This test file is
+    # excluded because it has to spell the vocabulary it rejects.
+    # Personal names and hosts come from the shared deny expression, never from
+    # this file.
+    patterns = list(PRIVATE_VOCABULARY)
+    deny = os.environ.get("NO_PERSON_DENY", "").strip()
+    if deny:
+        patterns.append(f"(?i:{deny})")
+    hits = []
+    for name in ("SKILL.md", "paths.py"):
+        for number, line in enumerate(
+            (SKILL_DIR / name).read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            for pattern in patterns:
+                if re.search(pattern, line):
+                    hits.append(f"{name}:{number}: {pattern}: {line.strip()}")
+    assert not hits, "PUBLIC-TEXT: private vocabulary in shipped kickoff files:\n" + "\n".join(hits)
+
+
+def test_accepted_decision_followups_are_recorded_without_a_convention_file():
+    skill = " ".join((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
     assert (
-        "When the hand-off ends in an accepted ADR, write its follow-ups in the same session"
-        in skill
-    ), "ACCEPTED-ADR: kickoff must write accepted ADR follow-ups in the same session"
+        "the follow-up work it implies is written down before the session ends, "
+        "in the same session, in a durable place"
+    ) in skill, "FOLLOW-UPS: the same-session durable-record rule must be in the shipped text"
+    assert "This holds for every user, with or without a convention file." in skill, (
+        "FOLLOW-UPS: the rule must not depend on the optional convention file"
+    )
+    assert "but not whether they are recorded" in skill, (
+        "FOLLOW-UPS: a convention may change the destination, never waive recording"
+    )
+    assert "## Follow-ups" in skill, (
+        "FOLLOW-UPS: the write-up shape must carry a default Follow-ups section"
+    )
+
+
+def test_missing_reference_prose_exempts_the_silent_convention():
+    skill = " ".join((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
+    assert (
+        "Each missing optional reference except the topic convention is reported "
+        "on stderr in one line; an absent topic convention is silent."
+    ) in skill, "NOTICES: the playbook must exempt the topic convention from the notice sentence"
 
 
 def test_kickoff_owns_no_config_file():

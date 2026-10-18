@@ -90,7 +90,7 @@ CHARS_PER_TOKEN = 4
 # Defaults: the ceiling that only trips on real bloat — index-sickness
 # (ballooned lines) OR sheer note-count growth.
 #
-# Retuned 2026-09-06 (2500 tok / 40 lines -> 4500 / 100) against the live store,
+# Retuned (2500 tok / 40 lines -> 4500 / 100) against a real sharded store,
 # which had outgrown the original calibration. The old numbers assumed a ~40-note
 # index landing at 800-1200 tok. A sharded store's CORE holds the always-loaded
 # working set, and at 80 notes that is arithmetically unreachable: the bullet +
@@ -122,7 +122,7 @@ DEFAULT_SHARD_TAXONOMY = [
       "delegate", "orchestrate", "session-handoff", "last-stretch", "fable",
       "portfolio-case", "roadmap"]),
     ("infra", "Home-lab infrastructure, networking & hosting",
-     ["infra-map", "router", "syslog", "recomputer", "docker", "changedetection",
+     ["infra-map", "router", "syslog", "docker", "changedetection",
       "tailscale", "plex", "hoard", "homelab"]),
     ("automation", "Scheduled automations, pipelines & digests",
      ["ai-coding", "digest", "morning-brief", "macrovoices", "netflix",
@@ -138,8 +138,7 @@ DEFAULT_SHARD_TAXONOMY = [
 # JIT-sharding concern, tuned defaults). This is a DIFFERENT, harder ceiling:
 # the Claude Code runtime itself silently truncates ANY memory file — not just
 # MEMORY.md — behind a single WARNING line once it exceeds 200 lines OR 25,000
-# bytes (the Claude Code runtime's per-file memory load limit, measured
-# 2026-07-25). Content past the cap is unreachable, with no error. `filebudget`
+# bytes (the Claude Code runtime's per-file memory load limit). Content past the cap is unreachable, with no error. `filebudget`
 # is the read-only tripwire for THAT ceiling, across every store.
 FILE_BUDGET_MAX_LINES = 200
 FILE_BUDGET_MAX_BYTES = 25000
@@ -379,8 +378,8 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]")
 # `(` and matches nothing at all. That miss is silent and it fails OPEN, not
 # closed: `rebuild_index` treats the unmatched line as "this note has no
 # index line yet" and APPENDS a second bullet for the same note, leaving the
-# stale one in place while reporting "1 line(s) updated" (observed on the
-# live store, 2026-09-06). The same regex gates `parse_index`,
+# stale one in place while reporting "1 line(s) updated" (observed on a
+# real store). The same regex gates `parse_index`,
 # `propose_shards` and `_is_shard_pointer_line`, so an unmatched line is
 # also invisible to the sharder.
 #
@@ -631,8 +630,8 @@ def _shard_indexed_homes(memory_dir, index):
     discarding it. That home is what any WRITE to a note's index line has to
     target: `apply_plan` used to rebuild `MEMORY.md` unconditionally, so
     handing it a shard-resident note appended a duplicate bullet to the core
-    rather than updating the note's real line (reproduced on the live store,
-    2026-09-06). A note listed in more than one shard keeps the first by
+    rather than updating the note's real line (reproduced on a real
+    store). A note listed in more than one shard keeps the first by
     sorted shard order, so the mapping is deterministic; the duplicate itself
     is a pre-existing defect this function does not try to repair."""
     out = {}
@@ -708,7 +707,7 @@ def read_all_index_lines(memory_dir):
     `balloon_index` heuristic can see shard-resident notes at all: keying only
     off MEMORY.md reported a summary length of 0 for every one of them, which
     silently made every note outside the core immune to the index-sickness
-    signal — on the live store that was 92 of 173 notes, including the ones
+    signal — and that covered every shard-resident note, including the ones
     with the WORST index lines. Read-only."""
     lines = {}
     core = {}
@@ -862,8 +861,7 @@ def compute_new_content(entry, existing_text, today):
 # --------------------------------------------------------------------------- #
 # Pointer-memory refactor (`pointerize` plan field)
 # --------------------------------------------------------------------------- #
-# Automates the 2026-07-25 hand sweep (fleet-roadmap, skylight-integration,
-# feed-condenser, router-syslog, agentic-tooling-roadmap): move an oversized
+# Automates a manual sweep of the largest notes: move an oversized
 # note's body to memory/docs/<stem>-full.md, leave a pointer at the file's
 # ORIGINAL basename (so inbound [[wikilinks]] and index links need zero
 # repair). The pointer TEXT itself is model-authored, same as any other `body`
@@ -1594,7 +1592,7 @@ def apply_plan(plan, memory_dir, today):
     # core's JIT pointer for it is now stale. Nothing else refreshes it:
     # `propose_extend` only refreshes shards it moves bullets into. Left
     # unfixed, the always-loaded core advertises a cost the shards no longer
-    # have (a 2026-09-06 trim overstated by 24%). Refresh here, from the bytes
+    # have (one trim overstated by 24%). Refresh here, from the bytes
     # actually written, so the two can never drift apart in this path again.
     if rebuilt_shards and os.path.exists(memory_md):
         core = _read(memory_md)
@@ -1824,7 +1822,7 @@ def refresh_shard_pointer(core_text, shard_basename, shard_text):
     line (and file) is left byte-identical". That is correct for extend, but it
     means NOTHING refreshed a pointer when a shard's size changed by any other
     path. `apply_plan` rebuilding a shard-resident note's index line is exactly
-    such a path: a 2026-09-06 run trimmed 21 ballooned lines across three shards
+    such a path: one run trimmed 21 ballooned lines across three shards
     and left all three pointers advertising the pre-trim cost — the core claimed
     6912 tok of JIT shards against a real 5578, overstating by 24%, with the
     largest error (1155 tok) on a shard that extend would never touch.
@@ -2592,8 +2590,8 @@ def _extend_ceiling(new_measure):
     alone: `shard`/`--extend` would happily propose a move that put a
     destination shard over the cap, converting a cured core into a truncating
     shard — the same data loss, relocated into a JIT-loaded file where it is
-    less likely to be noticed. Measured on the live store 2026-09-06, a
-    chartered extend put MEMORY.fleet.md at 19,840 B / 72 notes: inside the
+    less likely to be noticed. Measured on a real store, an
+    extend put MEMORY.fleet.md at 19,840 B / 72 notes: inside the
     cap, but with ~15 notes of headroom against ~1.25 fleet notes/day.
 
     Returns {status, headroom_bytes, headroom_lines, notes_headroom}, where
@@ -3527,7 +3525,7 @@ def main(argv=None):
                 os.makedirs(REPORT_DIR, exist_ok=True)
                 # A report is named for the day it ran, so a SECOND run on the
                 # same day used to overwrite the first with no backup — the one
-                # write path here that destroyed data (2026-09-06: a re-run
+                # write path here that destroyed data (a re-run
                 # clobbered that morning's report, the only record of 79
                 # pre-trim index lines; unrecoverable, the sync peer was off).
                 # Every other backup in this module is sacrosanct and claims
