@@ -566,16 +566,22 @@ _OMP_HTML_REFERENCE = re.compile(r"&[#A-Za-z0-9]+;")
 _OMP_PROSE_QUALIFIER = re.compile(r"^\s*\([^()\n]*\)\s*")
 _OMP_UNSAFE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Zl", "Zp", "Co", "Cn", "Cs"})
 _OMP_UNSAFE_FILLERS = frozenset({"\u115f", "\u1160", "\u2800", "\u3164", "\uffa0"})
-_OMP_LETTER_WILDCARD = "\ufdd0"
+_OMP_VERDICT_KEY_LETTERS = (
+    "vνѵ",
+    "eе",
+    "rг",
+    "dԁ",
+    "iıιі",
+    "cϲс",
+    "tτт",
+)
+_OMP_VERDICT_SEPARATOR = r"[\W\d_]*"
 _OMP_VERDICT_KEY = re.compile(
-    rf"[v{_OMP_LETTER_WILDCARD}]\W*"
-    rf"[e{_OMP_LETTER_WILDCARD}]\W*"
-    rf"[r{_OMP_LETTER_WILDCARD}]\W*"
-    rf"[d{_OMP_LETTER_WILDCARD}]\W*"
-    rf"[i{_OMP_LETTER_WILDCARD}]\W*"
-    rf"[c{_OMP_LETTER_WILDCARD}]\W*"
-    rf"[t{_OMP_LETTER_WILDCARD}]s?",
-    re.IGNORECASE,
+    r"(?<![^\W\d_])"
+    + _OMP_VERDICT_SEPARATOR.join(
+        f"[{re.escape(letters)}]" for letters in _OMP_VERDICT_KEY_LETTERS
+    )
+    + r"s?(?![^\W\d_])"
 )
 _OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
@@ -598,14 +604,8 @@ def _strip_omp_decoration(text: str) -> str:
 
 
 def _canonicalize_omp_prose(text: str) -> str:
-    """Build the fuzzy verdict-key skeleton while preserving value text."""
+    """Normalize compatibility forms without changing unrelated Unicode letters."""
     text = _OMP_HTML_TAG.sub("", text)
-    text = "".join(
-        _OMP_LETTER_WILDCARD
-        if ord(character) > 127 and unicodedata.category(character).startswith("L")
-        else character
-        for character in text
-    )
     return unicodedata.normalize("NFKC", text).casefold()
 
 
