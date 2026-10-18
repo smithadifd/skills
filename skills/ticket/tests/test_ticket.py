@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import importlib.util
 import json
@@ -7,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,10 @@ class MemoryStore(ticket.MarkdownStore):
 
     def _save(self, card):
         self.card = copy.deepcopy(card)
+
+    def _writing(self):
+        # One in-memory card in one process: there is no second writer to lock out.
+        return contextlib.nullcontext()
 
     def read_card(self):
         if self.trace is not None:
@@ -860,6 +866,231 @@ def test_a_closed_store_with_a_later_stop_does_not_resume_as_closed(kind, tmp_pa
     assert CLOSED_INVALID + "; the ticket is not closed" in resumed.reconciliation
 
 
+# The pending-close check, the close confirm's position, and the closed-resume
+# checks each get a case where only that one fact is wrong.
+
+
+@pytest.mark.parametrize("kind", ("markdown", "ledger"))
+def test_confirm_refuses_a_last_stamp_that_is_not_that_pending_close(kind, tmp_path, monkeypatch):
+    store = concrete_store(kind, tmp_path, monkeypatch)
+    store.write_stamp("Done.", "close", ("ticket",))
+    with pytest.raises(ticket.StoreUnavailable, match="no longer the pending close"):
+        store.confirm_close(0, "Another point.")
+    assert store.read_card()["status"] == "open"
+
+    store.write_stamp("Ready.", "review", ("ticket",))
+    with pytest.raises(ticket.StoreUnavailable, match="no longer the pending close"):
+        store.confirm_close(1, "Ready.")
+    card = store.read_card()
+    assert card["status"] == "open"
+    assert [stamp["close"] for stamp in card["stamps"]] == [False, False]
+
+
+class ConfirmsThenRepeatsTheClose:
+    """Confirm marks the close, then the store holds a second confirmed copy after it."""
+
+    def confirm_close(self, position, point):
+        super().confirm_close(position, point)
+        with self._writing():
+            card = self._load()
+            card["stamps"].append(dict(card["stamps"][position]))
+            self._save(card)
+
+
+def test_close_refuses_when_the_confirmed_stamp_is_no_longer_at_its_position(tmp_path, monkeypatch):
+    store = concrete_store("markdown", tmp_path, monkeypatch, ConfirmsThenRepeatsTheClose)
+    session = approved_for_close(store)
+    with pytest.raises(ticket.StoreUnavailable, match="not marked closed"):
+        session.close("Done.", refs=("example/repo#14",))
+    assert session.phase == "outward_go"
+
+
+def closed_markdown_store(tmp_path, monkeypatch):
+    store = concrete_store("markdown", tmp_path, monkeypatch)
+    approved_for_close(store).close("Done.", refs=("example/repo#14",))
+    assert resume(store).phase == "closed"
+    return store
+
+
+def edit_card(store, change):
+    with store._writing():
+        card = store._load()
+        change(card)
+        store._save(card)
+
+
+def test_a_closed_card_whose_last_review_did_not_pass_does_not_resume_as_closed(tmp_path, monkeypatch):
+    store = closed_markdown_store(tmp_path, monkeypatch)
+    edit_card(store, lambda card: card["reviews"][-1].update(verdict="changes"))
+    resumed = resume(store)
+    assert resumed.phase != "closed"
+    flags = "\n".join(resumed.reconciliation)
+    assert "the last review round did not pass every criterion to an outward go stop" in flags
+
+
+def test_a_closed_card_without_its_outward_go_does_not_resume_as_closed(tmp_path, monkeypatch):
+    store = closed_markdown_store(tmp_path, monkeypatch)
+    outward = "The outward gate is approved for plan revision 1."
+    edit_card(
+        store,
+        lambda card: card.update(decisions=[item for item in card["decisions"] if item["effect"] != outward]),
+    )
+    resumed = resume(store)
+    assert resumed.phase == "outward_go"
+    flags = "\n".join(resumed.reconciliation)
+    assert "the outward go decision is missing" in flags
+
+
+# One live writer per ticket. The first writer runs in a separate process and
+# holds the ticket through the store's own write guard; this process is the
+# second writer.
+
+FIRST_WRITER = r"""
+import importlib.util
+import select
+import sys
+
+spec = importlib.util.spec_from_file_location("ticket_first_writer", sys.argv[1])
+ticket = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = ticket
+spec.loader.exec_module(ticket)
+mode, kind, key, title, where, db = sys.argv[2:8]
+if kind == "markdown":
+    store = ticket.MarkdownStore(where, key, title, writer="first-writer")
+else:
+    store = ticket.LedgerStore(key, title, cli=where, db=db, writer="first-writer")
+if mode == "hold":
+    with store._writing():
+        print(store.holder, flush=True)
+        # Hold until told to release, and never longer than 20 seconds.
+        select.select([sys.stdin], [], [], 20)
+else:
+    store.write_stamp("Written by the first writer.", "build", ("ticket",))
+    print("written", flush=True)
+"""
+
+
+def first_writer(mode, kind, where, db=""):
+    return subprocess.Popen(
+        [sys.executable, "-c", FIRST_WRITER, str(SKILL_DIR / "ticket.py"), mode, kind, KEY, TITLE, str(where), str(db)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def second_writer_is_refused_by_name(store, where, kind, db=""):
+    holder = first_writer("hold", kind, where, db)
+    try:
+        held_by = holder.stdout.readline().strip()
+        assert held_by.startswith("first-writer (pid "), holder.stderr.read()
+        started = time.monotonic()
+        with pytest.raises(ticket.TicketHeld) as refused:
+            store.write_stamp("Written by the second writer.", "build", ("ticket",))
+        assert time.monotonic() - started < 10
+        assert (refused.value.key, refused.value.holder) == (KEY, held_by)
+        assert f"ticket {KEY} already has a live writer: {held_by}" in str(refused.value)
+        assert refused.value.code == "held"
+        card = store.read_card()
+        assert [stamp["point"] for stamp in card["stamps"]] == []
+        assert card["status"] == "open"
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=30)
+    assert holder.returncode == 0, holder.stderr.read()
+
+    store.write_stamp("Written by the second writer.", "build", ("ticket",))
+    card = store.read_card()
+    assert [stamp["point"] for stamp in card["stamps"]] == ["Written by the second writer."]
+    assert card["status"] == "open"
+
+
+def test_markdown_store_refuses_a_second_live_writer_by_name(tmp_path):
+    repo = init_ignored_repo(tmp_path)
+    store = ticket.MarkdownStore(repo, KEY, TITLE, writer="second-writer")
+    second_writer_is_refused_by_name(store, repo, "markdown")
+
+
+def test_ledger_store_refuses_a_second_live_writer_by_name(tmp_path, monkeypatch):
+    fake = fake_ledger(tmp_path, monkeypatch)
+    db = tmp_path / "ledger.db"
+    store = ticket.LedgerStore(KEY, TITLE, cli=fake, db=db, writer="second-writer")
+    second_writer_is_refused_by_name(store, fake, "ledger", db)
+    assert store._card_envelope()["owner"] is None
+
+
+@pytest.mark.parametrize("kind", ("markdown", "ledger"))
+def test_a_close_confirm_is_refused_while_another_writer_holds_the_ticket(kind, tmp_path, monkeypatch):
+    if kind == "markdown":
+        where = init_ignored_repo(tmp_path)
+        db = ""
+        store = ticket.MarkdownStore(where, KEY, TITLE, writer="second-writer")
+    else:
+        where = fake_ledger(tmp_path, monkeypatch)
+        db = tmp_path / "ledger.db"
+        store = ticket.LedgerStore(KEY, TITLE, cli=where, db=db, writer="second-writer")
+    store.write_stamp("Done.", "close", ("ticket",))
+    holder = first_writer("hold", kind, where, db)
+    try:
+        held_by = holder.stdout.readline().strip()
+        assert held_by.startswith("first-writer (pid "), holder.stderr.read()
+        with pytest.raises(ticket.TicketHeld) as refused:
+            store.confirm_close(0, "Done.")
+        assert refused.value.holder == held_by
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=30)
+    card = store.read_card()
+    assert (card["status"], card["stamps"][-1]["close"]) == ("open", False)
+    store.confirm_close(0, "Done.")
+    card = store.read_card()
+    assert (card["status"], card["stamps"][-1]["close"]) == ("closed", True)
+
+
+class FailsMidWrite:
+    """The write raises after the store has taken the ticket."""
+
+    def _save(self, card):
+        raise RuntimeError("disk went away mid-write")
+
+    def _append(self, kind, payload):
+        raise RuntimeError("disk went away mid-write")
+
+
+def test_markdown_lock_is_released_when_a_write_raises(tmp_path):
+    repo = init_ignored_repo(tmp_path)
+    failing = type("Store", (FailsMidWrite, ticket.MarkdownStore), {})(repo, KEY, TITLE, writer="failing-writer")
+    with pytest.raises(RuntimeError, match="mid-write"):
+        failing.write_stamp("Never lands.", "build")
+    assert failing.lock_path.read_text(encoding="utf-8") == ""
+
+    other = first_writer("write", "markdown", repo)
+    out, err = other.communicate(timeout=30)
+    assert (other.returncode, out.strip()) == (0, "written"), err
+    store = ticket.MarkdownStore(repo, KEY, TITLE)
+    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == ["Written by the first writer."]
+
+
+def test_ledger_claim_is_released_when_a_write_raises(tmp_path, monkeypatch):
+    fake = fake_ledger(tmp_path, monkeypatch)
+    db = tmp_path / "ledger.db"
+    failing = type("Store", (FailsMidWrite, ticket.LedgerStore), {})(KEY, TITLE, cli=fake, db=db, writer="failing-writer")
+    with pytest.raises(RuntimeError, match="mid-write"):
+        failing.write_stamp("Never lands.", "build")
+    store = ticket.LedgerStore(KEY, TITLE, cli=fake, db=db)
+    assert store._card_envelope()["status"] == "open"
+    store.write_stamp("Written after the failure.", "build")
+    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == ["Written after the failure."]
+
+
+def test_ledger_release_restores_a_closed_status(tmp_path, monkeypatch):
+    store = concrete_store("ledger", tmp_path, monkeypatch)
+    approved_for_close(store).close("Done.", refs=("example/repo#14",))
+    store.write_stamp("Later stop.", "review", ("ticket",))
+    assert store._card_envelope()["status"] == "closed"
+
+
 def test_choose_store_uses_markdown_when_no_ledger_cli_is_installed(tmp_path):
     repo = init_ignored_repo(tmp_path)
     store = ticket.choose_store(repo, KEY, TITLE, cli=tmp_path / "missing-ledger", db=tmp_path / "ledger.db")
@@ -943,6 +1174,17 @@ def test_real_ledger_cli_adapter_when_configured(tmp_path):
     assert card["plan"]["acceptance_criteria"][1]["review_round"] == 2
     assert card["decisions"][0]["source"] == {"what": "ratification", "ref": "conversation:plan-go"}
     assert card["stamps"][-1]["close"] is True
+
+    # The CLI's own claim refuses a second handle by name while the first holds
+    # the ticket, and releasing it restores the closed status.
+    second = ticket.LedgerStore(KEY, TITLE, cli=configured, db=db, writer="second-writer")
+    with store._writing():
+        with pytest.raises(ticket.TicketHeld) as refused:
+            second.write_stamp("Written by the second writer.", "review")
+        assert (refused.value.key, refused.value.holder) == (KEY, store.holder)
+        assert second.read_card()["status"] == "closed"
+    assert second._card_envelope()["status"] == "closed"
+    assert "Written by the second writer." not in [stamp["point"] for stamp in second.read_card()["stamps"]]
 
     # On an initialised database the adapter creates a new ticket's item itself.
     other = ticket.LedgerStore("EK-15", "Second ticket", cli=configured, db=db)
