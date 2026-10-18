@@ -54,12 +54,16 @@ lowercase 40-character commit hash you reviewed.
 ```
 ````
 
-The block is the OMP verdict's only source. Zero or multiple blocks, invalid
-JSON, an unknown verdict, missing or extra fields, incorrectly typed fields,
-or a malformed `reviewed_head` fails closed. A prose verdict label may repeat
-the record's verdict, but a disagreement fails as `VerdictConflict`; a clean
-sentence never substitutes for a missing or invalid record. The model and
-thinking level are required caller inputs. The level is one of `off`,
+The block is the OMP verdict's only source: zero or multiple blocks, invalid
+JSON, unknown or incorrectly typed fields, malformed `reviewed_head`, and an
+`APPROVE` record with non-empty `bugs` fail closed as record errors; a clean
+sentence never substitutes for a missing or invalid record. Outside the record
+fence, category Cf/Mn/Me/Zl/Zp/Co/Cn/Cs characters, bidi controls, Hangul or
+Braille fillers, and HTML character references fail as `ReviewProseUnsafe`;
+every fuzzy verdict-key skeleton must agree with the record as
+`VerdictConflict`, except that a key-only line immediately before the record
+fence uses that record as its value.
+The model and thinking level are required caller inputs. The level is one of `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `auto`. The result
 records both, with the lane name, as `attribution`.
 

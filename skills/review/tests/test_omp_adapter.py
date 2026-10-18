@@ -174,8 +174,6 @@ DECORATIONS = (
     "<strong>{key}:</strong> {value}",
     "<strong>{key}</strong>: {value}",
     "𝐕𝐞𝐫𝐝𝐢𝐜𝐭: {value}",
-    "Ver\u200bdict: {value}",
-    "\u200b{key}: {value}",
     "{key}：{value}",
     "{key} - {value}",
     "{key} {value}",
@@ -228,7 +226,7 @@ def test_decorated_prose_never_supplies_and_can_only_veto_the_record(
     "text, expected_status, reason_name",
     [
         pytest.param(
-            "<strong>𝐕𝐞\u200br𝐝𝐢𝐜𝐭</strong>： **APPROVE**\n\n" + _record(),
+            "<strong>𝐕𝐞𝐫𝐝𝐢𝐜𝐭</strong>： **APPROVE**\n\n" + _record(),
             "success",
             None,
             id="matching-prose",
@@ -240,6 +238,12 @@ def test_decorated_prose_never_supplies_and_can_only_veto_the_record(
             "VerdictConflict",
             id="different-prose",
         ),
+        pytest.param(
+            "The résumé change is correct.\n\n" + _record(),
+            "success",
+            None,
+            id="plain-non-ascii-prose",
+        ),
     ],
 )
 def test_neutral_prose_fixtures(text, expected_status, reason_name):
@@ -247,6 +251,67 @@ def test_neutral_prose_fixtures(text, expected_status, reason_name):
     assert result["status"] == expected_status, result["reason"]
     if reason_name:
         assert reason_name in result["reason"]
+
+UNSAFE_PROSE_CASES = [
+    pytest.param("Ver\u034fdict: REQUEST CHANGES", id="mn-grapheme-joiner"),
+    pytest.param("Ver\u0335dict: REQUEST CHANGES", id="mn-short-stroke-overlay"),
+    pytest.param("Verdi\u0301ct: REQUEST CHANGES", id="mn-combining-acute"),
+    pytest.param("Ve\u0301rdict: REQUEST CHANGES", id="mn-acute-after-e"),
+    pytest.param("Ver\u0338dict: REQUEST CHANGES", id="mn-long-solidus-overlay"),
+    pytest.param("Ver\u0488dict: REQUEST CHANGES", id="me-combining-sign"),
+    pytest.param("\u202etcidreV\u202c: REQUEST CHANGES", id="cf-bidi-key"),
+    pytest.param(
+        "\u202eSEGNAHC TSEUQER :tcidreV\u202c",
+        id="cf-bidi-whole-line",
+    ),
+    pytest.param("Ver\u00addict: REQUEST CHANGES", id="cf-soft-hyphen"),
+    pytest.param("Verdict:\u200b\nREQUEST CHANGES", id="cf-zero-width-value"),
+    pytest.param("Verdict: \u202eSEGNAHC TSEUQER\u202c", id="cf-bidi-value"),
+    pytest.param("Ver\u2028dict: REQUEST CHANGES", id="zl-line-separator"),
+    pytest.param("Safe prose.\u2029", id="zp-paragraph-separator"),
+    pytest.param("Safe \ue000 prose.", id="co-private-use"),
+    pytest.param("Safe \u0378 prose.", id="cn-unassigned"),
+    pytest.param("Safe \ud800 prose.", id="cs-surrogate"),
+    pytest.param("Ver\u2800dict: REQUEST CHANGES", id="braille-filler"),
+    pytest.param("Ver\u3164dict: REQUEST CHANGES", id="hangul-filler-3164"),
+    pytest.param("Ver\u115fdict: REQUEST CHANGES", id="hangul-filler-115f"),
+    pytest.param("Ver\u1160dict: REQUEST CHANGES", id="hangul-filler-1160"),
+    pytest.param("Ver\uffa0dict: REQUEST CHANGES", id="hangul-filler-ffa0"),
+    pytest.param("Ver&shy;dict: REQUEST CHANGES", id="html-named-reference"),
+    pytest.param("&#86;erdict: REQUEST CHANGES", id="html-numeric-reference"),
+]
+
+
+@pytest.mark.parametrize("prose", UNSAFE_PROSE_CASES)
+@pytest.mark.parametrize("record_first", [False, True], ids=["prose-first", "record-first"])
+def test_unsafe_prose_is_refused_in_both_orders(prose, record_first):
+    parts = [_record(), prose] if record_first else [prose, _record()]
+    result = review_phase.run_phase(_envelope("\n".join(parts)))
+    assert result["status"] == "failure", result["reason"]
+    assert "ReviewProseUnsafe" in result["reason"], result["reason"]
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        pytest.param("Vеrdict: REQUEST CHANGES", id="cyrillic-e"),
+        pytest.param("VERDİCT: REQUEST CHANGES", id="turkish-dotted-i"),
+        pytest.param("Verdicts: REQUEST CHANGES", id="plural"),
+        pytest.param("Verdict_: REQUEST CHANGES", id="underscore"),
+        pytest.param("Ver-dict: REQUEST CHANGES", id="hyphenated"),
+    ],
+)
+@pytest.mark.parametrize("record_first", [False, True], ids=["prose-first", "record-first"])
+def test_fuzzy_verdict_keys_conflict_in_both_orders(prose, record_first):
+    parts = [_record(), prose] if record_first else [prose, _record()]
+    reason = _reason("\n".join(parts))
+    assert "VerdictConflict" in reason, reason
+
+
+def test_key_only_verdict_heading_uses_the_following_record_as_its_value():
+    result = review_phase.run_phase(_envelope("## Verdict\n\n" + _record()))
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
 
 
 # --- every refusal has its own stable name -----------------------------------
@@ -312,6 +377,10 @@ def test_invalid_json_is_refused_by_name():
         pytest.param(_record(bugs=["  "]), id="whitespace-bug-entry"),
         pytest.param(_record(verdict="approve"), id="lowercase-verdict"),
         pytest.param(_record(verdict="APPROVE "), id="trailing-space-verdict"),
+        pytest.param(
+            _record(bugs=["src/export.py:58 — broken"]),
+            id="approve-with-bugs",
+        ),
         pytest.param(
             _record(reviewed_head=HEAD + "\n"),
             id="newline-reviewed-head",

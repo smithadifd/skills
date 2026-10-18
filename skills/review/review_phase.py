@@ -112,6 +112,10 @@ class VerdictConflict(ParseError):
     would pick one of two verdicts the reviewer wrote.
     """
 
+class ReviewProseUnsafe(ParseError):
+    """The OMP reply contains machine-unsafe prose outside its record."""
+
+
 class ReviewRecordMissing(ParseError):
     """The OMP reply contains no fenced review-result record."""
 
@@ -558,8 +562,22 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
 _OMP_REVIEW_RECORD_FIELDS = {"verdict", "bugs", "nits", "reviewed_head"}
 _OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
 _OMP_HTML_TAG = re.compile(r"<[^>]*>")
-_OMP_VERDICT_WORD = re.compile(r"\bverdict\b")
+_OMP_HTML_REFERENCE = re.compile(r"&[#A-Za-z0-9]+;")
 _OMP_PROSE_QUALIFIER = re.compile(r"^\s*\([^()\n]*\)\s*")
+_OMP_UNSAFE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Zl", "Zp", "Co", "Cn", "Cs"})
+_OMP_UNSAFE_FILLERS = frozenset({"\u115f", "\u1160", "\u2800", "\u3164", "\uffa0"})
+_OMP_LETTER_WILDCARD = "\ufdd0"
+_OMP_VERDICT_KEY = re.compile(
+    rf"[v{_OMP_LETTER_WILDCARD}]\W*"
+    rf"[e{_OMP_LETTER_WILDCARD}]\W*"
+    rf"[r{_OMP_LETTER_WILDCARD}]\W*"
+    rf"[d{_OMP_LETTER_WILDCARD}]\W*"
+    rf"[i{_OMP_LETTER_WILDCARD}]\W*"
+    rf"[c{_OMP_LETTER_WILDCARD}]\W*"
+    rf"[t{_OMP_LETTER_WILDCARD}]s?",
+    re.IGNORECASE,
+)
+_OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 
 def _strip_omp_decoration(text: str) -> str:
@@ -580,29 +598,53 @@ def _strip_omp_decoration(text: str) -> str:
 
 
 def _canonicalize_omp_prose(text: str) -> str:
-    """Canonicalize prose before deciding whether it states a verdict."""
-    text = unicodedata.normalize("NFKC", text)
-    text = "".join(
-        character
-        for character in text
-        if unicodedata.category(character) != "Cf"
-    )
+    """Build the fuzzy verdict-key skeleton while preserving value text."""
     text = _OMP_HTML_TAG.sub("", text)
-    return text.casefold()
+    text = "".join(
+        _OMP_LETTER_WILDCARD
+        if ord(character) > 127 and unicodedata.category(character).startswith("L")
+        else character
+        for character in text
+    )
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def _validate_omp_prose(lines: list[str | None]) -> None:
+    """Refuse characters that make machine-addressed prose ambiguous."""
+    for line in lines:
+        if line is None:
+            continue
+        if _OMP_HTML_REFERENCE.search(line):
+            raise ReviewProseUnsafe(
+                "ReviewProseUnsafe: HTML character reference outside review record"
+            )
+        for character in line:
+            category = unicodedata.category(character)
+            if category in _OMP_UNSAFE_CATEGORIES:
+                raise ReviewProseUnsafe(
+                    "ReviewProseUnsafe: "
+                    f"U+{ord(character):04X} category {category} outside review record"
+                )
+            if character in _OMP_UNSAFE_FILLERS:
+                raise ReviewProseUnsafe(
+                    "ReviewProseUnsafe: "
+                    f"filler U+{ord(character):04X} outside review record"
+                )
 
 
 def _fenced_review_records(
     text: str,
-) -> tuple[list[tuple[str, bool]], list[str]]:
-    """Return review-result bodies with closure state and all other lines."""
-    lines = text.splitlines()
+) -> tuple[list[tuple[str, bool]], list[str | None]]:
+    """Return review-result bodies and prose, marking each record opening."""
+    raw_lines = text.splitlines(keepends=True)
+    lines = [line.rstrip(_OMP_LINE_ENDINGS) for line in raw_lines]
     records: list[tuple[str, bool]] = []
-    prose: list[str] = []
+    prose: list[str | None] = []
     index = 0
     while index < len(lines):
         opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", lines[index])
         if opening is None:
-            prose.append(lines[index])
+            prose.append(raw_lines[index])
             index += 1
             continue
         marker = opening.group(1)
@@ -616,9 +658,10 @@ def _fenced_review_records(
         closed = end < len(lines)
         content_end = end if closed else len(lines)
         if info == "review-result":
-            records.append(("\n".join(lines[index + 1:content_end]), closed))
+            records.append(("".join(raw_lines[index + 1:content_end]), closed))
+            prose.append(None)
         else:
-            prose.extend(lines[index:(end + 1 if closed else len(lines))])
+            prose.extend(raw_lines[index:(end + 1 if closed else len(lines))])
         if not closed:
             break
         index = end + 1
@@ -633,12 +676,18 @@ def _omp_prose_value(text: str) -> str:
     return _strip_omp_decoration(text)
 
 
-def _omp_prose_verdicts(lines: list[str]) -> list[str]:
-    """Return every prose verdict, refusing any unclassifiable mention."""
-    canonical = [_canonicalize_omp_prose(line) for line in lines]
+def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
+    """Return every prose verdict, refusing unsafe or unclassifiable prose."""
+    _validate_omp_prose(lines)
+    canonical = [
+        None if line is None else _canonicalize_omp_prose(line)
+        for line in lines
+    ]
     verdicts = []
     for index, line in enumerate(canonical):
-        matches = list(_OMP_VERDICT_WORD.finditer(line))
+        if line is None:
+            continue
+        matches = list(_OMP_VERDICT_KEY.finditer(line))
         if not matches:
             continue
         if len(matches) != 1:
@@ -646,15 +695,17 @@ def _omp_prose_verdicts(lines: list[str]) -> list[str]:
                 "VerdictConflict: prose line contains multiple verdict keys"
             )
         value = _omp_prose_value(line[matches[0].end():])
+        record_is_value = False
         if not value:
-            value = next(
-                (
-                    _omp_prose_value(candidate)
-                    for candidate in canonical[index + 1:]
-                    if candidate.strip()
-                ),
-                "",
-            )
+            for candidate in canonical[index + 1:]:
+                if candidate is None:
+                    record_is_value = True
+                    break
+                if candidate.strip():
+                    value = _omp_prose_value(candidate)
+                    break
+        if record_is_value:
+            continue
         normalized = re.sub(r"[\s_-]+", " ", value).upper()
         if normalized == "APPROVE":
             verdicts.append(APPROVED)
@@ -678,7 +729,7 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
     return record
 
 
-def _omp_review_record(text: str) -> tuple[dict, list[str]]:
+def _omp_review_record(text: str) -> tuple[dict, list[str | None]]:
     records, prose = _fenced_review_records(text)
     if not records:
         raise ReviewRecordMissing(
@@ -723,6 +774,10 @@ def _omp_review_record(text: str) -> tuple[dict, list[str]]:
             raise ReviewRecordSchema(
                 f"ReviewRecordSchema: {field} entries must be non-empty strings"
             )
+    if verdict == "APPROVE" and record["bugs"]:
+        raise ReviewRecordSchema(
+            "ReviewRecordSchema: APPROVE record must have an empty bugs list"
+        )
     reviewed_head = record["reviewed_head"]
     if (
         not isinstance(reviewed_head, str)
