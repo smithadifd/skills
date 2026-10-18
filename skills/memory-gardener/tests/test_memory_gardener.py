@@ -9,6 +9,7 @@ fixture memory dir.
 import os
 import re
 import shutil
+import stat
 from datetime import date
 
 import pytest
@@ -4320,3 +4321,486 @@ def test_default_dir_reaches_the_cli(monkeypatch, tmp_path, capsys):
     rc = mg.main(["scan", "--today", "2026-07-08"])
     assert rc == 0
     assert "hedge-trimmer-schedule" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# classify (report-only migration classification)
+# --------------------------------------------------------------------------- #
+
+CLASSIFY_STORE = os.path.join(HERE, "fixtures", "memory_classify")
+CLASSIFY_RULES = os.path.join(HERE, "fixtures", "classify_rules")
+CLASSIFY_LEDGER = os.path.join(HERE, "fixtures", "classify_ledger")
+
+
+def _tree_hashes(root):
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            p = os.path.join(dirpath, name)
+            out[os.path.relpath(p, root)] = mg.file_sha256(p)
+    return out
+
+
+def _classify(rules=(CLASSIFY_RULES,), ledger=(CLASSIFY_LEDGER,)):
+    result = mg.classify_store(CLASSIFY_STORE, list(rules), list(ledger))
+    return {e["note"]: e for e in result["entries"]}, result
+
+
+def test_classify_assigns_each_class_from_a_fixture_note():
+    by_note, _ = _classify()
+    assert by_note["user-prefers-tea.md"]["class"] == "personal"
+    assert by_note["terse-answers.md"]["class"] == "personal"
+    assert by_note["review-before-merge.md"]["class"] == "harness-fact"
+    assert by_note["shed-roof-choice.md"]["class"] == "decision"
+    assert by_note["hose-reel-gotcha.md"]["class"] == "project-gotcha"
+    assert by_note["old-fence-plan.md"]["class"] == "stale"
+    assert by_note["missing-shed-config.md"]["class"] == "project-gotcha"
+
+
+def test_classify_skips_index_and_shard_files():
+    by_note, _ = _classify()
+    assert "MEMORY.md" not in by_note
+    assert "MEMORY.tools.md" not in by_note
+    assert len(by_note) == 8
+
+
+def test_classify_harness_fact_carries_rules_file_line():
+    by_note, _ = _classify()
+    assert by_note["review-before-merge.md"]["evidence"] == \
+        "duplicates: classify_rules/house-rules.md:3"
+    assert by_note["review-before-merge.md"]["low_confidence"] is None
+
+
+def test_classify_per_class_evidence():
+    by_note, _ = _classify()
+    assert by_note["shed-roof-choice.md"]["evidence"] == \
+        "ledger: classify_ledger/items.md:3"
+    assert by_note["hose-reel-gotcha.md"]["evidence"] == "repo: garden-app"
+    assert by_note["old-fence-plan.md"]["evidence"] == "reason: marked RESOLVED"
+    gone = by_note["missing-shed-config.md"]
+    assert gone["evidence"] == "repo: fixtures"
+    assert "/etc/garden-notes/shed.conf" in gone["low_confidence"]
+
+
+def test_classify_without_rules_root_never_yields_harness_fact():
+    by_note, result = _classify(rules=(), ledger=())
+    e = by_note["seat-worktree-habit.md"]
+    assert e["class"] == "personal"
+    assert e["evidence"] == "type=feedback; duplicates: not searched"
+    assert "not searched" in e["low_confidence"]
+    assert result["counts"]["harness-fact"] == 0
+    assert by_note["shed-roof-choice.md"]["evidence"] == "ledger: none yet"
+
+
+def test_classify_every_harness_fact_line_carries_file_line():
+    _, result = _classify()
+    facts = [e for e in result["entries"] if e["class"] == "harness-fact"]
+    assert facts
+    assert all(re.search(r"^duplicates: \S+\.md:\d+$", e["evidence"])
+               for e in facts)
+
+
+def test_classify_with_rules_root_but_no_duplicate_is_not_harness_fact():
+    by_note, _ = _classify()
+    e = by_note["seat-worktree-habit.md"]
+    assert e["class"] == "personal"
+    assert e["low_confidence"]
+
+
+def test_classify_report_count_line_matches_entries():
+    _, result = _classify()
+    text = mg.render_classify_report(result)
+    assert text.splitlines()[1] == (
+        "counts: personal=3 harness-fact=1 decision=1 project-gotcha=2 "
+        "stale=1 total=8")
+    body = [ln for ln in text.splitlines() if " | " in ln]
+    assert len(body) == 8
+    assert body == sorted(body, key=lambda ln: ln.split(" | ")[1])
+
+
+def test_classify_cli_rerun_is_byte_identical(tmp_path):
+    outs = []
+    for i in range(2):
+        out = tmp_path / ("r%d.md" % i)
+        rc = mg.main(["classify", "--dir", CLASSIFY_STORE,
+                      "--rules-root", CLASSIFY_RULES, "--out", str(out)])
+        assert rc == 0
+        outs.append(out.read_bytes())
+    assert outs[0] == outs[1]
+
+
+def test_classify_refuses_out_inside_the_store(tmp_path, capsys):
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    before = _tree_hashes(store)
+    for target in (store / "report.md", store / "sub" / "report.md"):
+        rc = mg.main(["classify", "--dir", str(store), "--out", str(target)])
+        assert rc == 2
+        assert not target.exists()
+    assert "inside the memory dir" in capsys.readouterr().err
+    assert _tree_hashes(store) == before
+
+
+def test_classify_changes_no_file_in_the_store(tmp_path):
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    before = _tree_hashes(store)
+    rc = mg.main(["classify", "--dir", str(store),
+                  "--rules-root", CLASSIFY_RULES,
+                  "--out", str(tmp_path / "report.md")])
+    assert rc == 0
+    assert _tree_hashes(store) == before
+
+
+# Built from parts so the installed-files reference check does not read these
+# invented example paths as references into a user's home or temp dir.
+HOME_TOKEN = "~"
+
+
+def _store_of(tmp_path, notes):
+    store = tmp_path / "proj" / "memory"
+    store.mkdir(parents=True)
+    for name, text in notes.items():
+        (store / name).write_text(text)
+    return store
+
+
+def _note(desc, body, ntype="reference", extra=""):
+    return ('---\nname: n\ndescription: "%s"\n%smetadata:\n  type: %s\n---\n\n%s\n'
+            % (desc, extra, ntype, body))
+
+
+def _classify_one(tmp_path, text, rules=()):
+    store = _store_of(tmp_path, {"n.md": text})
+    return mg.classify_store(str(store), list(rules), [])["entries"][0]
+
+
+@pytest.mark.parametrize("extra,desc,body", [
+    ("status: resolved\n", "Plain", "Plain."),
+    ("status: superseded\n", "Plain", "Plain."),
+    ("status: dead\n", "Plain", "Plain."),
+    ("superseded_by: other.md\n", "Plain", "Plain."),
+    ("", "Resolved upstream: the cache bug", "Plain."),
+    ("", "Replaced by the v2 plan", "Plain."),
+    ("", "Plain", "# OBSOLETE: old plan\n\nPlain."),
+    ("", "Plain", "Status: replaced by notes-v2"),
+    ("", "Plain", "One.\n\nTwo.\n\nThree.\n\nStatus: obsolete"),
+    ("", "Plain", "**RESOLVED 2026-01-01:** it opens the body."),
+], ids=["status-resolved", "status-superseded", "status-dead", "superseded-by",
+        "desc-leading", "desc-replaced-by", "title-obsolete",
+        "status-line-replaced-by", "status-line-deep", "opening-line"])
+def test_classify_stale_needs_an_explicit_marker(tmp_path, extra, desc, body):
+    e = _classify_one(tmp_path, _note(desc, body, extra=extra))
+    assert e["class"] == "stale"
+
+
+@pytest.mark.parametrize("desc,body", [
+    ("How to handle resolved merge conflicts", "Plain."),
+    ("Plain", "The bug was resolved by restarting the service."),
+    ("Old plan, now superseded by the v2 plan", "Plain."),
+    ("Cache rule RESOLVED in v3", "Plain."),
+    ("Plain", "# Title\n\n## Defects: 3 of 4 now RESOLVED"),
+    ("Plain", "One.\n\nTwo.\n\nThree.\n\n**RESOLVED 2026-01-01:** a saga line deep in a note."),
+    ("Plain", "Kept in `/etc/garden-notes/shed.conf`, which is gone."),
+], ids=["desc-mid-sentence", "body-mid-sentence", "desc-superseded-by-midway",
+        "desc-caps-midway", "title-resolved-midway", "body-line-deep",
+        "missing-path-alone"])
+def test_classify_unmarked_note_is_not_stale(tmp_path, desc, body):
+    assert _classify_one(tmp_path, _note(desc, body))["class"] != "stale"
+
+
+def test_classify_class_ignores_whether_a_quoted_path_exists(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    store = _store_of(tmp_path, {
+        "cfg.md": _note("Shed thermostat settings", "Kept in `%s/garden/shed.conf`." % HOME_TOKEN)})
+    before = mg.classify_store(str(store), [], [])["entries"][0]
+    (home / "garden").mkdir()
+    (home / "garden" / "shed.conf").write_text("x")
+    after = mg.classify_store(str(store), [], [])["entries"][0]
+    assert before["class"] == after["class"] == "project-gotcha"
+    assert "no longer exists" in before["low_confidence"]
+    assert "no longer exists" not in after["low_confidence"]
+
+
+@pytest.mark.parametrize("token", [
+    "/private/tmp/<x>", HOME_TOKEN + "/work/*/notes.md",
+    HOME_TOKEN + "/code/{a,b}/x.md", HOME_TOKEN + "/work/.../file",
+    "https://example.org/a/b", "/api/v1/items", "/" + "tmp/scratch/out.txt",
+    HOME_TOKEN + "/repos/wt/EK1/file.md",
+    HOME_TOKEN + "/proj/.claude/worktrees/abc/file.md",
+])
+def test_classify_ignores_placeholder_route_and_scratch_paths(tmp_path, token):
+    e = _classify_one(tmp_path, _note("Plain", "See `%s` for it." % token))
+    assert "no longer exists" not in (e["low_confidence"] or "")
+
+
+def _rule_lines(tmp_path, *lines):
+    d = tmp_path / "rules"
+    d.mkdir(exist_ok=True)
+    (d / "r.md").write_text("\n".join(lines) + "\n")
+    return mg._collect_md_lines([str(d)])
+
+
+DUP_DESC = "alpha bravo charlie delta echoes foxtrot"
+
+
+def test_find_duplicate_accepts_a_close_restatement(tmp_path):
+    md = _rule_lines(tmp_path, "unrelated", "alpha bravo charlie delta echoes extra")
+    assert mg._find_duplicate(DUP_DESC, md) == "rules/r.md:2"
+
+
+def test_find_duplicate_needs_five_shared_words(tmp_path):
+    md = _rule_lines(tmp_path, "alpha bravo charlie delta")
+    assert mg._find_duplicate(DUP_DESC, md) is None
+
+
+def test_find_duplicate_rejects_a_long_line_that_merely_contains_the_words(tmp_path):
+    extra = " ".join("pad%d" % i for i in range(7))
+    md = _rule_lines(tmp_path, "alpha bravo charlie delta echoes " + extra)
+    assert mg._find_duplicate(DUP_DESC, md) is None
+    extra = " ".join("pad%d" % i for i in range(6))
+    md = _rule_lines(tmp_path, "alpha bravo charlie delta echoes " + extra)
+    assert mg._find_duplicate(DUP_DESC, md) == "rules/r.md:1"
+
+
+def test_find_duplicate_ignores_generic_harness_words(tmp_path):
+    generic = "harness session standard worktree director builder"
+    md = _rule_lines(tmp_path, generic + " alpha bravo charlie delta")
+    assert mg._find_duplicate(generic + " alpha bravo charlie delta", md) is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Seen under work/... in the notes.", "slug"),
+    ("Under `" + HOME_TOKEN + "/work/...` and then code/real-repo.", "real-repo"),
+    ("Lives in code/garden-app.", "garden-app"),
+])
+def test_classify_repo_capture_skips_punctuation_only_names(text, expected):
+    fm, _ = mg.split_frontmatter(_note("Plain", text))
+    repo, _ = mg._note_repo(fm, text, "slug")
+    assert repo == expected
+
+
+def test_classify_out_refuses_a_symlink_through_a_linked_dir_inside_the_store(tmp_path, capsys):
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (store / "linkdir").symlink_to(outside)
+    rc = mg.main(["classify", "--dir", str(store),
+                  "--out", str(store / "linkdir" / "r.md")])
+    assert rc == 2
+    assert not (outside / "r.md").exists()
+    assert "inside the memory dir" in capsys.readouterr().err
+
+
+def test_classify_out_refuses_a_path_that_resolves_into_the_store(tmp_path, capsys):
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "alias").symlink_to(store)
+    rc = mg.main(["classify", "--dir", str(store),
+                  "--out", str(outside / "alias" / "r.md")])
+    assert rc == 2
+    assert not (store / "r.md").exists()
+    assert "inside the memory dir" in capsys.readouterr().err
+
+
+def test_classify_out_refuses_a_symlink_target(tmp_path, capsys):
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    target = tmp_path / "keep.md"
+    target.write_text("keep")
+    for link in (tmp_path / "link.md", store / "inlink.md"):
+        link.symlink_to(target)
+        rc = mg.main(["classify", "--dir", str(store), "--out", str(link)])
+        assert rc == 2
+        assert target.read_text() == "keep"
+    assert "symlink" in capsys.readouterr().err
+
+
+def test_classify_out_hard_link_to_a_store_note_leaves_the_store_unchanged(tmp_path):
+    # Outside the store, --out may be a hard link to a note. The report is
+    # renamed onto the path, so the linked inode is never truncated. The run
+    # succeeds (exit 0) and the link becomes an ordinary report file.
+    store = tmp_path / "memory"
+    shutil.copytree(CLASSIFY_STORE, store)
+    note = sorted(p for p in store.iterdir()
+                  if p.suffix == ".md" and p.name != "MEMORY.md")[0]
+    link = tmp_path / "outside-link.md"
+    os.link(note, link)
+    before = _tree_hashes(store)
+    rc = mg.main(["classify", "--dir", str(store), "--out", str(link)])
+    assert rc == 0
+    assert _tree_hashes(store) == before
+    assert link.read_text().startswith("# Memory classification")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "memory", "outside-link.md"]
+
+
+def test_classify_report_writer_does_not_follow_a_symlink(tmp_path):
+    target = tmp_path / "keep.md"
+    target.write_text("keep")
+    link = tmp_path / "link.md"
+    link.symlink_to(target)
+    with pytest.raises(ValueError):
+        mg.write_classify_report(str(link), "report")
+    assert target.read_text() == "keep"
+
+
+def test_classify_report_new_file_is_private_under_restrictive_umask(tmp_path):
+    out = tmp_path / "report.md"
+    previous = os.umask(0o077)
+    try:
+        mg.write_classify_report(str(out), "report\n")
+        mode = os.stat(out).st_mode & 0o777
+    finally:
+        os.umask(previous)
+    assert oct(mode) == oct(0o600)
+    assert out.read_text() == "report\n"
+
+
+def test_classify_report_keeps_existing_private_mode(tmp_path):
+    out = tmp_path / "report.md"
+    out.write_text("old\n")
+    os.chmod(out, 0o600)
+    previous = os.umask(0o077)
+    try:
+        mg.write_classify_report(str(out), "report\n")
+        mode = os.stat(out).st_mode & 0o777
+    finally:
+        os.umask(previous)
+    assert oct(mode) == oct(0o600)
+    assert out.read_text() == "report\n"
+
+
+def test_classify_report_keeps_existing_group_readable_mode(tmp_path):
+    out = tmp_path / "report.md"
+    out.write_text("old\n")
+    os.chmod(out, 0o644)
+    previous = os.umask(0o077)
+    try:
+        mg.write_classify_report(str(out), "report\n")
+        mode = os.stat(out).st_mode & 0o777
+    finally:
+        os.umask(previous)
+    assert oct(mode) == oct(0o644)
+    assert out.read_text() == "report\n"
+
+
+def test_classify_report_refuses_a_symlink_target_and_writes_nothing(tmp_path):
+    target = tmp_path / "keep.md"
+    target.write_text("keep")
+    link = tmp_path / "link.md"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError):
+        mg.write_classify_report(str(link), "report\n")
+    assert target.read_text() == "keep"
+    assert stat.S_ISLNK(os.lstat(str(link)).st_mode)
+    assert not list(tmp_path.glob(".classify-*"))
+
+
+def test_classify_report_refuses_symlink_swapped_in_before_mode_stat(
+        tmp_path, monkeypatch):
+    """The sole target stat catches a symlink planted at its write boundary."""
+    out = tmp_path / "report.md"
+    keep = tmp_path / "keep.md"
+    keep.write_text("keep")
+    real_lstat = os.lstat
+    target_lstats = []
+
+    def lstat_and_plant(path):
+        if os.path.abspath(path) == os.path.abspath(str(out)):
+            target_lstats.append(path)
+            if list(tmp_path.glob(".classify-*.tmp")):
+                out.symlink_to(keep)
+        return real_lstat(path)
+
+    monkeypatch.setattr(mg.os, "lstat", lstat_and_plant)
+    with pytest.raises(ValueError):
+        mg.write_classify_report(str(out), "report\n")
+    assert target_lstats == [str(out)]
+    assert keep.read_text() == "keep"
+    assert stat.S_ISLNK(real_lstat(str(out)).st_mode)
+    assert not list(tmp_path.glob(".classify-*"))
+
+
+def test_classify_report_refuses_target_stat_permission_error(
+        tmp_path, monkeypatch):
+    out = tmp_path / "report.md"
+    real_lstat = os.lstat
+    target_lstats = []
+
+    def denied_lstat(path):
+        if os.path.abspath(path) == os.path.abspath(str(out)):
+            target_lstats.append(path)
+            raise PermissionError("stat denied")
+        return real_lstat(path)
+
+    monkeypatch.setattr(mg.os, "lstat", denied_lstat)
+    with pytest.raises(ValueError, match="cannot write --out"):
+        mg.write_classify_report(str(out), "report\n")
+    assert target_lstats == [str(out)]
+    assert not out.exists()
+    assert not list(tmp_path.glob(".classify-*"))
+
+
+def test_classify_report_strips_setuid_from_existing_mode(tmp_path, monkeypatch):
+    """An existing 04644 target must be applied as 0644 — never setuid.
+    macOS chmod(2) drops setuid on a non-executable file, so the 04644 is
+    injected at the lstat boundary and the chmod argument is the observable."""
+    out = tmp_path / "report.md"
+    out.write_text("old\n")
+    os.chmod(out, 0o644)
+    real_lstat = os.lstat
+    seen = []
+
+    def lstat_with_setuid(path):
+        st = real_lstat(path)
+        if os.path.abspath(path) == os.path.abspath(str(out)):
+            fields = list(st)
+            fields[stat.ST_MODE] = (st.st_mode & ~0o7777) | 0o4644
+            return os.stat_result(fields)
+        return st
+
+    def chmod_spy(path, mode, *args, **kwargs):
+        seen.append(mode)
+        return real_chmod(path, mode, *args, **kwargs)
+
+    real_chmod = os.chmod
+    monkeypatch.setattr(os, "lstat", lstat_with_setuid)
+    monkeypatch.setattr(os, "chmod", chmod_spy)
+    mg.write_classify_report(str(out), "report\n")
+    assert seen == [0o644]
+    assert oct(stat.S_IMODE(real_lstat(str(out)).st_mode)) == oct(0o644)
+    assert out.read_text() == "report\n"
+
+
+def test_classify_refuses_a_missing_or_non_directory_root(tmp_path, capsys):
+    missing = str(tmp_path / "nope")
+    a_file = tmp_path / "file.md"
+    a_file.write_text("x")
+    out = tmp_path / "report.md"
+    for argv, flag in (
+            (["--dir", missing], "memory dir"),
+            (["--dir", CLASSIFY_STORE, "--rules-root", missing], "--rules-root"),
+            (["--dir", CLASSIFY_STORE, "--rules-root", str(a_file)], "--rules-root"),
+            (["--dir", CLASSIFY_STORE, "--ledger-root", missing], "--ledger-root")):
+        rc = mg.main(["classify"] + argv + ["--out", str(out)])
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert flag in err
+        assert (missing in err) or (str(a_file) in err)
+        assert not out.exists()
+
+
+def test_classify_names_a_missing_default_dir_from_the_environment(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MEMORY_GARDENER_DIR", str(tmp_path / "gone"))
+    assert mg.main(["classify"]) == 2
+    err = capsys.readouterr().err
+    assert "MEMORY_GARDENER_DIR" in err
+    assert "gone" in err
