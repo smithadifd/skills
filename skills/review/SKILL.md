@@ -30,26 +30,45 @@ whose `artifacts["findings.json"]` validates against `skills/review/findings.sch
 (`--validate <findings.json>` re-checks one); the one-line bullet shape above,
 tag and `file:line` exact, is what its `claude-fresh` adapter parses — the
 worked example above is the shape it expects, verbatim. A return that states
-two different verdicts, in either order, is a failure for every backend, even
-with `adapters.jev_fallback` on. The same verdict stated twice is not a
-conflict, though the `omp` backend still needs its verdict line exactly once.
+two different verdicts, in either order, is a failure for the `claude-fresh`
+and `grok-notools` backends, even with `adapters.jev_fallback` on.
 
-A review run through `omp -p --model <id> --thinking=<level>` with the
-reviewer agent uses `--backend omp --model <id> --thinking <level>` (in an
-envelope: `inputs.model` and `inputs.thinking`). The reply must carry the
-agent's verdict line, exactly `## Verdict: APPROVE` or
-`## Verdict: REQUEST CHANGES`, or the result is a failure, even with
-`adapters.jev_fallback` on. Both values are required and come only from the
-caller: the model as a single token, the thinking level as one of `off`,
+For a review run through `omp -p --model <id> --thinking=<level>`, append this
+output contract to the reviewer prompt. Parse the reply with `--backend omp`,
+`--model <id>`, and `--thinking <level>`; in an envelope, use `inputs.model`
+and `inputs.thinking`.
+
+````text
+Return exactly one fenced `review-result` JSON block. `verdict` is exactly
+`APPROVE` or `REQUEST CHANGES`. `bugs` and `nits` contain one
+`path:line — description` string per finding. `reviewed_head` is the full
+lowercase 40-character commit hash you reviewed.
+
+```review-result
+{
+  "verdict": "APPROVE",
+  "bugs": [],
+  "nits": [],
+  "reviewed_head": "0123456789abcdef0123456789abcdef01234567"
+}
+```
+````
+
+The block is the OMP verdict's only source. Zero or multiple blocks, invalid
+JSON, an unknown verdict, missing or extra fields, incorrectly typed fields,
+or a malformed `reviewed_head` fails closed. A prose verdict label may repeat
+the record's verdict, but a disagreement fails as `VerdictConflict`; a clean
+sentence never substitutes for a missing or invalid record. The model and
+thinking level are required caller inputs. The level is one of `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `auto`. The result
-records them, with the lane name, as `attribution`.
+records both, with the lane name, as `attribution`.
 
 `REVIEW_PHASE_JEV_SHADOW=1` enables an advisory TypeSafe pass on parse-success
 returns. It sends only `jev_client.trim_payload`'s FINDINGS/VERDICT payload and
 records `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason` on
 the phase result. `jev_reason` is a secret-free failure classification when
-Jev is unavailable and null otherwise; the regex verdict and verbatim
-`review.md` remain authoritative. Absent/unset is the exact base path.
+Jev is unavailable and null otherwise; the selected adapter's verdict and
+verbatim `review.md` remain authoritative. Absent/unset is the exact base path.
 
 Do NOT comment on:
 - Style, formatting, naming conventions

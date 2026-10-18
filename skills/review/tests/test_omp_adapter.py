@@ -1,16 +1,8 @@
-"""Tests for the `omp` backend of review_phase.py.
-
-An omp review reply is the reviewer agent's `## Verdict:` block, returned by
-`omp -p --model <id> --thinking=<level>`. The runner launches omp; this
-adapter only parses the reply it got back and records which lane, model and
-thinking level produced it. The model id and level below are placeholders:
-the adapter must echo whatever the runner passes, never a value of its own.
-
-Hermetic: no network, no environment lookups, fixtures only.
-"""
+"""Tests for the structured `omp` backend of review_phase.py."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 import sys
@@ -27,10 +19,30 @@ import review_phase  # noqa: E402
 
 OMP_REQUEST_CHANGES = (FIXTURES / "omp-request-changes.md").read_text()
 OMP_APPROVE = (FIXTURES / "omp-approve.md").read_text()
-OMP_NO_VERDICT = (FIXTURES / "omp-no-verdict.md").read_text()
+OMP_NO_RECORD = (FIXTURES / "omp-no-verdict.md").read_text()
 
 MODEL = "example-model"
 THINKING = "medium"
+HEAD = "a" * 40
+
+
+def _record(
+    verdict: object = "APPROVE",
+    *,
+    bugs: object = None,
+    nits: object = None,
+    reviewed_head: object = HEAD,
+    extra: dict | None = None,
+) -> str:
+    payload = {
+        "verdict": verdict,
+        "bugs": [] if bugs is None else bugs,
+        "nits": [] if nits is None else nits,
+        "reviewed_head": reviewed_head,
+    }
+    if extra:
+        payload.update(extra)
+    return "```review-result\n" + json.dumps(payload, indent=2) + "\n```\n"
 
 
 def _envelope(return_text: str | None, **params) -> dict:
@@ -63,10 +75,14 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-# --- a well-formed reply parses into the schema ------------------------------
+def _reason(text: str) -> str:
+    return review_phase.run_phase(_envelope(text))["reason"]
 
 
-def test_request_changes_reply_parses_into_the_findings_schema():
+# --- one structured record supplies the only approving verdict ---------------
+
+
+def test_request_changes_record_parses_into_the_findings_schema():
     result = review_phase.run_phase(_envelope(OMP_REQUEST_CHANGES))
     assert result["status"] == "success", result["reason"]
     assert result["reason"] == "omp: changes_requested, 3 finding(s)"
@@ -80,7 +96,7 @@ def test_request_changes_reply_parses_into_the_findings_schema():
         {
             "file": "src/export.py",
             "line": 58,
-            "rule": "issue",
+            "rule": "bug",
             "description": (
                 "the limit is applied after the rows are written, so `--limit 10` "
                 "still writes every row; slice the query result before the write loop."
@@ -90,7 +106,7 @@ def test_request_changes_reply_parses_into_the_findings_schema():
         {
             "file": "src/export.py",
             "line": 31,
-            "rule": "issue",
+            "rule": "bug",
             "description": (
                 "a negative `--limit` is accepted and silently drops the last row; "
                 "reject values below 1 at parse time."
@@ -107,46 +123,237 @@ def test_request_changes_reply_parses_into_the_findings_schema():
     ]
 
 
-def test_approve_reply_parses_with_no_findings():
+def test_approve_record_parses_with_no_findings():
     result = review_phase.run_phase(_envelope(OMP_APPROVE))
     assert result["status"] == "success", result["reason"]
-    findings = result["artifacts"]["findings.json"]
-    assert findings == {
+    assert result["artifacts"]["findings.json"] == {
         "schema": "review-findings/v1",
         "backend": "omp",
         "verdict": "approved",
         "findings": [],
     }
-    assert review_phase.validate_findings(findings) == []
 
 
 def test_schema_accepts_omp_as_a_backend():
     schema = json.loads((SKILL_DIR / "findings.schema.json").read_text())
-    assert schema["properties"]["backend"]["enum"] == ["claude-fresh", "grok-notools", "omp"]
+    assert schema["properties"]["backend"]["enum"] == [
+        "claude-fresh",
+        "grok-notools",
+        "omp",
+    ]
 
 
-# --- attribution names the lane and the served model -------------------------
+# --- generated decoration matrix ---------------------------------------------
+
+
+DECORATIONS = (
+    "{key}: {value}",
+    "## {key}: {value}",
+    "**{key}**: **{value}**",
+    "**{key}: {value}**",
+    "- {key}: {value}",
+    "> `{key}`: `{value}`",
+    "## **[{key}]**: **[{value}]**",
+)
+PROSE_VERDICTS = ("APPROVE", "REQUEST CHANGES")
+DECORATION_CASES = [
+    pytest.param(
+        decoration,
+        value,
+        present,
+        record_first,
+        id=(
+            f"decoration-{decoration_index}-"
+            f"{value.lower().replace(' ', '-')}-"
+            f"{'record' if present else 'no-record'}-"
+            f"{'record-first' if record_first else 'prose-first'}"
+        ),
+    )
+    for (decoration_index, decoration), value, present, record_first in itertools.product(
+        enumerate(DECORATIONS), PROSE_VERDICTS, (False, True), (False, True)
+    )
+]
+
+
+@pytest.mark.parametrize(
+    "decoration, prose_value, record_present, record_first",
+    DECORATION_CASES,
+)
+def test_decorated_prose_never_supplies_and_can_only_veto_the_record(
+    decoration, prose_value, record_present, record_first
+):
+    prose = decoration.format(key="Verdict", value=prose_value)
+    parts = [_record(), prose] if record_first else [prose, _record()]
+    text = "\n".join(parts) if record_present else prose
+    result = review_phase.run_phase(_envelope(text))
+    if not record_present:
+        assert result["status"] == "failure"
+        assert "ReviewRecordMissing" in result["reason"]
+    elif prose_value == "APPROVE":
+        assert result["status"] == "success", result["reason"]
+        assert result["artifacts"]["findings.json"]["verdict"] == "approved"
+    else:
+        assert result["status"] == "failure"
+        assert "VerdictConflict" in result["reason"]
+
+
+# Neutral fixtures make the three prose cases explicit.
+@pytest.mark.parametrize(
+    "text, expected_status, reason_name",
+    [
+        pytest.param(
+            "Verdict: APPROVE\n\n" + _record(),
+            "success",
+            None,
+            id="matching-prose",
+        ),
+        pytest.param(_record(), "success", None, id="no-prose-verdict"),
+        pytest.param(
+            _record() + "\nVerdict: REQUEST CHANGES\n",
+            "failure",
+            "VerdictConflict",
+            id="different-prose",
+        ),
+    ],
+)
+def test_neutral_prose_fixtures(text, expected_status, reason_name):
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == expected_status, result["reason"]
+    if reason_name:
+        assert reason_name in result["reason"]
+
+
+# --- every refusal has its own stable name -----------------------------------
+
+
+def test_zero_records_is_refused_by_name():
+    assert "ReviewRecordMissing" in _reason("Verdict: APPROVE\n")
+
+
+def test_a_prose_approve_without_a_record_proves_the_label_path_is_gone():
+    result = review_phase.run_phase(_envelope("## Verdict: APPROVE\n"))
+    assert result["status"] == "failure"
+    assert "ReviewRecordMissing" in result["reason"]
+    assert result["artifacts"]["findings.json"] is None
+
+
+def test_two_records_are_refused_by_name():
+    assert "ReviewRecordMultiple" in _reason(_record() + "\n" + _record())
+
+
+def test_invalid_json_is_refused_by_name():
+    text = '```review-result\n{"verdict": "APPROVE",}\n```\n'
+    assert "ReviewRecordInvalidJSON" in _reason(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            "```review-result\n"
+            '{"verdict":"APPROVE","bugs":[],"nits":[]}\n'
+            "```\n",
+            id="missing-field",
+        ),
+        pytest.param(_record(extra={"other": True}), id="extra-field"),
+        pytest.param(
+            "```review-result\n"
+            '{"verdict":"REQUEST CHANGES","verdict":"APPROVE",'
+            f'"bugs":[],"nits":[],"reviewed_head":"{HEAD}"'
+            "}\n```\n",
+            id="duplicate-field",
+        ),
+        pytest.param(_record(verdict=1), id="typed-verdict"),
+        pytest.param(_record(verdict="CLEARED"), id="unknown-verdict"),
+        pytest.param(_record(bugs="none"), id="non-list-bugs"),
+        pytest.param(_record(nits={}), id="non-list-nits"),
+        pytest.param(_record(bugs=[1]), id="typed-bug-entry"),
+        pytest.param(_record(reviewed_head="abc123"), id="short-reviewed-head"),
+        pytest.param(_record(reviewed_head="A" * 40), id="uppercase-reviewed-head"),
+    ],
+)
+def test_schema_failures_are_refused_by_name(text):
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure"
+    assert "ReviewRecordSchema" in result["reason"]
+
+
+def test_conflicting_prose_is_refused_by_name():
+    assert "VerdictConflict" in _reason(
+        "Verdict: REQUEST CHANGES\n\n" + _record("APPROVE")
+    )
+
+
+def test_clean_sentinel_never_upgrades_a_missing_record():
+    text = "### Issues\nNo bugs or security issues found.\nVerdict: APPROVE\n"
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure"
+    assert "ReviewRecordMissing" in result["reason"]
+
+
+def test_clean_sentinel_never_upgrades_a_schema_failure():
+    text = (
+        "No bugs or security issues found.\n\n"
+        "```review-result\n"
+        '{"verdict":"APPROVE","bugs":[],"nits":[],"reviewed_head":"bad"}\n'
+        "```\n"
+    )
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "failure"
+    assert "ReviewRecordSchema" in result["reason"]
+
+
+def test_only_an_exact_review_result_info_string_counts():
+    assert "ReviewRecordMissing" in _reason(
+        "```review-result extra\n"
+        '{"verdict":"APPROVE","bugs":[],"nits":[],"reviewed_head":"'
+        + HEAD
+        + '"}\n```\n'
+    )
+
+
+@pytest.mark.parametrize("text", ["", "\n", OMP_NO_RECORD])
+def test_adapter_raises_on_empty_or_missing_record(text):
+    with pytest.raises(review_phase.ReviewRecordMissing):
+        review_phase.parse_omp(text)
+
+
+# --- attribution and command-line plumbing remain unchanged ------------------
 
 
 def test_attribution_names_the_lane_model_and_thinking_level():
     result = review_phase.run_phase(_envelope(OMP_REQUEST_CHANGES))
-    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
+    assert result["attribution"] == {
+        "lane": "omp",
+        "model": MODEL,
+        "thinking": THINKING,
+    }
 
 
 @pytest.mark.parametrize(
     "model, thinking",
     [("other-model-2", "low"), ("vendor/model-x:latest", "high")],
 )
-def test_attribution_echoes_whatever_parameters_the_runner_passes(model, thinking):
-    result = review_phase.run_phase(_envelope(OMP_APPROVE, model=model, thinking=thinking))
+def test_attribution_echoes_the_runner_parameters(model, thinking):
+    result = review_phase.run_phase(
+        _envelope(OMP_APPROVE, model=model, thinking=thinking)
+    )
     assert result["status"] == "success", result["reason"]
-    assert result["attribution"] == {"lane": "omp", "model": model, "thinking": thinking}
+    assert result["attribution"] == {
+        "lane": "omp",
+        "model": model,
+        "thinking": thinking,
+    }
 
 
 def test_failed_parse_still_names_the_lane():
-    result = review_phase.run_phase(_envelope(OMP_NO_VERDICT))
+    result = review_phase.run_phase(_envelope(OMP_NO_RECORD))
     assert result["status"] == "failure"
-    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
+    assert result["attribution"] == {
+        "lane": "omp",
+        "model": MODEL,
+        "thinking": THINKING,
+    }
 
 
 @pytest.mark.parametrize(
@@ -158,87 +365,15 @@ def test_failed_parse_still_names_the_lane():
         ({"thinking": None}, "inputs.thinking"),
         ({"thinking": ""}, "inputs.thinking"),
         ({"thinking": 3}, "inputs.thinking"),
-    ],
-)
-def test_missing_or_malformed_parameters_block_rather_than_default(params, fragment):
-    result = review_phase.run_phase(_envelope(OMP_REQUEST_CHANGES, **params))
-    assert result["status"] == "blocked"
-    assert fragment in result["reason"]
-    assert result["artifacts"] == {"review.md": None, "findings.json": None}
-    assert "attribution" not in result
-
-
-# --- a malformed or empty reply fails closed ---------------------------------
-
-
-def test_reply_without_a_verdict_line_fails_closed():
-    result = review_phase.run_phase(_envelope(OMP_NO_VERDICT))
-    assert result["status"] == "failure"
-    assert "no verdict line in the omp reply" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-    assert result["artifacts"]["review.md"] == OMP_NO_VERDICT
-
-
-def test_clean_sentinel_alone_is_not_an_omp_approval():
-    text = "### Issues\nNo bugs or security issues found.\n"
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "failure"
-    assert result["artifacts"]["findings.json"] is None
-
-
-@pytest.mark.parametrize("text", ["", "   \n\n"])
-def test_empty_reply_is_not_an_empty_findings_pass(text):
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "blocked"
-    assert result["artifacts"]["findings.json"] is None
-
-
-@pytest.mark.parametrize("text", ["", "\n", OMP_NO_VERDICT])
-def test_adapter_raises_on_empty_or_malformed_reply(text):
-    with pytest.raises(review_phase.ParseError):
-        review_phase.parse_omp(text)
-
-
-# --- the command line ---------------------------------------------------------
-
-
-def test_from_text_passes_model_and_thinking_through(tmp_path: Path):
-    reply = tmp_path / "reply.md"
-    reply.write_text(OMP_REQUEST_CHANGES, encoding="utf-8")
-    result = _run_cli(
-        "--from-text", str(reply), "--backend", "omp",
-        "--model", "cli-model-3", "--thinking", "low",
-    )
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
-    assert payload["attribution"] == {"lane": "omp", "model": "cli-model-3", "thinking": "low"}
-    assert payload["artifacts"]["findings.json"]["verdict"] == "changes_requested"
-
-
-def test_from_text_without_model_is_blocked(tmp_path: Path):
-    reply = tmp_path / "reply.md"
-    reply.write_text(OMP_REQUEST_CHANGES, encoding="utf-8")
-    result = _run_cli("--from-text", str(reply), "--backend", "omp", "--thinking", "low")
-    assert result.returncode == 3, result.stderr
-    assert "inputs.model" in json.loads(result.stdout)["reason"]
-
-
-# --- parameter validation -----------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "params, fragment",
-    [
         ({"thinking": "banana"}, "inputs.thinking"),
-        ({"thinking": "ultra"}, "inputs.thinking"),
-        ({"thinking": "low\n"}, "inputs.thinking"),
         ({"model": "model\n"}, "inputs.model"),
     ],
 )
-def test_unknown_thinking_level_or_trailing_newline_blocks(params, fragment):
+def test_missing_or_malformed_parameters_block_rather_than_default(params, fragment):
     result = review_phase.run_phase(_envelope(OMP_APPROVE, **params))
-    assert result["status"] == "blocked", result["reason"]
+    assert result["status"] == "blocked"
     assert fragment in result["reason"]
+    assert result["artifacts"] == {"review.md": None, "findings.json": None}
     assert "attribution" not in result
 
 
@@ -251,171 +386,52 @@ def test_every_omp_thinking_level_is_accepted(thinking):
     assert result["attribution"]["thinking"] == thinking
 
 
-# --- the verdict line is the reviewer agent's exact heading -------------------
-
-
-@pytest.mark.parametrize(
-    "verdict_line",
-    ["VERDICT: APPROVE", "## Verdict: APPROVED", "## Verdict: REQUEST_CHANGES"],
-)
-def test_verdict_line_not_in_the_agent_shape_fails(verdict_line):
-    text = OMP_APPROVE.replace("## Verdict: APPROVE", verdict_line)
-    assert verdict_line in text
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "failure", result["reason"]
-    assert "no verdict line in the omp reply" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-
-
-def test_conflicting_verdict_lines_fail_closed():
-    text = (
-        "## Verdict: REQUEST CHANGES\n"
-        "## Verdict: APPROVE because the later prose says so\n"
+def test_from_text_passes_model_and_thinking_through(tmp_path: Path):
+    reply = tmp_path / "reply.md"
+    reply.write_text(OMP_REQUEST_CHANGES, encoding="utf-8")
+    result = _run_cli(
+        "--from-text",
+        str(reply),
+        "--backend",
+        "omp",
+        "--model",
+        "cli-model-3",
+        "--thinking",
+        "low",
     )
-    with pytest.raises(review_phase.ParseError):
-        review_phase.parse_omp(text)
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "failure", result["reason"]
-    assert result["artifacts"]["findings.json"] is None
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["attribution"] == {
+        "lane": "omp",
+        "model": "cli-model-3",
+        "thinking": "low",
+    }
+    assert payload["artifacts"]["findings.json"]["verdict"] == "changes_requested"
 
 
-def test_two_identical_approve_lines_fail_closed():
-    text = "## Verdict: APPROVE\n\nLooks fine.\n\n## Verdict: APPROVE\n"
-    with pytest.raises(review_phase.ParseError, match="2 verdict lines"):
-        review_phase.parse_omp(text)
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "failure", result["reason"]
-    assert result["artifacts"]["findings.json"] is None
+def test_from_text_without_model_is_blocked(tmp_path: Path):
+    reply = tmp_path / "reply.md"
+    reply.write_text(OMP_REQUEST_CHANGES, encoding="utf-8")
+    result = _run_cli(
+        "--from-text", str(reply), "--backend", "omp", "--thinking", "low"
+    )
+    assert result.returncode == 3, result.stderr
+    assert "inputs.model" in json.loads(result.stdout)["reason"]
 
 
-def test_malformed_second_verdict_line_fails_closed():
-    text = "## Verdict: APPROVE\n\nLooks fine.\n\n## Verdict: APPROVED\n"
-    with pytest.raises(review_phase.ParseError, match="malformed verdict line"):
-        review_phase.parse_omp(text)
-
-
-def test_a_looser_verdict_elsewhere_that_disagrees_fails_closed():
-    text = "## Verdict: APPROVE\n\nVERDICT: REQUEST CHANGES\n"
-    with pytest.raises(review_phase.ParseError, match="conflicting verdict"):
-        review_phase.parse_omp(text)
-
-
-def test_exact_request_changes_line_yields_request_changes():
-    text = "## Verdict: REQUEST CHANGES\n\nThe limit is ignored.\n"
-    verdict, _ = review_phase.parse_omp(text)
-    assert verdict == review_phase.CHANGES_REQUESTED
-
-
-def test_exact_approve_line_yields_approve():
-    text = "## Verdict: APPROVE\n\nThe rename is complete.\n"
-    verdict, _ = review_phase.parse_omp(text)
-    assert verdict == review_phase.APPROVED
-
-
-# --- two different verdicts are a conflict, in either order -------------------
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param(
-            "## Verdict: REQUEST CHANGES\n\nThe limit is ignored.\n\n## Verdict: APPROVE\n",
-            id="request-changes-then-approve",
-        ),
-        pytest.param(
-            "## Verdict: APPROVE\n\nThe limit is ignored.\n\n## Verdict: REQUEST CHANGES\n",
-            id="approve-then-request-changes",
-        ),
-    ],
-)
-def test_two_different_verdict_lines_are_a_conflict(text):
-    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
-        review_phase.parse_omp(text)
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "failure", result["reason"]
-    assert result["reason"].startswith("omp: conflicting verdicts")
-    assert result["artifacts"]["findings.json"] is None
-    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param(
-            "VERDICT: REQUEST CHANGES\n\n" + OMP_APPROVE,
-            id="request-changes-then-approve",
-        ),
-        pytest.param(
-            OMP_APPROVE + "\nVERDICT: REQUEST CHANGES\n",
-            id="approve-then-request-changes",
-        ),
-        pytest.param(
-            "VERDICT: APPROVE\n\n" + OMP_REQUEST_CHANGES,
-            id="approve-then-exact-request-changes",
-        ),
-        pytest.param(
-            OMP_REQUEST_CHANGES + "\nVERDICT: APPROVE\n",
-            id="exact-request-changes-then-approve",
-        ),
-    ],
-)
-def test_bare_label_that_disagrees_with_the_verdict_line_is_a_conflict(text):
-    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
-        review_phase.parse_omp(text)
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "failure", result["reason"]
-    assert result["reason"].startswith("omp: conflicting verdicts")
-    assert result["artifacts"]["findings.json"] is None
-    assert result["artifacts"]["review.md"] == text
-    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
-
-
-@pytest.mark.parametrize(
-    "text, expected",
-    [
-        pytest.param(OMP_APPROVE + "\nVERDICT: APPROVE\n", "approved", id="approve-twice"),
-        pytest.param(
-            "VERDICT: REQUEST CHANGES\n\n" + OMP_REQUEST_CHANGES,
-            "changes_requested",
-            id="request-changes-twice",
-        ),
-    ],
-)
-def test_bare_label_that_repeats_the_verdict_line_still_parses(text, expected):
-    verdict, _ = review_phase.parse_omp(text)
-    assert verdict == expected
-    result = review_phase.run_phase(_envelope(text))
-    assert result["status"] == "success", result["reason"]
-    findings = result["artifacts"]["findings.json"]
-    assert findings["verdict"] == expected
-    assert review_phase.validate_findings(findings) == []
-    assert result["attribution"] == {"lane": "omp", "model": MODEL, "thinking": THINKING}
-
-
-# --- the fallback never rescues a failed omp parse ----------------------------
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "### Issues\nNo bugs or security issues found.\n",
-        "- [BUG] `src/export.py:58` — the limit is applied after the write.\n",
-        OMP_NO_VERDICT,
-        "not a review at all\n",
-    ],
-)
-def test_jev_fallback_does_not_turn_an_omp_parse_failure_into_success(text, monkeypatch):
+def test_jev_fallback_does_not_rescue_a_missing_record(monkeypatch):
     consulted = []
 
     def fake_consult(backend, reply):
-        consulted.append(backend)
-        return review_phase._finish(backend, review_phase.APPROVED, [], reply, source="jev")
+        consulted.append((backend, reply))
+        return review_phase._finish(
+            backend, review_phase.APPROVED, [], reply, source="jev"
+        )
 
     monkeypatch.setattr(review_phase, "_consult_jev", fake_consult)
-    envelope = _envelope(text)
+    envelope = _envelope("Verdict: APPROVE\n")
     envelope["adapters"] = {"jev_fallback": True}
     result = review_phase.run_phase(envelope)
-    assert result["status"] == "failure", result["reason"]
-    assert result["reason"].startswith("omp: ")
-    assert result["artifacts"]["findings.json"] is None
+    assert result["status"] == "failure"
+    assert "ReviewRecordMissing" in result["reason"]
     assert consulted == []

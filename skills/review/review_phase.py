@@ -24,9 +24,9 @@ With `REVIEW_PHASE_JEV_SHADOW=1`, a successful regex parse also sends
 `jev_client.trim_payload(review.md)` through the existing `JevClient` and adds
 advisory `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason`
 fields to the phase result. `jev_reason` classifies an unavailable outcome and
-is null otherwise. The regex verdict remains authoritative. The flag is off by
-default; any shadow failure cannot change review status, artifacts, reason, or
-verdict.
+is null otherwise. The selected adapter's verdict remains authoritative. The
+flag is off by default; any shadow failure cannot change review status,
+artifacts, reason, or verdict.
 
 Backends (one adapter each, chosen by the envelope's `inputs.backend`):
     claude-fresh   the reviewer agent's `## Verdict:` block with `### Issues`
@@ -36,16 +36,16 @@ Backends (one adapter each, chosen by the envelope's `inputs.backend`):
                    bullets (or its "No bugs or security issues found." line)
     grok-notools   `## FINDINGS` bullets (`none` when clean) + `## VERDICT`
                    `<cleared|flagged> — <sentence>`
-    omp            the reply of an `omp -p --model <id> --thinking=<level>`
-                   review: the reviewer agent's own `## Verdict:` block, which
-                   must carry an explicit verdict line. The envelope's
+    omp            exactly one fenced `review-result` JSON record with a
+                   verdict, bugs, nits, and reviewed_head. The envelope's
                    `inputs.model` and `inputs.thinking` name the served model
                    and thinking level; both are required, and the phase
                    result carries them as `attribution` with the lane name
 
-A return whose verdict labels disagree, in either order, fails for every
-backend (`VerdictConflict`), with or without the Jev fallback. Repeating the
-same verdict is not a conflict (omp still needs its exact line exactly once).
+The OMP verdict comes only from that record. A verdict-like prose line may
+confirm it, but a disagreement fails as `VerdictConflict`; missing, multiple,
+invalid-JSON, and schema-invalid records each have a distinct refusal name.
+The claude-fresh and grok-notools adapters retain their text contracts.
 
 The adapters normalise a return that a runner already obtained; dispatching
 the model (credentials, tools, pools) stays runner-owned, so an envelope
@@ -82,6 +82,7 @@ import math
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 from jev_client import JevClient, JevClosed, trim_payload
@@ -110,6 +111,21 @@ class VerdictConflict(ParseError):
     A failure even with `adapters.jev_fallback` on: another adapter or Jev
     would pick one of two verdicts the reviewer wrote.
     """
+
+class ReviewRecordMissing(ParseError):
+    """The OMP reply contains no fenced review-result record."""
+
+
+class ReviewRecordMultiple(ParseError):
+    """The OMP reply contains more than one fenced review-result record."""
+
+
+class ReviewRecordInvalidJSON(ParseError):
+    """The OMP review-result record is not valid JSON."""
+
+
+class ReviewRecordSchema(ParseError):
+    """The OMP review-result record does not conform to its closed schema."""
 
 
 def _single_verdict(verdicts: list[str]) -> str | None:
@@ -535,53 +551,157 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     return verdict, shaped
 
 
-# The reviewer agent's verdict heading, exactly as its output format writes it.
-# Stricter than the claude-fresh patterns on purpose: a bare `VERDICT:` label,
-# a different token (`APPROVED`) or extra text on the line is not this agent's
-# block, so it does not count as the verdict line.
-_OMP_VERDICT_LINE = re.compile(r"## Verdict: (APPROVE|REQUEST CHANGES)[ \t]*")
+_OMP_REVIEW_RECORD_FIELDS = {"verdict", "bugs", "nits", "reviewed_head"}
+_OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
+_OMP_PROSE_PREFIX = re.compile(r"^\s{0,3}(?:#{1,6}|[-+*]|>)\s+")
+_OMP_PROSE_SEPARATOR = re.compile(r"^(.*?)(?:\s*[:=—–]\s*)(.*)$")
+
+
+def _strip_omp_decoration(text: str) -> str:
+    """Strip surrounding Markdown marks, whitespace, and Unicode punctuation."""
+    start = 0
+    end = len(text)
+    while start < end and (
+        text[start].isspace()
+        or unicodedata.category(text[start])[:1] in ("P", "S")
+    ):
+        start += 1
+    while end > start and (
+        text[end - 1].isspace()
+        or unicodedata.category(text[end - 1])[:1] in ("P", "S")
+    ):
+        end -= 1
+    return text[start:end]
+
+
+def _fenced_review_records(text: str) -> tuple[list[str], list[str]]:
+    """Return exact-info review-result bodies and lines outside all fences."""
+    lines = text.splitlines()
+    records: list[str] = []
+    prose: list[str] = []
+    index = 0
+    while index < len(lines):
+        opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", lines[index])
+        if opening is None:
+            prose.append(lines[index])
+            index += 1
+            continue
+        marker = opening.group(1)
+        info = opening.group(2).strip()
+        closing = re.compile(
+            rf" {{0,3}}{re.escape(marker[0])}{{{len(marker)},}}[ \t]*"
+        )
+        end = index + 1
+        while end < len(lines) and closing.fullmatch(lines[end]) is None:
+            end += 1
+        if end == len(lines):
+            break
+        if info == "review-result":
+            records.append("\n".join(lines[index + 1:end]))
+        index = end + 1
+    return records, prose
+
+
+def _omp_prose_verdict(line: str) -> str | None:
+    """Normalize one decorated prose verdict label, or return None."""
+    text = line
+    while (prefix := _OMP_PROSE_PREFIX.match(text)) is not None:
+        text = text[prefix.end():]
+    labeled = _OMP_PROSE_SEPARATOR.fullmatch(text.strip())
+    if labeled is None:
+        return None
+    key = _strip_omp_decoration(labeled.group(1)).casefold()
+    if key != "verdict":
+        return None
+    value = _strip_omp_decoration(labeled.group(2))
+    normalized = re.sub(r"[\s_-]+", " ", value).upper()
+    if normalized == "APPROVE":
+        return APPROVED
+    if normalized == "REQUEST CHANGES":
+        return CHANGES_REQUESTED
+    return normalized
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    record = {}
+    for key, value in pairs:
+        if key in record:
+            raise ReviewRecordSchema(
+                f"ReviewRecordSchema: duplicate field {key!r}"
+            )
+        record[key] = value
+    return record
+
+
+def _omp_review_record(text: str) -> tuple[dict, list[str]]:
+    records, prose = _fenced_review_records(text)
+    if not records:
+        raise ReviewRecordMissing(
+            "ReviewRecordMissing: expected exactly one fenced `review-result` record"
+        )
+    if len(records) > 1:
+        raise ReviewRecordMultiple(
+            f"ReviewRecordMultiple: found {len(records)} fenced `review-result` records"
+        )
+    try:
+        record = json.loads(records[0], object_pairs_hook=_unique_json_object)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ReviewRecordInvalidJSON(
+            f"ReviewRecordInvalidJSON: {exc.msg}"
+        ) from exc
+    if not isinstance(record, dict):
+        raise ReviewRecordSchema("ReviewRecordSchema: record must be a JSON object")
+    missing = sorted(_OMP_REVIEW_RECORD_FIELDS - record.keys())
+    extra = sorted(record.keys() - _OMP_REVIEW_RECORD_FIELDS)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing {missing}")
+        if extra:
+            details.append(f"unexpected {extra}")
+        raise ReviewRecordSchema("ReviewRecordSchema: " + ", ".join(details))
+    verdict = record["verdict"]
+    if not isinstance(verdict, str):
+        raise ReviewRecordSchema("ReviewRecordSchema: verdict must be a string")
+    if verdict not in ("APPROVE", "REQUEST CHANGES"):
+        raise ReviewRecordSchema(f"ReviewRecordSchema: unknown verdict {verdict!r}")
+    for field in ("bugs", "nits"):
+        values = record[field]
+        if not isinstance(values, list):
+            raise ReviewRecordSchema(f"ReviewRecordSchema: {field} must be a list")
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ReviewRecordSchema(
+                f"ReviewRecordSchema: {field} entries must be non-empty strings"
+            )
+    reviewed_head = record["reviewed_head"]
+    if (
+        not isinstance(reviewed_head, str)
+        or _OMP_REVIEWED_HEAD.fullmatch(reviewed_head) is None
+    ):
+        raise ReviewRecordSchema(
+            "ReviewRecordSchema: reviewed_head must be a 40-character lowercase hex commit"
+        )
+    return record, prose
 
 
 def parse_omp(text: str) -> tuple[str, list[dict]]:
-    """An omp review reply: the reviewer agent's block, verdict line required.
-
-    The reviewer agent always writes `## Verdict: APPROVE | REQUEST CHANGES`,
-    so a reply without that line (empty, cut off, or some other shape) is a
-    parse failure rather than an approval inferred from the rest of the text.
-    A reply whose verdict labels disagree raises VerdictConflict.
-    """
-    lines = text.splitlines()
-    exact = [
-        matched
-        for line in lines
-        if (matched := _OMP_VERDICT_LINE.fullmatch(line))
+    """Parse one closed OMP review record; prose can only veto its verdict."""
+    record, prose = _omp_review_record(text)
+    verdict = (
+        APPROVED if record["verdict"] == "APPROVE" else CHANGES_REQUESTED
+    )
+    for line in prose:
+        prose_verdict = _omp_prose_verdict(line)
+        if prose_verdict is not None and prose_verdict != verdict:
+            raise VerdictConflict(
+                "VerdictConflict: prose verdict "
+                f"{prose_verdict!r} disagrees with record verdict {record['verdict']!r}"
+            )
+    findings = [
+        _finding(item, "bug", "error") for item in record["bugs"]
+    ] + [
+        _finding(item, "minor", "info") for item in record["nits"]
     ]
-    if not exact:
-        _extract_verdict(lines, "claude")
-        raise ParseError(
-            "no verdict line in the omp reply: expected "
-            "`## Verdict: APPROVE | REQUEST CHANGES`"
-        )
-    # The shared parser checks all vocabularies once and supplies the findings.
-    _, findings = parse_claude_fresh(text)
-    if len(exact) > 1:
-        raise ParseError(
-            f"{len(exact)} verdict lines in the omp reply: expected exactly one "
-            "`## Verdict: APPROVE | REQUEST CHANGES`"
-        )
-    malformed = [
-        line
-        for line in lines
-        if (labeled := _verdict_label_value(line)) is not None
-        and labeled[1]
-        and not _OMP_VERDICT_LINE.fullmatch(line)
-    ]
-    if malformed:
-        raise ParseError(
-            "malformed verdict line in the omp reply: " + repr(malformed[0])
-        )
-    # The verdict comes from the exact line alone.
-    verdict = CHANGES_REQUESTED if exact[0].group(1) == "REQUEST CHANGES" else APPROVED
     return verdict, findings
 
 
@@ -861,10 +981,10 @@ def _parse_return(envelope: dict, backend: str, text: str) -> dict:
     try:
         verdict, findings = selected(text)
     except ParseError as exc:
-        # An omp reply without the reviewer agent's verdict line is a failure
-        # even with the fallback on: another adapter or Jev would infer a
-        # verdict the reviewer never wrote. So is a return with two different
-        # verdicts: the fallback would pick one the reviewer also contradicted.
+        # OMP's structured review record is mandatory even with fallback on:
+        # another adapter or Jev would reintroduce a text-derived verdict.
+        # A conflict in any backend likewise cannot be resolved by choosing
+        # one of the verdicts the reviewer wrote.
         if (
             backend == OMP_LANE
             or isinstance(exc, VerdictConflict)

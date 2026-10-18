@@ -549,7 +549,6 @@ def _adapter_envelope(backend: str, text: str) -> dict:
     [
         pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
         pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
-        pytest.param("omp", review_phase.parse_omp, id="omp"),
     ],
 )
 @pytest.mark.parametrize("decorated", _FULL_SPAN_REQUEST_CHANGES)
@@ -575,7 +574,6 @@ def test_every_adapter_refuses_full_span_conflicting_verdicts(
     [
         pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
         pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
-        pytest.param("omp", review_phase.parse_omp, id="omp"),
     ],
 )
 @pytest.mark.parametrize("decorated", _DECORATED_REQUEST_CHANGES)
@@ -601,7 +599,6 @@ def test_every_adapter_refuses_decorated_conflicting_verdicts(
     [
         pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
         pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
-        pytest.param("omp", review_phase.parse_omp, id="omp"),
     ],
 )
 @pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "approve-first"])
@@ -627,7 +624,6 @@ def test_every_adapter_refuses_cross_vocabulary_conflict(backend, parser, revers
     [
         pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
         pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
-        pytest.param("omp", review_phase.parse_omp, id="omp"),
     ],
 )
 @pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "cleared-first"])
@@ -653,7 +649,6 @@ def test_every_adapter_refuses_inline_grok_heading_conflict(backend, parser, rev
     [
         pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
         pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
-        pytest.param("omp", review_phase.parse_omp, id="omp"),
     ],
 )
 def test_every_adapter_rejects_an_unknown_verdict_value(backend, parser):
@@ -731,18 +726,6 @@ def test_claude_adapter_uses_the_value_inside_a_full_span_label(
     assert verdict == expected
 
 
-def test_omp_accepts_an_agreeing_full_span_label():
-    text = (
-        "## Verdict: REQUEST CHANGES\n\n"
-        "**Verdict: REQUEST CHANGES**\n\n"
-        "### Issues\n"
-        + _ISSUE
-    )
-    verdict, findings = review_phase.parse_omp(text)
-    assert verdict == "changes_requested"
-    assert [(finding["file"], finding["line"]) for finding in findings] == [
-        ("src/report.py", 14)
-    ]
 
 
 def test_findings_bullet_named_verdict_is_not_a_label():
@@ -762,7 +745,6 @@ def test_findings_bullet_named_verdict_is_not_a_label():
     [
         pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
         pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
-        pytest.param("omp", review_phase.parse_omp, id="omp"),
     ],
 )
 @pytest.mark.parametrize("unknown_first", [True, False], ids=["unknown-first", "unknown-last"])
