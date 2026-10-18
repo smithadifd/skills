@@ -3,15 +3,21 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
+import getpass
 import json
 import os
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Iterator, Mapping, Protocol, Sequence
 
 PHASES = ("orient", "plan", "build", "review", "close")
 STEPS = ("orient", "research", "plan", "build", "review", "outward")
@@ -61,6 +67,37 @@ class StoreUnavailable(RuntimeError):
     def __init__(self, message: str, *, code: str | None = None):
         super().__init__(message)
         self.code = code
+
+
+class TicketHeld(StoreUnavailable):
+    """Another writer holds the ticket; this write was refused, not queued."""
+
+    def __init__(self, key: str, holder: str):
+        super().__init__(
+            f"ticket {key} already has a live writer: {holder}. This write was refused, "
+            "not queued; retry after that writer finishes.",
+            code="held",
+        )
+        self.key = key
+        self.holder = holder
+
+
+def _writer_name(writer: str | None) -> str:
+    """Name a store handle so a refused second writer can be told who holds the ticket.
+
+    The name is the caller's writer label (``user@host`` by default) plus this
+    process and a per-handle token, so two handles never share a name.
+    """
+
+    label = (writer or "").strip()
+    if not label:
+        try:
+            user = getpass.getuser()
+        except (KeyError, OSError):
+            user = "unknown"
+        label = f"{user}@{socket.gethostname()}"
+    label = " ".join(label.split())[:120]
+    return f"{label} (pid {os.getpid()}, handle {secrets.token_hex(3)})"
 
 
 @dataclass(frozen=True)
@@ -458,9 +495,15 @@ def _blank_card(key: str, title: str) -> dict[str, Any]:
 
 
 class MarkdownStore:
-    """Ignored ``.ticket/<key>.md`` fallback with embedded structured data."""
+    """Ignored ``.ticket/<key>.md`` fallback with embedded structured data.
 
-    def __init__(self, repo: str | Path, key: str, title: str):
+    Every write holds ``.ticket/<key>.md.lock`` for the whole read, change and
+    replace. The lock is taken without waiting: when another writer holds it,
+    the write is refused with that writer's name. The operating system drops
+    the lock if the holding process dies, and every exit path releases it.
+    """
+
+    def __init__(self, repo: str | Path, key: str, title: str, *, writer: str | None = None):
         if not _KEY.fullmatch(key):
             raise TicketError(f"unsafe ticket key: {key!r}")
         self.repo = Path(repo).resolve()
@@ -468,19 +511,68 @@ class MarkdownStore:
         self.title = title
         self.relative_path = Path(".ticket") / f"{key}.md"
         self.path = self.repo / self.relative_path
+        self.lock_path = self.path.with_name(f"{key}.md.lock")
+        self.holder = _writer_name(writer)
+        self._depth = 0
+
+    @contextlib.contextmanager
+    def _writing(self) -> Iterator[None]:
+        """Hold this ticket's write lock for one write; refuse if it is held."""
+
+        if self._depth:
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+            return
+        self._check_ignored()
+        self._ensure_directory()
+        try:
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            raise StoreUnavailable(f"cannot open the write lock for ticket {self.key}: {exc}") from exc
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                    raise TicketHeld(self.key, _lock_holder(fd)) from None
+                raise StoreUnavailable(f"cannot take the write lock for ticket {self.key}: {exc}") from exc
+            try:
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, self.holder.encode("utf-8"), 0)
+                self._depth = 1
+                yield
+            finally:
+                self._depth = 0
+                with contextlib.suppress(OSError):
+                    os.ftruncate(fd, 0)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def _ensure_directory(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.resolve().relative_to(self.repo)
+        except ValueError as exc:
+            raise StoreUnavailable(".ticket resolves outside the target repository") from exc
 
     def _check_ignored(self) -> None:
-        result = subprocess.run(
-            ["git", "-C", str(self.repo), "check-ignore", "--quiet", "--", str(self.relative_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise StoreUnavailable(
-                f"{self.relative_path.as_posix()} is not git-ignored; add `.ticket/` to "
-                "the target repository's ignore rules and retry. No ignore file was changed."
+        # The card and its lock file must both be ignored, so neither can be committed.
+        for relative in (self.relative_path, self.relative_path.with_name(self.lock_path.name)):
+            result = subprocess.run(
+                ["git", "-C", str(self.repo), "check-ignore", "--quiet", "--", str(relative)],
+                capture_output=True,
+                text=True,
+                check=False,
             )
+            if result.returncode != 0:
+                raise StoreUnavailable(
+                    f"{relative.as_posix()} is not git-ignored; add `.ticket/` to "
+                    "the target repository's ignore rules and retry. No ignore file was changed."
+                )
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -503,12 +595,7 @@ class MarkdownStore:
 
     def _save(self, card: Mapping[str, Any]) -> None:
         self._check_ignored()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        resolved_parent = self.path.parent.resolve()
-        try:
-            resolved_parent.relative_to(self.repo)
-        except ValueError as exc:
-            raise StoreUnavailable(".ticket resolves outside the target repository") from exc
+        self._ensure_directory()
         body = _render_markdown_card(card)
         fd, temporary = tempfile.mkstemp(
             dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp"
@@ -532,56 +619,75 @@ class MarkdownStore:
         refs: Sequence[str] = (),
     ) -> None:
         _validate_stamp(point, phase, next_skills, refs)
-        card = self._load()
-        card["stamps"].append(
-            {
-                "point": point,
-                "phase": phase,
-                "next_skills": list(next_skills),
-                "refs": list(refs),
-                "close": False,
-            }
-        )
-        self._save(card)
+        with self._writing():
+            card = self._load()
+            card["stamps"].append(
+                {
+                    "point": point,
+                    "phase": phase,
+                    "next_skills": list(next_skills),
+                    "refs": list(refs),
+                    "close": False,
+                }
+            )
+            self._save(card)
 
     def confirm_close(self, position: int, point: str) -> None:
-        """Mark that pending close stamp as the close and the card closed."""
+        """Mark that pending close stamp as the close and the card closed.
 
-        card = self._load()
-        _require_pending_close(card["stamps"], position, point)
-        card["stamps"][position]["close"] = True
-        card["status"] = "closed"
-        self._save(card)
+        The check and the write run under one lock, so no stop can land between them.
+        """
+
+        with self._writing():
+            card = self._load()
+            _require_pending_close(card["stamps"], position, point)
+            card["stamps"][position]["close"] = True
+            card["status"] = "closed"
+            self._save(card)
 
     def record_decision(self, decision: DecisionRecord) -> None:
         _validate_decision(decision)
-        card = self._load()
-        card["decisions"].append(decision.as_dict())
-        self._save(card)
+        with self._writing():
+            card = self._load()
+            card["decisions"].append(decision.as_dict())
+            self._save(card)
 
     def record_review(self, review: ReviewRecord) -> None:
         _validate_review(review)
-        card = self._load()
-        card["reviews"].append(review.as_dict())
-        self._save(card)
+        with self._writing():
+            card = self._load()
+            card["reviews"].append(review.as_dict())
+            self._save(card)
 
     def record_plan(self, plan: Mapping[str, Any]) -> str:
         _validate_plan(plan, self.key)
-        card = self._load()
-        ref = self.relative_path.as_posix()
-        card["plan"] = json.loads(json.dumps(plan))
-        card["plan_ref"] = ref
-        self._save(card)
+        with self._writing():
+            card = self._load()
+            ref = self.relative_path.as_posix()
+            card["plan"] = json.loads(json.dumps(plan))
+            card["plan_ref"] = ref
+            self._save(card)
         return ref
 
     def record_tried(self, tried: TriedRecord) -> None:
         _validate_tried(tried)
-        card = self._load()
-        card["tried"].append(tried.as_dict())
-        self._save(card)
+        with self._writing():
+            card = self._load()
+            card["tried"].append(tried.as_dict())
+            self._save(card)
 
     def read_card(self) -> dict[str, Any]:
         return self._load()
+
+
+def _lock_holder(fd: int) -> str:
+    """The name the current lock holder wrote into the lock file."""
+
+    try:
+        name = os.pread(fd, 4096, 0).decode("utf-8", "replace").strip()
+    except OSError:
+        name = ""
+    return name or "a writer that has not recorded its name yet"
 
 
 def _inline(value: Any) -> str:
@@ -656,6 +762,11 @@ class LedgerStore:
     The CLI may require a writer identity in its own environment for writes.
     This adapter never supplies one: the person or their wrapper exports it,
     and a refused write surfaces as ``StoreUnavailable`` with the CLI's message.
+
+    Every write first claims the ticket's status row with the CLI's ``claim``
+    verb, which refuses atomically when another owner holds it. A refused
+    claim is reported with the holder's name, never retried. The write then
+    releases the claim by restoring the status the row had before the claim.
     """
 
     def __init__(
@@ -665,13 +776,63 @@ class LedgerStore:
         *,
         cli: str | Path | None = None,
         db: str | Path | None = None,
+        writer: str | None = None,
     ):
         configured = str(cli) if cli is not None else os.environ.get("TICKET_LEDGER_CLI")
         self.cli = configured or shutil.which("ledger") or ""
         self.db = str(db) if db is not None else os.environ.get("LEDGER_DB")
         self.key = key
         self.title = title
+        self.holder = _writer_name(writer)
         self._ensured = False
+        self._depth = 0
+        self._release_to: str | None = None
+
+    @contextlib.contextmanager
+    def _writing(self) -> Iterator[None]:
+        """Hold this ticket's claim for one write; refuse if another owner holds it."""
+
+        if self._depth:
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+            return
+        self._ensure_item()
+        try:
+            claimed = self._run("claim", self.key, "--owner", self.holder)
+        except StoreUnavailable as exc:
+            if exc.code == "claimed":
+                raise TicketHeld(self.key, self._claim_holder(str(exc))) from exc
+            raise
+        self._release_to = None
+        try:
+            events = self._run("export-item", self.key)["events"]
+            self._release_to = _status_before(events, int(claimed["event"]["id"]))
+            self._depth = 1
+            yield
+        finally:
+            self._depth = 0
+            target, self._release_to = self._release_to, None
+            if target is None:
+                raise StoreUnavailable(
+                    f"ticket {self.key} is still claimed by {self.holder}: its earlier status "
+                    "could not be read. Set it back with the ledger CLI's state verb."
+                )
+            self._run("state", self.key, "--status", target)
+
+    def _claim_holder(self, message: str) -> str:
+        """Who holds the claim, from the CLI's refusal or, failing that, the card."""
+
+        _, _, named = message.partition("claimed by ")
+        if named.strip():
+            return named.strip()
+        try:
+            card = self._card_envelope() or {}
+        except StoreUnavailable:
+            card = {}
+        return str(card.get("owner") or card.get("claim") or "an owner the ledger did not name")
 
     def is_installed(self) -> bool:
         return bool(self.cli) and os.path.isfile(self.cli) and os.access(self.cli, os.X_OK)
@@ -742,51 +903,55 @@ class LedgerStore:
         refs: Sequence[str] = (),
     ) -> None:
         _validate_stamp(point, phase, next_skills, refs)
-        self._ensure_item()
         payload: dict[str, Any] = {"point": point, "phase": phase}
         if next_skills:
             payload["skills"] = list(next_skills)
         if refs:
             payload["refs"] = list(refs)
-        self._append("item.stopped", payload)
+        with self._writing():
+            self._append("item.stopped", payload)
 
     def confirm_close(self, position: int, point: str) -> None:
-        """Name that pending close's stop event as the close, then mark the item closed."""
+        """Name that pending close's stop event as the close, then mark the item closed.
 
-        self._ensure_item()
-        events = self._run("export-item", self.key)["events"]
-        stops = [event for event in events if event["kind"] == "item.stopped"]
-        _require_pending_close([event["payload"] for event in stops], position, point)
-        self._append("item.note", {"text": f"{_CLOSE_NOTE}{int(stops[position]['id'])}"})
-        self._run("state", self.key, "--status", "closed")
+        The check, the close note and the closed status all happen under one
+        claim; releasing that claim is the write that sets the status closed.
+        """
+
+        with self._writing():
+            events = self._run("export-item", self.key)["events"]
+            stops = [event for event in events if event["kind"] == "item.stopped"]
+            _require_pending_close([event["payload"] for event in stops], position, point)
+            self._append("item.note", {"text": f"{_CLOSE_NOTE}{int(stops[position]['id'])}"})
+            self._release_to = "closed"
 
     def record_decision(self, decision: DecisionRecord) -> None:
         _validate_decision(decision)
-        self._ensure_item()
-        source_data = self._append("outside.recorded", decision.source.as_dict())
-        source_event_id = int(source_data["event"]["id"])
-        payload = decision.as_dict()
-        payload.pop("source")
-        payload["source"] = decision.source.ref
-        payload["source_event_id"] = source_event_id
-        self._append("decision.recorded", payload)
+        with self._writing():
+            source_data = self._append("outside.recorded", decision.source.as_dict())
+            source_event_id = int(source_data["event"]["id"])
+            payload = decision.as_dict()
+            payload.pop("source")
+            payload["source"] = decision.source.ref
+            payload["source_event_id"] = source_event_id
+            self._append("decision.recorded", payload)
 
     def record_review(self, review: ReviewRecord) -> None:
         _validate_review(review)
-        self._ensure_item()
-        self._append("review.recorded", review.as_dict())
+        with self._writing():
+            self._append("review.recorded", review.as_dict())
 
     def record_plan(self, plan: Mapping[str, Any]) -> str:
         _validate_plan(plan, self.key)
-        self._ensure_item()
         text = _PLAN_NOTE + json.dumps(plan, sort_keys=True, separators=(",", ":"))
-        data = self._append("item.note", {"text": text})
+        with self._writing():
+            data = self._append("item.note", {"text": text})
         return f"event:{int(data['event']['id'])}"
 
     def record_tried(self, tried: TriedRecord) -> None:
         _validate_tried(tried)
-        self._ensure_item()
-        self._append("item.tried", tried.as_dict())
+        with self._writing():
+            self._append("item.tried", tried.as_dict())
 
     def _append(self, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self._run(
@@ -805,6 +970,21 @@ class LedgerStore:
             return _blank_card(self.key, self.title)
         events = self._run("export-item", self.key)["events"]
         return _normalize_ledger_card(card, events)
+
+
+def _status_before(events: Sequence[Mapping[str, Any]], event_id: int | None = None) -> str:
+    """The ticket's status just before ``event_id`` (or now), ignoring write claims."""
+
+    status = "open"
+    for event in events:
+        if event_id is not None and int(event["id"]) >= event_id:
+            break
+        payload = event.get("payload") or {}
+        if event["kind"] == "item.created" and payload.get("status"):
+            status = str(payload["status"])
+        elif event["kind"] == "item.state" and payload.get("status") not in (None, "claimed"):
+            status = str(payload["status"])
+    return status
 
 
 def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -854,13 +1034,15 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
         elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_CLOSE_NOTE):
             named = payload["text"][len(_CLOSE_NOTE) :]
             close_id = int(named) if named.isdigit() else None
+    # A write in progress shows as claimed; the ticket's status is the one under it.
+    status = card["status"] if card.get("status") != "claimed" else _status_before(events)
     # Only the stop the latest close note names is the close, and only while closed.
-    if card.get("status") == "closed" and close_id in stop_ids:
+    if status == "closed" and close_id in stop_ids:
         stamps[stop_ids.index(close_id)]["close"] = True
     return {
         "key": card["item_id"],
         "title": card["title"],
-        "status": card["status"],
+        "status": status,
         "stamps": stamps,
         "decisions": decisions,
         "reviews": reviews,
@@ -877,6 +1059,7 @@ def choose_store(
     *,
     cli: str | Path | None = None,
     db: str | Path | None = None,
+    writer: str | None = None,
 ) -> StoreAdapter:
     """Use the ledger when its CLI is installed; markdown only when it is not.
 
@@ -884,9 +1067,9 @@ def choose_store(
     markdown card: a silent fallback would split one ticket across two stores.
     """
 
-    ledger = LedgerStore(key, title, cli=cli, db=db)
+    ledger = LedgerStore(key, title, cli=cli, db=db, writer=writer)
     if not ledger.is_installed():
-        return MarkdownStore(repo, key, title)
+        return MarkdownStore(repo, key, title, writer=writer)
     try:
         ledger.doctor()
     except StoreUnavailable as exc:
@@ -1419,6 +1602,7 @@ __all__ = [
     "StoreUnavailable",
     "Ticket",
     "TicketError",
+    "TicketHeld",
     "TicketPass",
     "TicketSource",
     "TriedRecord",
