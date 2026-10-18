@@ -44,7 +44,7 @@ Backends (one adapter each, chosen by the envelope's `inputs.backend`):
 
 The OMP verdict comes only from that record. A verdict-like prose line may
 confirm it, but a disagreement fails as `VerdictConflict`; missing, multiple,
-invalid-JSON, and schema-invalid records each have a distinct refusal name.
+unterminated, invalid-JSON, and schema-invalid records have distinct refusals.
 The claude-fresh and grok-notools adapters retain their text contracts.
 
 The adapters normalise a return that a runner already obtained; dispatching
@@ -118,6 +118,10 @@ class ReviewRecordMissing(ParseError):
 
 class ReviewRecordMultiple(ParseError):
     """The OMP reply contains more than one fenced review-result record."""
+
+
+class ReviewRecordUnterminated(ParseError):
+    """The OMP reply contains an unclosed review-result record."""
 
 
 class ReviewRecordInvalidJSON(ParseError):
@@ -553,8 +557,9 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
 
 _OMP_REVIEW_RECORD_FIELDS = {"verdict", "bugs", "nits", "reviewed_head"}
 _OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
-_OMP_PROSE_PREFIX = re.compile(r"^\s{0,3}(?:#{1,6}|[-+*]|>)\s+")
-_OMP_PROSE_SEPARATOR = re.compile(r"^(.*?)(?:\s*[:=—–]\s*)(.*)$")
+_OMP_HTML_TAG = re.compile(r"<[^>]*>")
+_OMP_VERDICT_WORD = re.compile(r"\bverdict\b")
+_OMP_PROSE_QUALIFIER = re.compile(r"^\s*\([^()\n]*\)\s*")
 
 
 def _strip_omp_decoration(text: str) -> str:
@@ -574,10 +579,24 @@ def _strip_omp_decoration(text: str) -> str:
     return text[start:end]
 
 
-def _fenced_review_records(text: str) -> tuple[list[str], list[str]]:
-    """Return exact-info review-result bodies and lines outside all fences."""
+def _canonicalize_omp_prose(text: str) -> str:
+    """Canonicalize prose before deciding whether it states a verdict."""
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(
+        character
+        for character in text
+        if unicodedata.category(character) != "Cf"
+    )
+    text = _OMP_HTML_TAG.sub("", text)
+    return text.casefold()
+
+
+def _fenced_review_records(
+    text: str,
+) -> tuple[list[tuple[str, bool]], list[str]]:
+    """Return review-result bodies with closure state and all other lines."""
     lines = text.splitlines()
-    records: list[str] = []
+    records: list[tuple[str, bool]] = []
     prose: list[str] = []
     index = 0
     while index < len(lines):
@@ -594,32 +613,58 @@ def _fenced_review_records(text: str) -> tuple[list[str], list[str]]:
         end = index + 1
         while end < len(lines) and closing.fullmatch(lines[end]) is None:
             end += 1
-        if end == len(lines):
-            break
+        closed = end < len(lines)
+        content_end = end if closed else len(lines)
         if info == "review-result":
-            records.append("\n".join(lines[index + 1:end]))
+            records.append(("\n".join(lines[index + 1:content_end]), closed))
+        else:
+            prose.extend(lines[index:(end + 1 if closed else len(lines))])
+        if not closed:
+            break
         index = end + 1
     return records, prose
 
 
-def _omp_prose_verdict(line: str) -> str | None:
-    """Normalize one decorated prose verdict label, or return None."""
-    text = line
-    while (prefix := _OMP_PROSE_PREFIX.match(text)) is not None:
-        text = text[prefix.end():]
-    labeled = _OMP_PROSE_SEPARATOR.fullmatch(text.strip())
-    if labeled is None:
-        return None
-    key = _strip_omp_decoration(labeled.group(1)).casefold()
-    if key != "verdict":
-        return None
-    value = _strip_omp_decoration(labeled.group(2))
-    normalized = re.sub(r"[\s_-]+", " ", value).upper()
-    if normalized == "APPROVE":
-        return APPROVED
-    if normalized == "REQUEST CHANGES":
-        return CHANGES_REQUESTED
-    return normalized
+def _omp_prose_value(text: str) -> str:
+    """Remove structural decoration surrounding a prose verdict value."""
+    text = text.strip()
+    while (qualifier := _OMP_PROSE_QUALIFIER.match(text)) is not None:
+        text = text[qualifier.end():].lstrip()
+    return _strip_omp_decoration(text)
+
+
+def _omp_prose_verdicts(lines: list[str]) -> list[str]:
+    """Return every prose verdict, refusing any unclassifiable mention."""
+    canonical = [_canonicalize_omp_prose(line) for line in lines]
+    verdicts = []
+    for index, line in enumerate(canonical):
+        matches = list(_OMP_VERDICT_WORD.finditer(line))
+        if not matches:
+            continue
+        if len(matches) != 1:
+            raise VerdictConflict(
+                "VerdictConflict: prose line contains multiple verdict keys"
+            )
+        value = _omp_prose_value(line[matches[0].end():])
+        if not value:
+            value = next(
+                (
+                    _omp_prose_value(candidate)
+                    for candidate in canonical[index + 1:]
+                    if candidate.strip()
+                ),
+                "",
+            )
+        normalized = re.sub(r"[\s_-]+", " ", value).upper()
+        if normalized == "APPROVE":
+            verdicts.append(APPROVED)
+        elif normalized == "REQUEST CHANGES":
+            verdicts.append(CHANGES_REQUESTED)
+        else:
+            raise VerdictConflict(
+                f"VerdictConflict: unrecognized prose verdict value {value!r}"
+            )
+    return verdicts
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
@@ -643,8 +688,13 @@ def _omp_review_record(text: str) -> tuple[dict, list[str]]:
         raise ReviewRecordMultiple(
             f"ReviewRecordMultiple: found {len(records)} fenced `review-result` records"
         )
+    body, closed = records[0]
+    if not closed:
+        raise ReviewRecordUnterminated(
+            "ReviewRecordUnterminated: fenced `review-result` record is not closed"
+        )
     try:
-        record = json.loads(records[0], object_pairs_hook=_unique_json_object)
+        record = json.loads(body, object_pairs_hook=_unique_json_object)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ReviewRecordInvalidJSON(
             f"ReviewRecordInvalidJSON: {exc.msg}"
@@ -685,14 +735,13 @@ def _omp_review_record(text: str) -> tuple[dict, list[str]]:
 
 
 def parse_omp(text: str) -> tuple[str, list[dict]]:
-    """Parse one closed OMP review record; prose can only veto its verdict."""
+    """Parse one closed OMP review record; prose can only confirm or veto it."""
     record, prose = _omp_review_record(text)
     verdict = (
         APPROVED if record["verdict"] == "APPROVE" else CHANGES_REQUESTED
     )
-    for line in prose:
-        prose_verdict = _omp_prose_verdict(line)
-        if prose_verdict is not None and prose_verdict != verdict:
+    for prose_verdict in _omp_prose_verdicts(prose):
+        if prose_verdict != verdict:
             raise VerdictConflict(
                 "VerdictConflict: prose verdict "
                 f"{prose_verdict!r} disagrees with record verdict {record['verdict']!r}"

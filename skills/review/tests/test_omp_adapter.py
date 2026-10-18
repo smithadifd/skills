@@ -134,6 +134,19 @@ def test_approve_record_parses_with_no_findings():
     }
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(_record().replace("\n", "\r\n"), id="crlf"),
+        pytest.param(_record().replace("```", "~~~"), id="tilde-fence"),
+    ],
+)
+def test_supported_fence_variants_parse(text):
+    result = review_phase.run_phase(_envelope(text))
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
+
+
 def test_schema_accepts_omp_as_a_backend():
     schema = json.loads((SKILL_DIR / "findings.schema.json").read_text())
     assert schema["properties"]["backend"]["enum"] == [
@@ -154,6 +167,19 @@ DECORATIONS = (
     "- {key}: {value}",
     "> `{key}`: `{value}`",
     "## **[{key}]**: **[{value}]**",
+    "## {key}\n{value}",
+    "## VERDICT\n\n{value}",
+    "| field | value |\n|---|---|\n| {key} | {value} |",
+    "<b>{key}</b>: {value}",
+    "<strong>{key}:</strong> {value}",
+    "<strong>{key}</strong>: {value}",
+    "𝐕𝐞𝐫𝐝𝐢𝐜𝐭: {value}",
+    "Ver\u200bdict: {value}",
+    "\u200b{key}: {value}",
+    "{key}：{value}",
+    "{key} - {value}",
+    "{key} {value}",
+    "{key} (final): {value}",
 )
 PROSE_VERDICTS = ("APPROVE", "REQUEST CHANGES")
 DECORATION_CASES = [
@@ -202,7 +228,7 @@ def test_decorated_prose_never_supplies_and_can_only_veto_the_record(
     "text, expected_status, reason_name",
     [
         pytest.param(
-            "Verdict: APPROVE\n\n" + _record(),
+            "<strong>𝐕𝐞\u200br𝐝𝐢𝐜𝐭</strong>： **APPROVE**\n\n" + _record(),
             "success",
             None,
             id="matching-prose",
@@ -241,6 +267,18 @@ def test_two_records_are_refused_by_name():
     assert "ReviewRecordMultiple" in _reason(_record() + "\n" + _record())
 
 
+def test_an_unterminated_second_record_counts_as_multiple():
+    unterminated = _record("REQUEST CHANGES").rsplit("```", 1)[0]
+    reason = _reason(_record() + "\n" + unterminated)
+    assert "ReviewRecordMultiple" in reason, reason
+
+
+def test_one_unterminated_record_is_refused_by_name():
+    unterminated = _record().rsplit("```", 1)[0]
+    reason = _reason(unterminated)
+    assert "ReviewRecordUnterminated" in reason, reason
+
+
 def test_invalid_json_is_refused_by_name():
     text = '```review-result\n{"verdict": "APPROVE",}\n```\n'
     assert "ReviewRecordInvalidJSON" in _reason(text)
@@ -270,6 +308,14 @@ def test_invalid_json_is_refused_by_name():
         pytest.param(_record(bugs=[1]), id="typed-bug-entry"),
         pytest.param(_record(reviewed_head="abc123"), id="short-reviewed-head"),
         pytest.param(_record(reviewed_head="A" * 40), id="uppercase-reviewed-head"),
+        pytest.param(_record(bugs=[""]), id="empty-bug-entry"),
+        pytest.param(_record(bugs=["  "]), id="whitespace-bug-entry"),
+        pytest.param(_record(verdict="approve"), id="lowercase-verdict"),
+        pytest.param(_record(verdict="APPROVE "), id="trailing-space-verdict"),
+        pytest.param(
+            _record(reviewed_head=HEAD + "\n"),
+            id="newline-reviewed-head",
+        ),
     ],
 )
 def test_schema_failures_are_refused_by_name(text):
@@ -278,10 +324,30 @@ def test_schema_failures_are_refused_by_name(text):
     assert "ReviewRecordSchema" in result["reason"]
 
 
-def test_conflicting_prose_is_refused_by_name():
-    assert "VerdictConflict" in _reason(
-        "Verdict: REQUEST CHANGES\n\n" + _record("APPROVE")
-    )
+@pytest.mark.parametrize(
+    "prose",
+    ["Verdict: REQUEST CHANGES", "Verdict: approved"],
+)
+def test_conflicting_prose_is_refused_by_name(prose):
+    assert "VerdictConflict" in _reason(prose + "\n\n" + _record("APPROVE"))
+
+
+def test_an_unparseable_verdict_mention_is_refused_by_name():
+    reason = _reason("The verdict remains under discussion.\n\n" + _record())
+    assert "VerdictConflict" in reason, reason
+
+
+def test_a_plain_fence_cannot_hide_conflicting_prose():
+    text = _record() + "\n```\nVerdict: REQUEST CHANGES\n"
+    reason = _reason(text)
+    assert "VerdictConflict" in reason, reason
+
+
+@pytest.mark.parametrize("indent", ["> ", "    "])
+def test_a_nested_second_record_cannot_bypass_the_conflict_guard(indent):
+    nested = indent + _record("REQUEST CHANGES").replace("\n", "\n" + indent)
+    reason = _reason(_record() + "\n" + nested)
+    assert "VerdictConflict" in reason, reason
 
 
 def test_clean_sentinel_never_upgrades_a_missing_record():
@@ -303,13 +369,27 @@ def test_clean_sentinel_never_upgrades_a_schema_failure():
     assert "ReviewRecordSchema" in result["reason"]
 
 
-def test_only_an_exact_review_result_info_string_counts():
-    assert "ReviewRecordMissing" in _reason(
+@pytest.mark.parametrize(
+    "text",
+    [
         "```review-result extra\n"
         '{"verdict":"APPROVE","bugs":[],"nits":[],"reviewed_head":"'
         + HEAD
-        + '"}\n```\n'
-    )
+        + '"}\n```\n',
+        "> ```review-result\n"
+        '> {"verdict":"APPROVE","bugs":[],"nits":[],"reviewed_head":"'
+        + HEAD
+        + '"}\n> ```\n',
+        "````text\n"
+        "```review-result\n"
+        '{"verdict":"APPROVE","bugs":[],"nits":[],"reviewed_head":"'
+        + HEAD
+        + '"}\n```\n````\n',
+    ],
+    ids=("info-string-variant", "blockquote", "nested-fence"),
+)
+def test_only_a_top_level_exact_review_result_fence_counts(text):
+    assert "ReviewRecordMissing" in _reason(text)
 
 
 @pytest.mark.parametrize("text", ["", "\n", OMP_NO_RECORD])
