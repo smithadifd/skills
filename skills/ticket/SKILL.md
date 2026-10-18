@@ -87,10 +87,37 @@ raises `StoreUnavailable` with the CLI's message: tell the person to export the
 writer-identity variable that message names (in their shell or the wrapper that
 starts the session), then retry.
 
-With no ledger CLI installed, use `<target-repo>/.ticket/<key>.md`. Before every write, the markdown
-adapter runs `git check-ignore` for that card. If it is not ignored, stop and
-say: add `.ticket/` to the target repository's ignore rules, then retry. Do not
-edit an ignore file silently. Never stage or commit `.ticket/`.
+With no ledger CLI installed, the card lives at `<target-repo>/.ticket/<key>.md`,
+in the repository's ignored scratch, next to its lock file
+`.ticket/<key>.md.lock`. Before every write, the markdown adapter runs
+`git check-ignore` for both files. If either is not ignored, stop and say: add
+`.ticket/` to the target repository's ignore rules, then retry. Do not edit an
+ignore file silently. Never stage or commit `.ticket/`.
+
+### One writer per ticket
+
+A ticket has at most one live writer at a time, whichever store holds it.
+Every store write takes the ticket for the length of that write and releases
+it on every exit path, including an exception:
+
+- **markdown** — an exclusive lock on `.ticket/<key>.md.lock`, held across
+  the whole read, change and replace of the card. The holder writes its name
+  into the lock file. The operating system drops the lock if the holding
+  process dies.
+- **ledger** — the CLI's `claim` verb on the ticket's status row, which
+  refuses atomically when another owner holds it. Releasing the claim restores
+  the status the row had before it (a close releases to `closed`). Readers see
+  that earlier status while a write is in flight.
+
+The lock or claim is never waited for. When another writer holds the ticket,
+the write raises `TicketHeld` naming the ticket and the holder (`writer`
+label, process id, and handle), and nothing is written. Tell the person who
+holds it and retry after that writer finishes. Pass `writer=` to the store or
+to `choose_store` to label this session; the default is `user@host`. If a
+ledger claim outlives a crashed writer, the refusal keeps naming it: once the
+person confirms that writer is gone, set the status back with the CLI's
+`state` verb (`ledger state <key> --status open`, or `closed` for a closed
+ticket).
 
 ## 1. Orient
 
