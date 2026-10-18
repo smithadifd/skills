@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import fcntl
 import importlib.util
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import replace as dataclasses_replace
 from pathlib import Path
 
 import pytest
@@ -83,9 +85,15 @@ def to_build(store):
     return session
 
 
-def resume(store, value=None):
+def resume(store, value=None, pass_id=None):
+    """Continue the live pass ``pass_id``, or start a new pass from the card when it is None."""
+
     src = StaticSource(value) if value is not None else source()
-    return ticket.TicketPass.open(KEY, src, store, resume=True)
+    return ticket.TicketPass.open(KEY, src, store, resume=True, pass_id=pass_id)
+
+
+def plan_go_effect(revision, pass_id):
+    return f"The plan gate is approved for plan revision {revision} presented by pass {pass_id}."
 
 
 def test_fixture_source_exposes_live_ticket_and_design_links():
@@ -178,7 +186,7 @@ def test_plan_and_outward_go_are_hard_stops():
     session.close("Ticket pass complete.", refs=("example/repo#14",))
     assert session.phase == "closed"
     assert [item["effect"] for item in store.card["decisions"]] == [
-        "The plan gate is approved for plan revision 1.",
+        plan_go_effect(1, session.pass_id),
         "The outward gate is approved for plan revision 1.",
     ]
     assert store.card["stamps"][-1]["close"] is True
@@ -196,7 +204,7 @@ def test_both_hard_stops_are_stamped_before_the_stop_is_exposed():
         "refs": [plan_ref],
         "close": False,
     }
-    assert resume(store).phase == "plan_go"
+    assert resume(store, pass_id=session.pass_id).phase == "plan_go"
 
     session.record_go("plan", evidence="conversation:plan-go", verbatim="Go.")
     session.begin_build()
@@ -208,7 +216,7 @@ def test_both_hard_stops_are_stamped_before_the_stop_is_exposed():
         "refs": [store.card["plan_ref"], "reviews/round-1.md"],
         "close": False,
     }
-    assert resume(store).phase == "outward_go"
+    assert resume(store, pass_id=session.pass_id).phase == "outward_go"
 
 
 def test_a_failed_stop_stamp_does_not_expose_the_stop():
@@ -309,7 +317,7 @@ def test_plan_card_open_questions_and_tried_persist_and_resume_rebuilds_the_pass
     session.record_tried("Retry in the client.", outcome="Too chatty.", evidence="notes/retry.md")
     session.record_review("changes", evidence="reviews/1", passed_criteria=(0,))
 
-    resumed = resume(store)
+    resumed = resume(store, pass_id=session.pass_id)
     assert resumed.phase == "build"
     assert resumed.review_round == 1
     assert resumed.plan_revision == 1
@@ -345,7 +353,7 @@ def test_resume_flags_changed_acceptance_criteria_and_never_keeps_them_passing()
         live.links,
         "2026-10-18T09:00:00Z",
     )
-    resumed = resume(store, changed)
+    resumed = resume(store, changed, pass_id=session.pass_id)
     assert resumed.phase == "plan"
     assert [item.passes for item in resumed.plan.acceptance_criteria] == [True, False]
     flags = "\n".join(resumed.reconciliation)
@@ -365,7 +373,7 @@ def test_round_cap_counts_recorded_rounds_across_resumes():
     session.record_review("changes", evidence="reviews/1")
     session.record_review("changes", evidence="reviews/2")
 
-    after_two = resume(store)
+    after_two = resume(store, pass_id=session.pass_id)
     assert after_two.phase == "build"
     assert after_two.review_round == 2
     after_two.record_review("changes", evidence="reviews/3")
@@ -387,7 +395,7 @@ def test_forged_passes_in_the_store_are_not_trusted_on_resume():
     forged["acceptance_criteria"][0].update(passes=True, review_evidence="x", review_round=9)
     forged["acceptance_criteria"][1].update(passes=True, review_evidence="x", review_round=1)
 
-    resumed = resume(store)
+    resumed = resume(store, pass_id=session.pass_id)
     assert [item.passes for item in resumed.plan.acceptance_criteria] == [False, False]
     assert sum("not backed by a recorded review round" in flag for flag in resumed.reconciliation) == 2
     assert resumed.phase == "build"
@@ -466,14 +474,20 @@ def at_plan_revision_two(store):
     first.finish_orient()
     first.finish_research()
     first.present_plan(ticket.PlanCard(earlier))
-    session = resume(store)
+    session = resume(store, pass_id=first.pass_id)
     assert session.phase == "plan"
     session.present_plan(ticket.PlanCard(session.ticket))
     assert (session.plan_revision, session.phase) == (2, "plan_go")
     return session
 
 
-def one_fault_go(gate, fault):
+def go_effect(gate, revision, pass_id):
+    if gate == "plan":
+        return plan_go_effect(revision, pass_id)
+    return f"The {gate} gate is approved for plan revision {revision}."
+
+
+def one_fault_go(gate, fault, pass_id):
     """The person's settled ratification of a gate at revision 2, wrong in one field only."""
 
     fields = dict(
@@ -481,7 +495,7 @@ def one_fault_go(gate, fault):
         who_kind="person",
         standing="settled",
         source=ticket.DecisionSource("ratification", "conversation:go"),
-        effect=f"The {gate} gate is approved for plan revision 2.",
+        effect=go_effect(gate, 2, pass_id),
         tags=({"type": "ticket", "id": KEY},),
         verbatim="Go.",
         phase="plan" if gate == "plan" else "review",
@@ -495,7 +509,7 @@ def one_fault_go(gate, fault):
     elif fault == "tag":
         fields.update(tags=({"type": "ticket", "id": "EK-OTHER"},))
     elif fault == "older_revision":
-        fields.update(effect=f"The {gate} gate is approved for plan revision 1.")
+        fields.update(effect=go_effect(gate, 1, pass_id))
     else:
         assert fault == "none"
     return ticket.DecisionRecord(**fields)
@@ -515,7 +529,7 @@ def test_each_go_check_alone_keeps_every_gate_shut(fault):
 
     store = MemoryStore()
     session = at_plan_revision_two(store)
-    store.record_decision(one_fault_go("plan", fault))
+    store.record_decision(one_fault_go("plan", fault, session.pass_id))
     refused(session.begin_build)
 
     store = MemoryStore()
@@ -523,7 +537,7 @@ def test_each_go_check_alone_keeps_every_gate_shut(fault):
     session.record_go("plan", evidence="conversation:plan-go", verbatim="Go.")
     session.begin_build()
     session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
-    store.record_decision(one_fault_go("outward", fault))
+    store.record_decision(one_fault_go("outward", fault, session.pass_id))
     refused(session.require_outward_go)
     refused(lambda: session.close("Done.", refs=("example/repo#14",)))
     assert session.phase == ("closed" if fault == "none" else "outward_go")
@@ -684,10 +698,11 @@ def exercise_store(store):
 def run_full_pass(store):
     session = to_build(store)
     session.record_review("changes", evidence="reviews/1", passed_criteria=(0,))
-    resumed = ticket.TicketPass.open(KEY, source(), store, resume=True)
+    # Each later step continues the same pass, as a new process would.
+    resumed = ticket.TicketPass.open(KEY, source(), store, resume=True, pass_id=session.pass_id)
     assert (resumed.phase, resumed.review_round) == ("build", 1)
     resumed.record_review("pass", evidence="reviews/2", passed_criteria=(0, 1))
-    again = ticket.TicketPass.open(KEY, source(), store, resume=True)
+    again = ticket.TicketPass.open(KEY, source(), store, resume=True, pass_id=session.pass_id)
     assert again.phase == "outward_go"
     again.record_go("outward", evidence="conversation:outward", verbatim="Open the PR.")
     again.close("Ticket pass complete.", refs=("example/repo#14",))
@@ -736,8 +751,13 @@ def test_full_pass_through_markdown_and_fake_ledger_matches(tmp_path, monkeypatc
         card.pop("plan_ref")
         for stamp in card["stamps"]:
             stamp["refs"] = [ref for ref in stamp["refs"] if not ref.startswith((".ticket/", "event:"))]
+        # Each run has its own pass id; the plan and its plan go both name it.
+        pass_id = card["plan"].pop("pass")
+        assert card["decisions"][0]["effect"] == plan_go_effect(1, pass_id)
+        card["decisions"][0]["effect"] = "plan go"
     assert ledger_card == markdown_card
     assert markdown_card["status"] == "closed"
+    assert markdown_card["pass"] is None
 
 
 @pytest.mark.parametrize("kind", ("markdown", "ledger"))
@@ -778,6 +798,14 @@ def concrete_store(kind, tmp_path, monkeypatch, *mixins):
         return cls(init_ignored_repo(tmp_path), KEY, TITLE)
     cls = type("Store", (*mixins, ticket.LedgerStore), {})
     return cls(KEY, TITLE, cli=fake_ledger(tmp_path, monkeypatch), db=tmp_path / "ledger.db")
+
+
+def fresh_handle(store, writer=None):
+    """Another handle on the same ticket and store, as another process would open."""
+
+    if isinstance(store, ticket.MarkdownStore):
+        return ticket.MarkdownStore(store.repo, KEY, TITLE, writer=writer)
+    return ticket.LedgerStore(KEY, TITLE, cli=store.cli, db=store.db, writer=writer)
 
 
 def approved_for_close(store):
@@ -858,6 +886,12 @@ def test_a_closed_store_with_a_later_stop_does_not_resume_as_closed(kind, tmp_pa
     session.close("Done.", refs=("example/repo#14",))
     assert resume(store).phase == "closed"
 
+    # A handle whose pass ended writes nothing more, so the later stop
+    # comes from another handle with no pass of its own.
+    with pytest.raises(ticket.StoreUnavailable, match="has ended") as ended:
+        store.write_stamp("Later stop.", "review", ("ticket",))
+    assert ended.value.code == "pass_ended"
+    store = fresh_handle(store)
     store.write_stamp("Later stop.", "review", ("ticket",))
     assert store.read_card()["status"] == "closed"
     assert last_two(store) == [("Done.", True), ("Later stop.", False)]
@@ -1182,50 +1216,293 @@ def latest_state(cli):
     return {name: value for name, value in states[-1].items() if name != "source"} if states else None
 
 
-def check_second_pass_is_refused_and_the_first_plan_is_intact(make_store):
-    first_store, second_store = make_store("pass-a"), make_store("pass-b")
-    first = ticket.TicketPass.open(KEY, source(), first_store)
-    second = ticket.TicketPass.open(KEY, source(), second_store)
-    for session in (first, second):
-        session.finish_orient()
-        session.finish_research()
-    first.present_plan(ticket.PlanCard(first.ticket))
+def check_a_pass_holds_the_ticket_across_processes(make_store):
+    """The reviewers' window: pass A stops at plan go, its process exits, pass B opens.
 
-    plan_b = ticket.PlanCard(second.ticket)
-    plan_b.add_open_question("Plan B was never approved.")
+    Every ``make_store`` call is a new handle, as a new process opens one.
+    """
+
+    a_store = make_store("pass-a")
+    first = ticket.TicketPass.open(KEY, source(), a_store)
+    first.finish_orient()
+    first.finish_research()
+    first.present_plan(ticket.PlanCard(first.ticket))
+    pass_a = first.pass_id
+    assert pass_a
+    # Process 1 of pass A ends at the plan go stop; its pass record stays.
+    del first
+    assert make_store("reader").read_card()["pass"] == {"id": pass_a, "holder": a_store.holder}
+
+    # Pass B opens a fresh handle while A waits for the person's go.
+    b_store = make_store("pass-b")
     with pytest.raises(ticket.TicketHeld) as refused:
-        second.present_plan(plan_b)
-    assert (refused.value.key, refused.value.holder) == (KEY, first_store.holder)
-    assert f"ticket {KEY} already has a live writer: {first_store.holder}" in str(refused.value)
-    assert second.phase == "plan"
+        ticket.TicketPass.open(KEY, source(), b_store, resume=True)
+    assert (refused.value.key, refused.value.holder) == (KEY, a_store.holder)
+    assert f"ticket {KEY} already has a live writer: {a_store.holder}" in str(refused.value)
+    assert f"Its pass {pass_a} is live" in str(refused.value)
+    assert f"python3 ticket.py release-pass {KEY} {pass_a}" in str(refused.value)
+    # B's handle, outside any pass, is refused by A's name too.
+    with pytest.raises(ticket.TicketHeld) as refused:
+        b_store.write_stamp("Plan B, never shown to the person.", "plan")
+    assert refused.value.holder == a_store.holder
+    # So is a pass id that is not the live pass's.
+    with pytest.raises(ticket.TicketHeld) as refused:
+        ticket.TicketPass.open(KEY, source(), make_store("pass-b"), pass_id="0123456789abcdef")
+    assert refused.value.holder == a_store.holder
     card = make_store("reader").read_card()
-    assert card["plan"]["open_questions"] == []
+    assert card["pass"] == {"id": pass_a, "holder": a_store.holder}
     assert [stamp["point"] for stamp in card["stamps"]] == ["Waiting at plan go for plan revision 1."]
 
-    # The second pass's handle stays refused, even after it reads the card
-    # again; the first pass goes on with its own plan.
-    assert second_store.read_card()["plan"]["open_questions"] == []
-    with pytest.raises(ticket.TicketHeld):
-        second_store.record_decision(
-            ticket.DecisionRecord(
-                "the person",
-                "person",
-                "settled",
-                ticket.DecisionSource("ratification", "conversation:late"),
-                "The plan gate is approved for plan revision 1.",
-                ({"type": "ticket", "id": KEY},),
-                "Go.",
-                "plan",
-            )
-        )
-    first.record_go("plan", evidence="conversation:plan-go", verbatim="Go with this plan.")
-    first.begin_build()
+    # Process 2 of pass A: the person said go, and A continues with its pass id.
+    second = ticket.TicketPass.open(KEY, source(), make_store("pass-a"), resume=True, pass_id=pass_a)
+    assert second.phase == "plan_go"
+    second.record_go("plan", evidence="conversation:plan-go", verbatim="Go with this plan.")
+    second.begin_build()
     card = make_store("reader").read_card()
     assert card["plan"]["open_questions"] == []
-    assert [decision["source"]["ref"] for decision in card["decisions"]] == ["conversation:plan-go"]
+    assert card["plan"]["pass"] == pass_a
+    assert [stamp["point"] for stamp in card["stamps"]] == ["Waiting at plan go for plan revision 1."]
+    assert [(item["source"]["ref"], item["effect"]) for item in card["decisions"]] == [
+        ("conversation:plan-go", plan_go_effect(1, pass_a))
+    ]
 
-    # Resumed from a new handle, the refused pass reads the first pass's plan.
-    assert ticket.TicketPass.open(KEY, source(), make_store("pass-b"), resume=True).phase == "build"
+    # Only after A ends may B start; it then reads A's approved plan.
+    second.end("the test is done with pass A")
+    assert make_store("reader").read_card()["pass"] is None
+    later = ticket.TicketPass.open(KEY, source(), make_store("pass-b"), resume=True)
+    assert later.phase == "build"
+    later.end()
+
+
+def check_the_pass_record_is_released_on_every_exit_path(make_store):
+    def live():
+        return make_store("reader").read_card()["pass"]
+
+    # Normal exit: a more-information stop ends the pass.
+    session = ticket.TicketPass.open(KEY, source(), make_store("asks"))
+    session.more_info("person", "Which API owns retries?")
+    assert (session.live, live()) == (False, None)
+
+    # A validation refusal changes nothing, so the pass stays live.
+    session = ticket.TicketPass.open(KEY, source(), make_store("validates"))
+    with pytest.raises(ticket.TicketError):
+        session.record_review("pass", evidence="reviews/1")
+    assert session.live
+    assert live() == {"id": session.pass_id, "holder": session.store.holder}
+    session.end()
+    assert live() is None
+
+    # Error exit: a store call fails mid-pass.
+    failing = make_store("fails")
+    session = ticket.TicketPass.open(KEY, source(), failing)
+
+    def disk_went_away(*args, **kwargs):
+        raise RuntimeError("disk went away mid-write")
+
+    failing.write_stamp = disk_went_away
+    with pytest.raises(RuntimeError, match="mid-write"):
+        session.more_info("person", "Which API owns retries?")
+    assert (session.live, live()) == (False, None)
+    del failing.write_stamp
+    with pytest.raises(ticket.StoreUnavailable, match="has ended"):
+        failing.write_stamp("Written after the pass ended.", "orient")
+
+    # Error exit: an exception leaves a with block over the pass.
+    with pytest.raises(RuntimeError, match="left the block"):
+        with ticket.TicketPass.open(KEY, source(), make_store("with-block")) as session:
+            assert live() == {"id": session.pass_id, "holder": session.store.holder}
+            raise RuntimeError("left the block")
+    assert (session.live, live()) == (False, None)
+
+    # Refusal exit: pass A's record was cleared by a person, as after a
+    # crash, and pass B started. A's next write is refused by B's name, A
+    # ends, and A's ending leaves B's record alone.
+    a = ticket.TicketPass.open(KEY, source(), make_store("pass-a"))
+    make_store("person").clear_pass(a.pass_id)
+    b_store = make_store("pass-b")
+    b = ticket.TicketPass.open(KEY, source(), b_store)
+    with pytest.raises(ticket.TicketHeld) as refused:
+        a.record_tried("Retry in the client.")
+    assert refused.value.holder == b_store.holder
+    assert not a.live
+    assert live() == {"id": b.pass_id, "holder": b_store.holder}
+    with pytest.raises(ticket.TicketHeld):
+        make_store("person").clear_pass(a.pass_id)
+    b.end()
+    assert live() is None
+    assert [item["what"] for item in make_store("reader").read_card()["tried"]] == []
+
+
+def markdown_harness(tmp_path):
+    repo = init_ignored_repo(tmp_path)
+
+    def make_store(writer=None):
+        return ticket.MarkdownStore(repo, KEY, TITLE, writer=writer)
+
+    return make_store
+
+
+def test_markdown_pass_holds_the_ticket_across_processes(tmp_path):
+    check_a_pass_holds_the_ticket_across_processes(markdown_harness(tmp_path))
+
+
+def test_markdown_pass_record_is_released_on_every_exit_path(tmp_path):
+    check_the_pass_record_is_released_on_every_exit_path(markdown_harness(tmp_path))
+
+
+def test_markdown_pass_is_released_when_its_write_is_refused_by_the_lock(tmp_path):
+    make_store = markdown_harness(tmp_path)
+
+    class ContendedOnce(ticket.MarkdownStore):
+        contend = False
+
+        def _acquire(self, directory):
+            if self.contend:
+                self.contend = False
+                raise ticket.TicketHeld(KEY, "a writer mid-write (pid 1, handle abcdef)")
+            return super()._acquire(directory)
+
+    store = ContendedOnce(make_store().repo, KEY, TITLE, writer="contended")
+    session = ticket.TicketPass.open(KEY, source(), store)
+    store.contend = True
+    with pytest.raises(ticket.TicketHeld, match="a writer mid-write"):
+        session.more_info("person", "Which API owns retries?")
+    assert not session.live
+    assert make_store().read_card()["pass"] is None
+    assert make_store().read_card()["stamps"] == []
+
+
+def test_a_plan_go_counts_only_for_the_pass_that_presented_the_plan():
+    store = MemoryStore()
+    session = to_plan_go(store)
+    pass_a = session.pass_id
+    assert store.card["plan"]["pass"] == pass_a
+
+    # The person's settled go, naming another pass's plan, opens nothing.
+    go = one_fault_go("plan", "none", "0123456789abcdef")
+    store.record_decision(dataclasses_replace(go, effect=plan_go_effect(1, "0123456789abcdef")))
+    with pytest.raises(ticket.GateRequired):
+        session.begin_build()
+    assert session.live
+
+    # A go is not recorded against a stored plan this pass did not present.
+    store.card["plan"]["pass"] = "0123456789abcdef"
+    with pytest.raises(ticket.StoreUnavailable, match="no plan go was recorded") as refused:
+        session.record_go("plan", evidence="conversation:plan-go", verbatim="Go.")
+    assert refused.value.code == "plan_changed"
+    assert not session.live
+    assert [item["source"]["ref"] for item in store.card["decisions"]] == ["conversation:go"]
+    store.card["plan"]["pass"] = pass_a
+
+    # Pass A crashed at plan go and a person cleared it. Pass C resumes at
+    # plan, not at plan go, so the person's go always follows the plan the
+    # pass that asked for it presented.
+    store.card["pass"] = {"id": pass_a, "holder": "crashed"}
+    store.clear_pass(pass_a)
+    resumed = resume(store)
+    assert resumed.phase == "plan"
+    assert (
+        "plan revision 1 was presented by another pass and has no plan go; resuming at plan to present it again"
+        in resumed.reconciliation
+    )
+    resumed.present_plan(ticket.PlanCard(resumed.ticket))
+    resumed.record_go("plan", evidence="conversation:plan-go", verbatim="Go.")
+    resumed.begin_build()
+    assert store.card["decisions"][-1]["effect"] == plan_go_effect(2, resumed.pass_id)
+
+
+STALE_DIRECTORY_WRITER = r"""
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("ticket_stale_writer", sys.argv[1])
+ticket = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = ticket
+spec.loader.exec_module(ticket)
+try:
+    ticket.MarkdownStore(sys.argv[2], sys.argv[3], "T", writer="child").write_stamp("x", "build")
+except ticket.TicketHeld as held:
+    print(held.holder, flush=True)
+else:
+    print("written", flush=True)
+"""
+
+
+def test_stale_lock_replacement_refuses_while_another_process_holds_the_directory_lock(tmp_path):
+    repo = init_ignored_repo(tmp_path)
+    store = ticket.MarkdownStore(repo, KEY, TITLE, writer="contender")
+    store._ensure_directory()
+    store.lock_path.write_text("dead-writer (pid 1, handle abcdef)", encoding="utf-8")
+    directory = os.open(store.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fcntl.flock(directory, fcntl.LOCK_EX)
+    try:
+        started = time.monotonic()
+        child = subprocess.Popen(
+            [sys.executable, "-c", STALE_DIRECTORY_WRITER, str(SKILL_DIR / "ticket.py"), str(repo), KEY],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            out, err = child.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate(timeout=10)
+            pytest.fail("the writer blocked on the directory lock instead of refusing")
+        elapsed = time.monotonic() - started
+    finally:
+        fcntl.flock(directory, fcntl.LOCK_UN)
+        os.close(directory)
+    assert child.returncode == 0, err
+    assert out.strip() == "another writer replacing the stale lock left by dead-writer (pid 1, handle abcdef)"
+    assert elapsed < 5
+    assert store.read_card()["stamps"] == []
+    store.write_stamp("Written once the directory lock is free.", "build")
+    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == ["Written once the directory lock is free."]
+
+
+def release_command(key, pass_id, *extra, env):
+    return subprocess.run(
+        [sys.executable, str(SKILL_DIR / "ticket.py"), "release-pass", key, pass_id, *extra],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **env},
+    )
+
+
+@pytest.mark.parametrize("kind", ("markdown", "ledger"))
+def test_a_person_clears_a_crashed_pass_with_the_documented_command(kind, tmp_path, monkeypatch):
+    if kind == "markdown":
+        make_store = markdown_harness(tmp_path)
+        extra, env = ("--repo", str(make_store().repo)), {"TICKET_LEDGER_CLI": str(tmp_path / "no-ledger")}
+    else:
+        fake = fake_ledger(tmp_path, monkeypatch)
+        db = tmp_path / "ledger.db"
+
+        def make_store(writer=None):
+            return ticket.LedgerStore(KEY, TITLE, cli=fake, db=db, writer=writer)
+
+        extra, env = (), {"TICKET_LEDGER_CLI": str(fake), "LEDGER_DB": str(db)}
+    crashed_store = make_store("crashed-pass")
+    crashed = ticket.TicketPass.open(KEY, source(), crashed_store)
+    pass_id = crashed.pass_id
+    del crashed  # its process died without ending the pass
+
+    with pytest.raises(ticket.TicketHeld) as refused:
+        ticket.TicketPass.open(KEY, source(), make_store("next-pass"), resume=True)
+    assert refused.value.holder == crashed_store.holder
+
+    wrong = release_command(KEY, "0123456789abcdef", *extra, env=env)
+    assert wrong.returncode == 1
+    assert crashed_store.holder in wrong.stderr
+    assert make_store().read_card()["pass"] == {"id": pass_id, "holder": crashed_store.holder}
+
+    cleared = release_command(KEY, pass_id, *extra, env=env)
+    assert (cleared.returncode, cleared.stdout.strip()) == (0, f"released pass {pass_id} on ticket {KEY}"), cleared.stderr
+    assert make_store().read_card()["pass"] is None
+    nxt = ticket.TicketPass.open(KEY, source(), make_store("next-pass"), resume=True)
+    assert nxt.live
+    nxt.end()
 
 
 def check_a_writer_that_passed_the_revision_check_is_refused(make_store):
@@ -1285,8 +1562,64 @@ def check_a_ticket_claimed_for_work_stays_claimed_and_writable(cli, make_store):
     assert make_store().read_card()["status"] == "claimed"
 
 
-def test_ledger_second_pass_is_refused_by_name_and_the_first_plan_is_intact(tmp_path, monkeypatch):
-    check_second_pass_is_refused_and_the_first_plan_is_intact(fake_ledger_harness(tmp_path, monkeypatch)[1])
+def check_a_write_between_the_check_and_the_append_is_refused_by_name(cli, make_store):
+    """A ledger state event lands between a write's revision check and its append.
+
+    The CLI cannot make the two one step, so the skill's event still lands;
+    the read after the append finds the interleaved event and refuses by name.
+    """
+
+    class ExternalRace(ticket.LedgerStore):
+        inject = None
+
+        def _run(self, *args):
+            if args[0] == "append" and self.inject is not None:
+                inject, self.inject = self.inject, None
+                inject()
+            return super()._run(*args)
+
+    template = make_store()
+    store = ExternalRace(KEY, TITLE, cli=template.cli, db=template.db, writer="skill-pass")
+    session = ticket.TicketPass.open(KEY, source(), store)
+    interleaved = {}
+    store.inject = lambda: interleaved.update(cli("state", KEY, "--status", "blocked", "--blocked-by", "EK-99"))
+    with pytest.raises(ticket.TicketHeld) as refused:
+        session.record_tried("Retry in the client.", outcome="Too chatty.")
+    event_id = interleaved["event"]["id"]
+    assert refused.value.holder.endswith(f"(ledger event {event_id})")
+    message = str(refused.value)
+    assert f"wrote ledger event {event_id} between this write's revision check and its append" in message
+    assert "still landed after it" in message
+    # The refusal ended the pass and released its record; the handle writes nothing more.
+    assert not session.live
+    assert make_store("reader").read_card()["pass"] is None
+    with pytest.raises(ticket.StoreUnavailable, match="has ended"):
+        store.write_stamp("Written after the refusal.", "build")
+    events = cli("export-item", KEY)["events"]
+    tried = [event["id"] for event in events if event["kind"] == "item.tried"]
+    assert len(tried) == 1 and tried[0] > event_id
+    assert latest_state(cli) == {"status": "blocked", "blocked_by": ["EK-99"]}
+
+    # A handle outside any pass is refused the same way.
+    bare = ExternalRace(KEY, TITLE, cli=template.cli, db=template.db, writer="bare")
+    bare.read_card()
+    bare.inject = lambda: interleaved.update(cli("state", KEY, "--status", "open"))
+    with pytest.raises(ticket.TicketHeld, match="between this write's revision check and its append"):
+        bare.write_stamp("Must not land silently after the state write.", "build")
+    with pytest.raises(ticket.TicketHeld):
+        bare.write_stamp("Nor may the next write.", "build")
+
+
+def test_ledger_pass_holds_the_ticket_across_processes(tmp_path, monkeypatch):
+    check_a_pass_holds_the_ticket_across_processes(fake_ledger_harness(tmp_path, monkeypatch)[1])
+
+
+def test_ledger_pass_record_is_released_on_every_exit_path(tmp_path, monkeypatch):
+    check_the_pass_record_is_released_on_every_exit_path(fake_ledger_harness(tmp_path, monkeypatch)[1])
+
+
+def test_ledger_write_between_the_check_and_the_append_is_refused_by_name(tmp_path, monkeypatch):
+    check_a_write_between_the_check_and_the_append_is_refused_by_name(*fake_ledger_harness(tmp_path, monkeypatch))
 
 
 def test_ledger_writer_that_passed_the_revision_check_is_refused_by_the_append_key(tmp_path, monkeypatch):
@@ -1437,7 +1770,9 @@ def test_real_ledger_cli_adapter_when_configured(tmp_path):
         cli("new", "--id", KEY, "--type", "ticket", "--title", TITLE)
         return cli, make_store
 
-    check_second_pass_is_refused_and_the_first_plan_is_intact(harness("two-passes")[1])
+    check_a_pass_holds_the_ticket_across_processes(harness("two-passes")[1])
+    check_the_pass_record_is_released_on_every_exit_path(harness("exit-paths")[1])
+    check_a_write_between_the_check_and_the_append_is_refused_by_name(*harness("interleaved"))
     check_a_writer_that_passed_the_revision_check_is_refused(harness("append-key")[1])
     check_a_stale_view_is_refused_by_the_cli_writer_name(*harness("stale-view"))
     check_writes_keep_owner_claim_and_blocked_by(*harness("carried-state"))

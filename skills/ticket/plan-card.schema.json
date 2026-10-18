@@ -13,6 +13,7 @@
     "revision": {"type": "integer", "minimum": 1},
     "ticket_status": {"type": "string"},
     "ticket_updated_at": {"type": "string"},
+    "pass": {"type": "string", "minLength": 1, "description": "The pass that presented this plan revision; a plan go names it."},
     "open_questions": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "acceptance_criteria": {
       "type": "array",

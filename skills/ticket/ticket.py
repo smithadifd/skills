@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import errno
 import fcntl
+import functools
 import getpass
 import json
 import os
@@ -15,7 +17,9 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Protocol, Sequence
@@ -96,6 +100,61 @@ def _writer_name(writer: str | None) -> str:
         label = f"{user}@{socket.gethostname()}"
     label = " ".join(label.split())[:120]
     return f"{label} (pid {os.getpid()}, handle {secrets.token_hex(3)})"
+
+
+# One live pass per ticket. A pass takes the ticket's pass record when it
+# starts and keeps it, across processes, until it ends. The record names the
+# pass and the writer that started it; it is not the ticket's work claim.
+_PASS_PREFIX = "ticket-pass/v1 "
+
+
+def _release_command(key: str, pass_id: str) -> str:
+    return f"python3 ticket.py release-pass {key} {pass_id}"
+
+
+def _held_by_pass(key: str, live: Mapping[str, Any]) -> TicketHeld:
+    return TicketHeld(
+        key,
+        str(live["holder"]),
+        detail=(
+            f"Its pass {live['id']} is live, so this write was refused, not queued; retry after that "
+            "pass ends. If that pass crashed, a person clears its record with "
+            f"`{_release_command(key, str(live['id']))}` (add `--repo <path>` for a markdown card)."
+        ),
+    )
+
+
+def _check_pass(
+    key: str, live: Mapping[str, Any] | None, mine: str | None, ended: str | None
+) -> None:
+    """Refuse a write unless this handle may write under the ticket's pass record.
+
+    A handle bound to a pass writes only while that pass is the live one. An
+    unbound handle writes only while no pass is live. A handle whose pass has
+    ended writes nothing until it starts a new pass.
+    """
+
+    if ended is not None:
+        raise StoreUnavailable(
+            f"pass {ended} on ticket {key} has ended, so nothing was written. Start a new pass to write again.",
+            code="pass_ended",
+        )
+    if mine is None:
+        if live is not None:
+            raise _held_by_pass(key, live)
+        return
+    if live is not None and live["id"] == mine:
+        return
+    if live is not None:
+        raise _held_by_pass(key, live)
+    raise StoreUnavailable(
+        f"pass {mine} is no longer live on ticket {key}, so nothing was written. Start a new pass to write again.",
+        code="pass_ended",
+    )
+
+
+def _new_pass_id() -> str:
+    return secrets.token_hex(8)
 
 
 @dataclass(frozen=True)
@@ -360,6 +419,14 @@ class StoreAdapter(Protocol):
 
     def read_card(self) -> dict[str, Any]: ...
 
+    def take_pass(self) -> str: ...
+
+    def join_pass(self, pass_id: str) -> None: ...
+
+    def release_pass(self, reason: str) -> None: ...
+
+    def clear_pass(self, pass_id: str) -> None: ...
+
 
 def _validate_phase(phase: str) -> None:
     if phase not in PHASES:
@@ -489,6 +556,7 @@ def _blank_card(key: str, title: str) -> dict[str, Any]:
         "plan": None,
         "plan_ref": None,
         "tried": [],
+        "pass": None,
     }
 
 
@@ -504,6 +572,10 @@ class MarkdownStore:
     regular, singly-linked file is refused. The lock is taken without
     waiting. If the holding process dies, the operating system drops its
     ``flock`` and the next writer replaces the stale node.
+
+    The card's ``pass`` field is the ticket's pass record: the live pass's id
+    and the writer that started it. It is read and changed under the same
+    lock as every other write, and every write checks it first.
     """
 
     def __init__(self, repo: str | Path, key: str, title: str, *, writer: str | None = None):
@@ -517,6 +589,9 @@ class MarkdownStore:
         self.lock_path = self.path.with_name(f"{key}.md.lock")
         self.holder = _writer_name(writer)
         self._depth = 0
+        # The pass this handle writes for, and the pass it ended, if any.
+        self._pass: str | None = None
+        self._ended: str | None = None
 
     @contextlib.contextmanager
     def _writing(self) -> Iterator[None]:
@@ -620,7 +695,8 @@ class MarkdownStore:
             # No live owner: the writer that left this node has exited. Replace
             # it under the directory's own lock, held only for the check and
             # the rename, so two writers cannot both replace the same node.
-            fcntl.flock(directory, fcntl.LOCK_EX)
+            # That lock is taken without waiting, like the ticket's own.
+            self._lock_directory(directory, other)
             try:
                 current = os.stat(name, dir_fd=directory, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != (node.st_dev, node.st_ino):
@@ -633,6 +709,24 @@ class MarkdownStore:
                 fcntl.flock(directory, fcntl.LOCK_UN)
         finally:
             os.close(other)
+
+    def _lock_directory(self, directory: int, stale: int) -> None:
+        """Take the directory's lock without waiting; refuse after a few quick tries."""
+
+        for attempt in range(_DIRECTORY_LOCK_TRIES):
+            try:
+                fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                    raise
+            if attempt + 1 < _DIRECTORY_LOCK_TRIES:
+                time.sleep(_LOCK_PAUSE)
+        raise TicketHeld(
+            self.key,
+            f"another writer replacing the stale lock left by {_lock_holder(stale)}",
+            detail="This write was refused, not queued; retry after that writer finishes.",
+        )
 
     def _unsafe_node(self, what: str) -> StoreUnavailable:
         return StoreUnavailable(
@@ -723,8 +817,7 @@ class MarkdownStore:
         refs: Sequence[str] = (),
     ) -> None:
         _validate_stamp(point, phase, next_skills, refs)
-        with self._writing():
-            card = self._load()
+        with self._mutate() as card:
             card["stamps"].append(
                 {
                     "point": point,
@@ -734,7 +827,6 @@ class MarkdownStore:
                     "close": False,
                 }
             )
-            self._save(card)
 
     def confirm_close(self, position: int, point: str) -> None:
         """Mark that pending close stamp as the close and the card closed.
@@ -742,46 +834,101 @@ class MarkdownStore:
         The check and the write run under one lock, so no stop can land between them.
         """
 
-        with self._writing():
-            card = self._load()
+        with self._mutate() as card:
             _require_pending_close(card["stamps"], position, point)
             card["stamps"][position]["close"] = True
             card["status"] = "closed"
-            self._save(card)
 
     def record_decision(self, decision: DecisionRecord) -> None:
         _validate_decision(decision)
-        with self._writing():
-            card = self._load()
+        with self._mutate() as card:
             card["decisions"].append(decision.as_dict())
-            self._save(card)
 
     def record_review(self, review: ReviewRecord) -> None:
         _validate_review(review)
-        with self._writing():
-            card = self._load()
+        with self._mutate() as card:
             card["reviews"].append(review.as_dict())
-            self._save(card)
 
     def record_plan(self, plan: Mapping[str, Any]) -> str:
         _validate_plan(plan, self.key)
-        with self._writing():
-            card = self._load()
-            ref = self.relative_path.as_posix()
+        ref = self.relative_path.as_posix()
+        with self._mutate() as card:
             card["plan"] = json.loads(json.dumps(plan))
             card["plan_ref"] = ref
-            self._save(card)
         return ref
 
     def record_tried(self, tried: TriedRecord) -> None:
         _validate_tried(tried)
-        with self._writing():
-            card = self._load()
+        with self._mutate() as card:
             card["tried"].append(tried.as_dict())
-            self._save(card)
 
     def read_card(self) -> dict[str, Any]:
         return self._load()
+
+    @contextlib.contextmanager
+    def _mutate(self) -> Iterator[dict[str, Any]]:
+        """Under the write lock: load the card, check the pass record, change and save it."""
+
+        with self._writing():
+            card = self._load()
+            _check_pass(self.key, card.get("pass"), self._pass, self._ended)
+            yield card
+            self._save(card)
+
+    def take_pass(self) -> str:
+        """Start a pass: write the pass record, or refuse by the live pass's holder."""
+
+        with self._writing():
+            card = self._load()
+            _check_pass(self.key, card.get("pass"), None, None)
+            pass_id = _new_pass_id()
+            card["pass"] = {"id": pass_id, "holder": self.holder}
+            self._save(card)
+        self._pass, self._ended = pass_id, None
+        return pass_id
+
+    def join_pass(self, pass_id: str) -> None:
+        """Continue a live pass from this handle; refuse unless it is that pass."""
+
+        _text(pass_id, "pass id")
+        with self._writing():
+            _check_pass(self.key, self._load().get("pass"), pass_id, None)
+        self._pass, self._ended = pass_id, None
+
+    def release_pass(self, reason: str) -> None:
+        """End this handle's pass: clear the record while it is still that pass's."""
+
+        pass_id = self._pass
+        if pass_id is None:
+            return
+        self._pass, self._ended = None, pass_id
+        # A refused writer holds the lock only for its own check, so a release
+        # that meets one tries again a few times; it never waits on a lock.
+        for attempt in range(_RELEASE_TRIES):
+            try:
+                with self._writing():
+                    card = self._load()
+                    live = card.get("pass")
+                    if live is not None and live.get("id") == pass_id:
+                        card["pass"] = None
+                        self._save(card)
+                return
+            except TicketHeld:
+                if attempt + 1 == _RELEASE_TRIES:
+                    raise
+                time.sleep(_LOCK_PAUSE)
+
+    def clear_pass(self, pass_id: str) -> None:
+        """A person's recovery: release the named pass, refusing unless it is the live one."""
+
+        self.join_pass(pass_id)
+        self.release_pass("cleared by a person")
+
+
+# Quick, bounded tries: the directory lock and a release never wait longer.
+_DIRECTORY_LOCK_TRIES = 10
+_RELEASE_TRIES = 20
+_LOCK_PAUSE = 0.01
 
 
 def _lock_holder(fd: int) -> str:
@@ -807,6 +954,9 @@ def _render_markdown_card(card: Mapping[str, Any]) -> str:
         "",
         f"Status: {_inline(card['status'])}",
     ]
+    live = card.get("pass")
+    if live:
+        lines.append(f"Live pass: {_inline(live['id'])}, started by {_inline(live['holder'])}")
     lines.extend(("", "## Stop and close stamps"))
     if card["stamps"]:
         for stamp in card["stamps"]:
@@ -878,6 +1028,21 @@ class LedgerStore:
     passed the check from the same revision, only the first append lands and
     the second is refused by the first one's name.
 
+    A pass spans processes, so a handle's revision cannot carry it. The
+    ticket's pass record does: a ``session.opened`` event whose purpose names
+    the pass, written when the pass starts, and a ``session.closed`` event
+    naming it when the pass ends. The check before every append also requires
+    that the live pass is this handle's (or, for a handle outside any pass,
+    that no pass is live).
+
+    The CLI cannot make that check and the append one step: it has no
+    expected-revision option, and the idempotency key only collides with
+    another append under the same key. A write made through some other verb
+    between the check and the append still lands. So after every append the
+    adapter reads the ticket's events again, and if any event landed between
+    the revision it checked and its own, it refuses, naming that event's
+    writer and saying that its own event landed after it.
+
     The adapter claims nothing and never writes the ticket's status, owner,
     claim or blocked-by fields, except to mark the ticket closed; that write
     carries the owner, claim and blocked-by fields over unchanged.
@@ -902,6 +1067,9 @@ class LedgerStore:
         # The ticket revision this handle has accounted for; None until it
         # first reads or writes the ticket.
         self._seen: int | None = None
+        # The pass this handle writes for, and the pass it ended, if any.
+        self._pass: str | None = None
+        self._ended: str | None = None
 
     def is_installed(self) -> bool:
         return bool(self.cli) and os.path.isfile(self.cli) and os.access(self.cli, os.X_OK)
@@ -976,8 +1144,11 @@ class LedgerStore:
                     self._seen = int((created.get("event") or {}).get("id") or 0)
         self._ensured = True
 
-    def _current_events(self) -> list[dict[str, Any]]:
-        """The ticket's events, refusing when any is newer than this handle's revision."""
+    def _current_events(self, *, taking: bool = False) -> list[dict[str, Any]]:
+        """The ticket's events, refusing a newer event or a pass this handle may not write under.
+
+        ``taking`` is the check for starting a pass: no pass may be live.
+        """
 
         self._ensure_item()
         events = self._events()
@@ -986,7 +1157,67 @@ class LedgerStore:
         newer = [event for event in events if int(event["id"]) > self._seen]
         if newer:
             raise self._stale(newer[-1])
+        live = _live_pass(events)
+        if taking:
+            _check_pass(self.key, live, None, None)
+        else:
+            _check_pass(self.key, live, self._pass, self._ended)
         return events
+
+    def take_pass(self) -> str:
+        """Start a pass: append its pass record, or refuse by the live pass's holder."""
+
+        pass_id = _new_pass_id()
+        self._append("session.opened", {"purpose": f"{_PASS_PREFIX}{pass_id}"}, taking=True)
+        self._pass, self._ended = pass_id, None
+        return pass_id
+
+    def join_pass(self, pass_id: str) -> None:
+        """Continue a live pass from this handle; refuse unless it is that pass.
+
+        The handle's revision is pinned here; the pass record, not the
+        revision, is what kept other passes out between this pass's processes.
+        """
+
+        _text(pass_id, "pass id")
+        events = self._events()
+        _check_pass(self.key, _live_pass(events), pass_id, None)
+        self._pass, self._ended = pass_id, None
+        self._seen = _revision(events)
+        self._ensured = True
+
+    def release_pass(self, reason: str) -> None:
+        """End this handle's pass: append the release while its record is still open.
+
+        The release carries its own idempotency key and no revision
+        precondition: ending a pass only gives up the ticket, so it is safe
+        whatever landed since.
+        """
+
+        pass_id = self._pass
+        if pass_id is None:
+            return
+        self._pass, self._ended, self._seen = None, pass_id, None
+        if not any(item["id"] == pass_id for item in _open_passes(self._events())):
+            return
+        body = {"outcome": f"{_PASS_PREFIX}{pass_id} released: {reason}", "source": self.holder}
+        self._run(
+            "append",
+            "--kind",
+            "session.closed",
+            "--item",
+            self.key,
+            "--idempotency-key",
+            f"ticket-pass/{self.key}/{pass_id}/released",
+            "--payload",
+            json.dumps(body, sort_keys=True, separators=(",", ":")),
+        )
+
+    def clear_pass(self, pass_id: str) -> None:
+        """A person's recovery: release the named pass, refusing unless it is the live one."""
+
+        self.join_pass(pass_id)
+        self.release_pass("cleared by a person")
 
     def _stale(self, event: Mapping[str, Any] | None) -> TicketHeld:
         if event is None:
@@ -996,8 +1227,8 @@ class LedgerStore:
             _event_writer(event),
             detail=(
                 f"It wrote ledger event {int(event['id'])} after this pass read the ticket, so this "
-                "write was refused, not queued. Resume the ticket from a new store handle to read "
-                "that writer's changes before writing again."
+                "write was refused, not queued. Start a new pass, which reads that writer's "
+                "changes, before writing again."
             ),
         )
 
@@ -1053,16 +1284,21 @@ class LedgerStore:
         _validate_tried(tried)
         self._append("item.tried", tried.as_dict())
 
-    def _append(self, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Append one event only if the ticket is still at this handle's revision."""
+    def _append(self, kind: str, payload: Mapping[str, Any], *, taking: bool = False) -> dict[str, Any]:
+        """Append one event only if the ticket is still at this handle's revision and pass.
 
-        self._current_events()
+        The check and the append are two CLI calls, so the append is followed
+        by a read that refuses when anything landed between them.
+        """
+
+        self._current_events(taking=taking)
+        seen = self._seen
         body = dict(payload)
         if kind in _NAMED_KINDS:
             # The writer's name rides on the event, so a refused writer can be
             # told who wrote first, and two writers never send the same event.
             body["source"] = self.holder
-        idempotency_key = f"ticket-write/{self.key}/after/{self._seen}"
+        idempotency_key = f"ticket-write/{self.key}/after/{seen}"
         try:
             data = self._run(
                 "append",
@@ -1083,8 +1319,28 @@ class LedgerStore:
                 None,
             )
             raise self._stale(first) from exc
-        self._seen = int(data["event"]["id"])
+        landed = int(data["event"]["id"])
+        self._verify_landed(seen, landed)
+        self._seen = landed
         return data
+
+    def _verify_landed(self, seen: int | None, landed: int) -> None:
+        """Refuse, by name, when another event landed between this write's check and its append."""
+
+        between = [event for event in self._events() if (seen or 0) < int(event["id"]) < landed]
+        if not between:
+            return
+        event = between[-1]
+        raise TicketHeld(
+            self.key,
+            _event_writer(event),
+            detail=(
+                f"It wrote ledger event {int(event['id'])} between this write's revision check and its "
+                f"append. The ledger CLI cannot make the two one step, so this write still landed after "
+                f"it, as ledger event {landed}, and was not undone. Start a new pass, which reads both, "
+                "and decide with the person whether either needs repairing."
+            ),
+        )
 
     def read_card(self) -> dict[str, Any]:
         card = self._card_envelope()
@@ -1101,13 +1357,47 @@ class LedgerStore:
 # Event kinds whose payload may carry a ``source``; the adapter puts the
 # writer's name there. A decision's ``source`` is its outside event's ref.
 _NAMED_KINDS = frozenset(
-    ("item.stopped", "item.note", "item.tried", "item.state", "review.recorded", "outside.recorded")
+    (
+        "item.stopped",
+        "item.note",
+        "item.tried",
+        "item.state",
+        "review.recorded",
+        "outside.recorded",
+        "session.opened",
+        "session.closed",
+    )
 )
 _HOLDER = re.compile(r".+ \(pid \d+, handle [0-9a-f]{6}\)")
 
 
 def _revision(events: Sequence[Mapping[str, Any]]) -> int:
     return max((int(event["id"]) for event in events), default=0)
+
+
+def _open_passes(events: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """Pass records started and not yet released, oldest first."""
+
+    open_: dict[str, dict[str, str]] = {}
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("kind") == "session.opened":
+            text = str(payload.get("purpose") or "")
+            if text.startswith(_PASS_PREFIX) and text[len(_PASS_PREFIX) :].strip():
+                pass_id = text[len(_PASS_PREFIX) :].strip()
+                open_.setdefault(pass_id, {"id": pass_id, "holder": _event_writer(event)})
+        elif event.get("kind") == "session.closed":
+            text = str(payload.get("outcome") or "")
+            if text.startswith(_PASS_PREFIX) and text[len(_PASS_PREFIX) :].split():
+                open_.pop(text[len(_PASS_PREFIX) :].split()[0], None)
+    return list(open_.values())
+
+
+def _live_pass(events: Sequence[Mapping[str, Any]]) -> dict[str, str] | None:
+    """The ticket's live pass: the oldest pass record not yet released."""
+
+    passes = _open_passes(events)
+    return passes[0] if passes else None
 
 
 def _event_writer(event: Mapping[str, Any]) -> str:
@@ -1196,6 +1486,7 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
         "plan": plan,
         "plan_ref": plan_ref,
         "tried": tried,
+        "pass": _live_pass(events),
     }
 
 
@@ -1237,16 +1528,29 @@ class MoreInfoExit:
     drafted_ask: str | None = None
 
 
-def _go_effect(gate: str, revision: int) -> str:
+def _go_effect(gate: str, revision: int, pass_id: str | None = None) -> str:
+    """The effect a go decision records; a plan go names the pass that presented the plan."""
+
+    if gate == "plan" and pass_id:
+        return f"The plan gate is approved for plan revision {revision} presented by pass {pass_id}."
     return f"The {gate} gate is approved for plan revision {revision}."
 
 
+def _plan_pass(card: Mapping[str, Any]) -> str | None:
+    plan = card.get("plan")
+    value = plan.get("pass") if isinstance(plan, Mapping) else None
+    return value if isinstance(value, str) and value else None
+
+
 def _has_go(card: Mapping[str, Any], gate: str, revision: int, key: str) -> bool:
-    """A gate is open only through a person's settled ratification in the store."""
+    """A gate is open only through a person's settled ratification in the store.
+
+    A plan go counts only for the plan revision the stored plan's own pass presented.
+    """
 
     if revision < 1:
         return False
-    effect = _go_effect(gate, revision)
+    effect = _go_effect(gate, revision, _plan_pass(card) if gate == "plan" else None)
     tag = {"type": "ticket", "id": key}
     for decision in card.get("decisions") or ():
         source = decision.get("source") or {}
@@ -1356,11 +1660,39 @@ def _reconcile(
     return plan, flags, changed
 
 
+def _ends_on_failure(method):
+    """A failure past validation ends the pass: its record is released, then the error raises.
+
+    A ``TicketError`` (an invalid value, a wrong phase, a gate not yet
+    approved) changes nothing in the store, so the pass stays live.
+    """
+
+    @functools.wraps(method)
+    def guarded(self: "TicketPass", *args: Any, **kwargs: Any) -> Any:
+        try:
+            return method(self, *args, **kwargs)
+        except TicketError:
+            raise
+        except BaseException as exc:
+            self._end_quietly(f"a store call failed: {type(exc).__name__}")
+            raise
+
+    return guarded
+
+
 class TicketPass:
     """Guarded transitions for one pass; outward actions remain caller-owned.
 
     The phase, the review-round count and the gates are read-only. Gates are
     derived from go decisions the store recorded, never from session state.
+
+    A pass holds the ticket's pass record from ``open`` until it ends, across
+    processes: a later process continues it with ``open(..., pass_id=...)``.
+    It ends, releasing the record, when the ticket is closed, at a
+    more-information exit, at the review-round cap, when a store call fails
+    or a write is refused, when an exception leaves a ``with`` block over the
+    pass, or on ``end()``. The plan go and outward go stops keep it live, so
+    the person's go is recorded by the pass that asked for it.
     """
 
     def __init__(self, ticket: Ticket, store: StoreAdapter):
@@ -1373,6 +1705,10 @@ class TicketPass:
         self._revision = 0
         self._plan_ref: str | None = None
         self._rounds = 0
+        self._pass_id: str | None = None
+        # The pass that presented the current plan revision.
+        self._plan_pass: str | None = None
+        self._ended = False
 
     @classmethod
     def open(
@@ -1382,15 +1718,70 @@ class TicketPass:
         store: StoreAdapter,
         *,
         resume: bool = False,
+        pass_id: str | None = None,
     ) -> "TicketPass":
+        """Start a pass, or continue the live pass ``pass_id`` from a new process.
+
+        Starting takes the ticket's pass record and is refused, by the holder's
+        name, while another pass is live. Continuing presents the pass id this
+        pass started with and is refused unless that pass is the live one; it
+        always rebuilds the pass from the card.
+        """
+
         ticket = source.pull(key)
         session = cls(ticket, store)
-        # Every open reads the card, which pins the store's view of the ticket
-        # for this pass; a store refuses a write made from an older view.
-        card = store.read_card()
-        if resume:
-            session._resume(card)
+        if pass_id is None:
+            session._pass_id = store.take_pass()
+        else:
+            store.join_pass(pass_id)
+            session._pass_id = pass_id
+            resume = True
+        try:
+            # Every open reads the card, which pins the store's view of the
+            # ticket for this process; a store refuses a write from an older view.
+            card = store.read_card()
+            if resume:
+                session._resume(card)
+        except BaseException as exc:
+            session._end_quietly(f"the pass could not be opened: {type(exc).__name__}")
+            raise
+        if session._phase in ("closed", "stopped"):
+            # Nothing is left for this pass to write.
+            session.end(f"resumed at {session._phase}")
         return session
+
+    @property
+    def pass_id(self) -> str | None:
+        """The id a later process presents to continue this pass."""
+
+        return self._pass_id
+
+    @property
+    def live(self) -> bool:
+        return not self._ended
+
+    def end(self, reason: str = "ended") -> None:
+        """End the pass and release its record. Calling it again does nothing."""
+
+        if self._ended:
+            return
+        self._ended = True
+        self.store.release_pass(reason)
+
+    def _end_quietly(self, reason: str) -> None:
+        # On a failure path the original error wins. A release that fails too
+        # leaves the record in place: the ticket stays refused until a person
+        # clears it with the release-pass command, which fails closed.
+        with contextlib.suppress(Exception):
+            self.end(reason)
+
+    def __enter__(self) -> "TicketPass":
+        return self
+
+    def __exit__(self, kind: Any, value: Any, traceback: Any) -> bool:
+        if kind is not None:
+            self._end_quietly(f"an exception left the pass: {kind.__name__}")
+        return False
 
     @property
     def ticket(self) -> Ticket:
@@ -1412,6 +1803,7 @@ class TicketPass:
     def plan_revision(self) -> int:
         return self._revision
 
+    @_ends_on_failure
     def approved(self, gate: str) -> bool:
         if gate not in ("plan", "outward"):
             raise TicketError(f"unknown gate: {gate}")
@@ -1427,6 +1819,7 @@ class TicketPass:
             self._plan = plan
             self._revision = int(stored.get("revision") or 0)
             self._plan_ref = card.get("plan_ref")
+            self._plan_pass = _plan_pass(card)
             self.reconciliation = tuple(flags)
         stamps = card.get("stamps") or ()
         # A closed status counts only when the final stamp is the confirmed close
@@ -1452,13 +1845,21 @@ class TicketPass:
         # A hard stop is re-entered only when the store holds its stop stamp;
         # otherwise the pass resumes at the step before the stop.
         if not _has_go(card, "plan", self._revision, self._ticket.key):
-            if _has_stamp(card, _plan_go_point(self._revision), "plan"):
-                self._phase = "plan_go"
-            else:
+            if not _has_stamp(card, _plan_go_point(self._revision), "plan"):
                 self.reconciliation += (
                     f"no plan go stop stamp for plan revision {self._revision}; resuming at plan",
                 )
                 self._phase = "plan"
+            elif self._plan_pass != self._pass_id:
+                # A plan go is recorded only by the pass that presented the
+                # plan, so another pass presents it again for its own go.
+                self.reconciliation += (
+                    f"plan revision {self._revision} was presented by another pass and has no plan go; "
+                    "resuming at plan to present it again",
+                )
+                self._phase = "plan"
+            else:
+                self._phase = "plan_go"
             return
         last = reviews[-1] if reviews else None
         passed = (
@@ -1515,12 +1916,15 @@ class TicketPass:
             problems.append("the last review round did not pass every criterion to an outward go stop")
         return problems
 
-    def _snapshot(self, plan: PlanCard, revision: int) -> dict[str, Any]:
+    def _snapshot(self, plan: PlanCard, revision: int, plan_pass: str | None = None) -> dict[str, Any]:
         data = plan.as_dict()
         data["revision"] = revision
         data["ticket_status"] = self._ticket.status
         if self._ticket.updated_at:
             data["ticket_updated_at"] = self._ticket.updated_at
+        presenter = plan_pass or self._plan_pass
+        if presenter:
+            data["pass"] = presenter
         return data
 
     def finish_orient(self) -> None:
@@ -1531,6 +1935,7 @@ class TicketPass:
         self._require_phase("research")
         self._phase = "plan"
 
+    @_ends_on_failure
     def present_plan(self, plan: PlanCard) -> None:
         self._require_phase("plan")
         if plan.key != self._ticket.key:
@@ -1540,7 +1945,7 @@ class TicketPass:
         if any(item.passes for item in plan.acceptance_criteria):
             raise TicketError("a presented plan starts with passes: false on every criterion")
         revision = self._revision + 1
-        ref = self.store.record_plan(self._snapshot(plan, revision))
+        ref = self.store.record_plan(self._snapshot(plan, revision, self._pass_id))
         self.store.write_stamp(
             _plan_go_point(revision),
             "plan",
@@ -1548,8 +1953,10 @@ class TicketPass:
             (ref,),
         )
         self._plan, self._revision, self._plan_ref = plan, revision, ref
+        self._plan_pass = self._pass_id
         self._phase = "plan_go"
 
+    @_ends_on_failure
     def record_go(self, gate: str, *, evidence: str, verbatim: str) -> None:
         expected = {"plan": "plan_go", "outward": "outward_go"}
         if gate not in expected:
@@ -1559,13 +1966,25 @@ class TicketPass:
         verbatim = verbatim.strip()
         if not evidence or not verbatim:
             raise TicketError("a go record requires evidence and verbatim words")
+        pass_id = None
+        if gate == "plan":
+            # The go is bound to the plan this pass presented: the stored plan
+            # must still be that revision, presented by this pass.
+            stored = self.store.read_card().get("plan") or {}
+            if stored.get("revision") != self._revision or stored.get("pass") != self._pass_id:
+                raise StoreUnavailable(
+                    f"the stored plan is not plan revision {self._revision} as pass {self._pass_id} "
+                    "presented it, so no plan go was recorded",
+                    code="plan_changed",
+                )
+            pass_id = self._pass_id
         self.store.record_decision(
             DecisionRecord(
                 who="the person",
                 who_kind="person",
                 standing="settled",
                 source=DecisionSource("ratification", evidence),
-                effect=_go_effect(gate, self._revision),
+                effect=_go_effect(gate, self._revision, pass_id),
                 tags=({"type": "ticket", "id": self._ticket.key},),
                 verbatim=verbatim,
                 phase="plan" if gate == "plan" else "review",
@@ -1579,9 +1998,11 @@ class TicketPass:
             raise GateRequired("plan go is required before build")
         self._phase = "build"
 
+    @_ends_on_failure
     def record_tried(self, what: str, *, outcome: str | None = None, evidence: str | None = None) -> None:
         self.store.record_tried(TriedRecord(what, self._store_phase(), outcome, evidence))
 
+    @_ends_on_failure
     def record_review(
         self,
         verdict: str,
@@ -1623,7 +2044,7 @@ class TicketPass:
         _validate_review(review)
         before = self.store.read_card().get("reviews") or []
         if len(before) != self._rounds:
-            raise StoreUnavailable("the store's review rounds changed outside this pass; resume to reload")
+            raise StoreUnavailable("the store's review rounds changed outside this pass; start a new pass to reload")
 
         self.store.record_review(review)
         rounds = _recorded_rounds(self.store.read_card().get("reviews") or [])
@@ -1655,6 +2076,7 @@ class TicketPass:
                 (self._plan_ref, evidence),
             )
             self._phase = "stopped"
+            self.end("review did not converge after round three")
         else:
             self._phase = "build"
 
@@ -1665,6 +2087,7 @@ class TicketPass:
         if not self.approved("outward"):
             raise GateRequired("outward go is required before any outward action")
 
+    @_ends_on_failure
     def close(
         self,
         point: str,
@@ -1698,7 +2121,9 @@ class TicketPass:
         if problems:
             raise StoreUnavailable("close read-back failed: " + "; ".join(problems))
         self._phase = "closed"
+        self.end("closed")
 
+    @_ends_on_failure
     def more_info(self, destination: str, question: str, *, role: str | None = None) -> MoreInfoExit:
         if destination not in INFO_EXITS:
             raise TicketError(f"unknown more-info exit: {destination}")
@@ -1721,6 +2146,7 @@ class TicketPass:
             (self._plan_ref,) if self._plan_ref else (),
         )
         self._phase = "stopped"
+        self.end(waiting)
         return MoreInfoExit(destination, waiting, drafted)
 
     def _store_phase(self) -> str:
@@ -1758,3 +2184,30 @@ __all__ = [
     "TriedRecord",
     "choose_store",
 ]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Command line for a person: clear the pass record a crashed pass left behind."""
+
+    parser = argparse.ArgumentParser(prog="ticket.py", description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    release = commands.add_parser(
+        "release-pass",
+        help="release a ticket's live pass record, named by its pass id, after that pass crashed",
+    )
+    release.add_argument("key", help="the ticket key")
+    release.add_argument("pass_id", help="the pass id the refusal named")
+    release.add_argument("--repo", default=".", help="the target repository (markdown card only)")
+    args = parser.parse_args(argv)
+    try:
+        store = choose_store(args.repo, args.key, args.key, writer="release-pass")
+        store.clear_pass(args.pass_id)
+    except (StoreUnavailable, TicketError) as exc:
+        print(f"ticket.py: {exc}", file=sys.stderr)
+        return 1
+    print(f"released pass {args.pass_id} on ticket {args.key}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
