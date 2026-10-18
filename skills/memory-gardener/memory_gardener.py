@@ -119,19 +119,19 @@ OVER_BUDGET_EXIT = 3
 # `budget` and `shard` prefer an explicit --taxonomy, then the store's own
 # shard-taxonomy.json; these defaults apply only when neither file is present.
 DEFAULT_SHARD_TAXONOMY = [
-    ("fleet", "Fleet / SEROTINE, orchestration & agentic maturity",
-     ["fleet", "serotine", "growth", "agentic", "harness", "model-pinning",
-      "delegate", "orchestrate", "session-handoff", "last-stretch", "fable",
+    ("fleet", "Fleet, orchestration & agentic maturity",
+     ["fleet", "project-a", "growth", "agentic", "harness", "model-pinning",
+      "delegate", "orchestrate", "session-handoff", "last-stretch", "model-a",
       "portfolio-case", "roadmap"]),
     ("infra", "Home-lab infrastructure, networking & hosting",
-     ["infra-map", "router", "syslog", "docker", "changedetection",
-      "tailscale", "plex", "hoard", "homelab"]),
+     ["infra-map", "router", "syslog", "docker", "watch-app",
+      "vpn-app", "media-app", "archive-app", "homelab"]),
     ("automation", "Scheduled automations, pipelines & digests",
-     ["ai-coding", "digest", "morning-brief", "macrovoices", "netflix",
-      "feed-condenser", "reader", "schwab", "studio-automations", "watchlist",
+     ["ai-coding", "digest", "morning-brief", "podcast-app", "streaming-app",
+      "feed-condenser", "reader", "broker-app", "studio-automations", "watchlist",
       "condenser", "transcript"]),
-    ("secrets", "Secrets, 1Password, dotfiles & sync",
-     ["op-", "oplock", "1password", "secret", "syncthing", "chezmoi",
+    ("secrets", "Secrets, password manager, dotfiles & sync",
+     ["op-", "oplock", "password-app", "secret", "sync-app", "dotfiles-app",
       "dotfiles", "-tree"]),
 ]
 
