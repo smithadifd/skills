@@ -4650,6 +4650,46 @@ def test_classify_report_writer_does_not_follow_a_symlink(tmp_path):
     assert target.read_text() == "keep"
 
 
+def test_classify_report_new_file_is_private_under_restrictive_umask(tmp_path):
+    out = tmp_path / "report.md"
+    previous = os.umask(0o077)
+    try:
+        mg.write_classify_report(str(out), "report\n")
+        mode = os.stat(out).st_mode & 0o777
+    finally:
+        os.umask(previous)
+    assert oct(mode) == oct(0o600)
+    assert out.read_text() == "report\n"
+
+
+def test_classify_report_keeps_existing_private_mode(tmp_path):
+    out = tmp_path / "report.md"
+    out.write_text("old\n")
+    os.chmod(out, 0o600)
+    previous = os.umask(0o077)
+    try:
+        mg.write_classify_report(str(out), "report\n")
+        mode = os.stat(out).st_mode & 0o777
+    finally:
+        os.umask(previous)
+    assert oct(mode) == oct(0o600)
+    assert out.read_text() == "report\n"
+
+
+def test_classify_report_keeps_existing_group_readable_mode(tmp_path):
+    out = tmp_path / "report.md"
+    out.write_text("old\n")
+    os.chmod(out, 0o644)
+    previous = os.umask(0o077)
+    try:
+        mg.write_classify_report(str(out), "report\n")
+        mode = os.stat(out).st_mode & 0o777
+    finally:
+        os.umask(previous)
+    assert oct(mode) == oct(0o644)
+    assert out.read_text() == "report\n"
+
+
 def test_classify_refuses_a_missing_or_non_directory_root(tmp_path, capsys):
     missing = str(tmp_path / "nope")
     a_file = tmp_path / "file.md"

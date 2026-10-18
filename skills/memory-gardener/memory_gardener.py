@@ -3708,7 +3708,11 @@ def check_classify_out(memory_dir, out):
 def write_classify_report(out, text):
     """Write the report to a new file beside `out`, then rename it onto `out`,
     so an existing inode (a hard link to a store note, say) is never opened
-    or truncated."""
+    or truncated.
+
+    Keep mkstemp's private mode when `out` does not exist. When it does,
+    copy the existing target's mode onto the new file so a rewrite never
+    widens a private report and never tightens a group-readable one."""
     if os.path.islink(out):
         raise ValueError("--out %r is a symlink; refusing to write through it"
                          % out)
@@ -3719,7 +3723,12 @@ def write_classify_report(out, text):
                                    dir=out_dir)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        os.chmod(tmp, 0o644)
+        try:
+            mode = stat.S_IMODE(os.lstat(out).st_mode)
+        except OSError:
+            pass
+        else:
+            os.chmod(tmp, mode)
         os.replace(tmp, out)
         tmp = None
     except OSError as e:
