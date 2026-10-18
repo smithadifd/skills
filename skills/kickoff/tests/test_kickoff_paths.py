@@ -200,23 +200,43 @@ PRIVATE_VOCABULARY = (
 )
 
 
+def _deny_grep(expr, data):
+    """Match with the same grep flags the public-vocabulary gate uses."""
+    return subprocess.run(
+        ["grep", "-a", "-i", "-n", "-E", "-e", expr],
+        input=data,
+        capture_output=True,
+    )
+
+
 def test_shipped_public_files_name_no_private_vocabulary():
     # The shipped files are the playbook and the resolver. This test file is
     # excluded because it has to spell the vocabulary it rejects.
     # Personal names and hosts come from the shared deny expression, never from
-    # this file.
+    # this file. The deny expression is matched with grep -E so it means what
+    # the public-vocabulary gate means.
     patterns = list(PRIVATE_VOCABULARY)
     deny = os.environ.get("NO_PERSON_DENY", "").strip()
     if deny:
-        patterns.append(f"(?i:{deny})")
+        probe = _deny_grep(deny, b"")
+        if probe.returncode == 2:
+            detail = probe.stderr.decode("utf-8", "replace").strip()
+            raise AssertionError(
+                f"NO_PERSON_DENY is not a valid extended regular expression: {detail}"
+            )
     hits = []
     for name in ("SKILL.md", "paths.py"):
-        for number, line in enumerate(
-            (SKILL_DIR / name).read_text(encoding="utf-8").splitlines(), start=1
-        ):
+        text = (SKILL_DIR / name).read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), start=1):
             for pattern in patterns:
                 if re.search(pattern, line):
                     hits.append(f"{name}:{number}: {pattern}: {line.strip()}")
+        if deny:
+            result = _deny_grep(deny, text.encode("utf-8"))
+            assert result.returncode in (0, 1), result.stderr.decode("utf-8", "replace")
+            for raw_line in result.stdout.decode("utf-8", "replace").splitlines():
+                lineno, _, line = raw_line.partition(":")
+                hits.append(f"{name}:{lineno}: NO_PERSON_DENY: {line.strip()}")
     assert not hits, "PUBLIC-TEXT: private vocabulary in shipped kickoff files:\n" + "\n".join(hits)
 
 

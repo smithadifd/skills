@@ -118,21 +118,23 @@ OVER_BUDGET_EXIT = 3
 # note's filename stem wins; an unmatched note stays in the always-loaded core.
 # `budget` and `shard` prefer an explicit --taxonomy, then the store's own
 # shard-taxonomy.json; these defaults apply only when neither file is present.
+# Brand-specific keywords belong in a user's own --taxonomy file; these
+# defaults are generic category words that substring-match real note stems.
 DEFAULT_SHARD_TAXONOMY = [
-    ("fleet", "Fleet / SEROTINE, orchestration & agentic maturity",
-     ["fleet", "serotine", "growth", "agentic", "harness", "model-pinning",
-      "delegate", "orchestrate", "session-handoff", "last-stretch", "fable",
+    ("fleet", "Fleet, orchestration & agentic maturity",
+     ["fleet", "growth", "agentic", "harness", "model-pinning",
+      "delegate", "orchestrate", "session-handoff", "last-stretch",
       "portfolio-case", "roadmap"]),
     ("infra", "Home-lab infrastructure, networking & hosting",
-     ["infra-map", "router", "syslog", "docker", "changedetection",
-      "tailscale", "plex", "hoard", "homelab"]),
+     ["infra-map", "router", "syslog", "docker", "vpn",
+      "media", "nas", "backup", "homelab"]),
     ("automation", "Scheduled automations, pipelines & digests",
-     ["ai-coding", "digest", "morning-brief", "macrovoices", "netflix",
-      "feed-condenser", "reader", "schwab", "studio-automations", "watchlist",
+     ["ai-coding", "digest", "morning-brief", "podcast", "streaming",
+      "feed-condenser", "reader", "broker", "studio-automations", "watchlist",
       "condenser", "transcript"]),
-    ("secrets", "Secrets, 1Password, dotfiles & sync",
-     ["op-", "oplock", "1password", "secret", "syncthing", "chezmoi",
-      "dotfiles", "-tree"]),
+    ("secrets", "Secrets, password manager, dotfiles & sync",
+     ["op-", "oplock", "password", "secret", "sync", "dotfiles",
+      "-tree"]),
 ]
 
 # --- Per-file harness truncation budget (`filebudget`) ---------------------- #
