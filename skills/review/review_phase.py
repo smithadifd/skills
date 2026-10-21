@@ -487,6 +487,15 @@ _REFERENCE = re.compile(
     r"|[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:\d[\w]*",
     re.IGNORECASE,
 )
+# A leading path component that is itself a duration ("3d", "days", "2.5h")
+# is a claim glued to a path ("waits 3d/foo.py"), so the token is kept.
+_DURATION_COMPONENT = re.compile(
+    r"^(?:\d+(?:\.\d+)?)?(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
+    r"ms|secs?|mins?|hrs?|wks?|[smhd])$",
+    re.IGNORECASE,
+)
+# The `(...)` target of a Markdown link; the label stays visible to the scan.
+_LINK_TARGET = re.compile(r"(?<=\])\([^)\s]*\)")
 _PATH_PREFIX = re.compile(r"^(?:/|\./|\.\./|~/)")
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 
@@ -494,6 +503,8 @@ _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 def _blank_path_token(match: re.Match[str]) -> str:
     token = match.group(0)
     bare = token.rstrip(".,;:)]}\"'`")
+    if _DURATION_COMPONENT.match(bare.split("/", 1)[0]):
+        return token
     # Only a token that is clearly a path is blanked: an explicit path prefix,
     # or a file extension on the last component. A plain
     # `word/word` such as `days/run` or `3d/day` is a rate, so a duration
@@ -505,10 +516,11 @@ def _blank_path_token(match: re.Match[str]) -> str:
     return " " if is_path else token
 
 
-_PATH_TOKEN_IN_TEXT = re.compile(r"[^\s/]*/\S*")
+_PATH_TOKEN_IN_TEXT = re.compile(r"[^\s/\[\]()]*/[^\s\])]*")
 
 
 def _strip_references(line: str) -> str:
+    line = _LINK_TARGET.sub("()", line)
     line = _REFERENCE.sub(" ", line)
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
