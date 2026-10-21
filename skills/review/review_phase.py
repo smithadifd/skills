@@ -474,9 +474,16 @@ _DURATION_CLAIM = re.compile(
 
 # Section and file references that merely look like a duration: `§3d`,
 # `section 3d`, `foo.py:12d`, and tokens that are paths (`docs/3d/x.md`).
+# A section id followed by a duration unit word ("section 5 minutes") is a
+# real claim, not a reference, so the id is not erased in that case.
+_UNIT_WORD = (
+    r"(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
+    r"ms|secs?|mins?|hrs?|wks?|[smhd])\b"
+)
+_NOT_A_CLAIM = rf"(?![\w.]|\s+{_UNIT_WORD})"
 _REFERENCE = re.compile(
-    r"§\s*\d[\w.]*"
-    r"|\bsections?\s+\d[\w.]*"
+    rf"§\s*\d[\w.]*{_NOT_A_CLAIM}"
+    rf"|\bsections?\s+\d[\w.]*{_NOT_A_CLAIM}"
     r"|[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:\d[\w]*",
     re.IGNORECASE,
 )
