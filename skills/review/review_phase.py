@@ -487,8 +487,8 @@ _REFERENCE = re.compile(
     r"|[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:\d[\w]*",
     re.IGNORECASE,
 )
-# A leading path component that is itself a duration ("3d", "days", "2.5h")
-# is a claim glued to a path ("waits 3d/foo.py"), so the token is kept.
+# A path component that is itself a duration ("3d", "days", "2.5h") is a
+# claim glued to a path ("waits 3d/foo.py"), so the token is kept.
 _DURATION_COMPONENT = re.compile(
     r"^(?:\d+(?:\.\d+)?)?(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
     r"ms|secs?|mins?|hrs?|wks?|[smhd])$",
@@ -503,8 +503,12 @@ _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 def _blank_path_token(match: re.Match[str]) -> str:
     token = match.group(0)
     bare = token.rstrip(".,;:)]}\"'`")
-    if _DURATION_COMPONENT.match(bare.split("/", 1)[0]):
-        return token
+    # Fail closed: a duration-shaped component anywhere in the token, however
+    # quoted or wrapped, keeps the whole token visible to the scan.
+    for component in token.split("/"):
+        core = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", component)
+        if _DURATION_COMPONENT.match(core):
+            return token
     # Only a token that is clearly a path is blanked: an explicit path prefix,
     # or a file extension on the last component. A plain
     # `word/word` such as `days/run` or `3d/day` is a rate, so a duration
