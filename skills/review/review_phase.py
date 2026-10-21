@@ -473,7 +473,8 @@ _DURATION_CLAIM = re.compile(
 
 
 # Section and file references that merely look like a duration: `§3d`,
-# `section 3d`, `foo.py:12d`, and tokens that are paths (`docs/3d/x.md`).
+# `section 3d`, `foo.py:12d`, and tokens that are paths (`docs/3d/x.md`; a
+# duration-shaped directory later in the path is still just a path).
 # A section id followed by a duration unit word ("section 5 minutes") is a
 # real claim, not a reference, so the id is not erased in that case.
 _UNIT_WORD = (
@@ -487,8 +488,15 @@ _REFERENCE = re.compile(
     r"|[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:\d[\w]*",
     re.IGNORECASE,
 )
-# A path component that is itself a duration ("3d", "days", "2.5h") is a
-# claim glued to a path ("waits 3d/foo.py"), so the token is kept.
+# Only the FIRST lexical component of a path-like token can be a claim glued
+# to it ("waits 3d/foo.py"), and only after the opening formatting delimiters
+# (quotes, backticks, `*`, `_`, `(`, `[`, `{`) are stripped. When that first
+# component is a duration ("3d", "days", "2.5h"), the token stays visible to the
+# scan with every formatting wrapper (those delimiters leading and trailing,
+# plus trailing punctuation) turned into a space, so the scan sees a word
+# boundary before the claim (`_3d/foo.py_` is read as ` 3d/foo.py `). Later
+# components never make a token a claim (`docs/3d/x.md` is just a path). Only
+# the scan text is rewritten, never the review artifact.
 _DURATION_COMPONENT = re.compile(
     r"^(?:\d+(?:\.\d+)?)?(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
     r"ms|secs?|mins?|hrs?|wks?|[smhd])$",
@@ -498,17 +506,22 @@ _DURATION_COMPONENT = re.compile(
 _LINK_TARGET = re.compile(r"(?<=\])\([^)\s]*\)")
 _PATH_PREFIX = re.compile(r"^(?:/|\./|\.\./|~/)")
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
+_OPENING_WRAPPERS = "\"'`*_([{"
+_CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}"
 
 
 def _blank_path_token(match: re.Match[str]) -> str:
     token = match.group(0)
     bare = token.rstrip(".,;:)]}\"'`")
-    # Fail closed: a duration-shaped component anywhere in the token, however
-    # quoted or wrapped, keeps the whole token visible to the scan.
-    for component in token.split("/"):
-        core = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", component)
-        if _DURATION_COMPONENT.match(core):
-            return token
+    # Fail closed: a duration-shaped FIRST component, however quoted or
+    # wrapped, keeps the token visible to the scan. Its wrappers become spaces
+    # so the claim has a word boundary in front of it.
+    unwrapped = token.lstrip(_OPENING_WRAPPERS)
+    if _DURATION_COMPONENT.match(unwrapped.split("/", 1)[0]):
+        core = unwrapped.rstrip(_CLOSING_WRAPPERS)
+        leading = " " * (len(token) - len(unwrapped))
+        trailing = " " * (len(unwrapped) - len(core))
+        return leading + core + trailing
     # Only a token that is clearly a path is blanked: an explicit path prefix,
     # or a file extension on the last component. A plain
     # `word/word` such as `days/run` or `3d/day` is a rate, so a duration
