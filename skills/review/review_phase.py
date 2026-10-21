@@ -495,13 +495,12 @@ def _blank_path_token(match: re.Match[str]) -> str:
     token = match.group(0)
     bare = token.rstrip(".,;:)]}\"'`")
     # Only a token that is clearly a path is blanked: an explicit path prefix,
-    # a file extension on the last component, or two or more `/`. A plain
+    # or a file extension on the last component. A plain
     # `word/word` such as `days/run` or `3d/day` is a rate, so a duration
     # claim in front of it ("3 days/run") still counts.
     is_path = (
         _PATH_PREFIX.match(bare)
         or _FILE_EXTENSION.search(bare.rsplit("/", 1)[-1])
-        or bare.count("/") >= 2
     )
     return " " if is_path else token
 
