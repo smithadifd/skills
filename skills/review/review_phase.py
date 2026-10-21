@@ -480,14 +480,23 @@ _REFERENCE = re.compile(
     r"|[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:\d[\w]*",
     re.IGNORECASE,
 )
-_CLAIM_LIKE_FIRST_COMPONENT = re.compile(r"^\d+(?:\.\d+)?[a-z]+$", re.IGNORECASE)
+_PATH_PREFIX = re.compile(r"^(?:/|\./|\.\./|~/)")
+_FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 
 
 def _blank_path_token(match: re.Match[str]) -> str:
     token = match.group(0)
-    first = token.split("/", 1)[0]
-    # `3d/day` is a rate, not a path: keep a claim-shaped first component.
-    return token if _CLAIM_LIKE_FIRST_COMPONENT.match(first) else " "
+    bare = token.rstrip(".,;:)]}\"'`")
+    # Only a token that is clearly a path is blanked: an explicit path prefix,
+    # a file extension on the last component, or two or more `/`. A plain
+    # `word/word` such as `days/run` or `3d/day` is a rate, so a duration
+    # claim in front of it ("3 days/run") still counts.
+    is_path = (
+        _PATH_PREFIX.match(bare)
+        or _FILE_EXTENSION.search(bare.rsplit("/", 1)[-1])
+        or bare.count("/") >= 2
+    )
+    return " " if is_path else token
 
 
 _PATH_TOKEN_IN_TEXT = re.compile(r"[^\s/]*/\S*")

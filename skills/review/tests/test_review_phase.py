@@ -844,6 +844,8 @@ def test_section_and_file_references_are_not_duration_claims(body):
         "The job ran 3 days before failing.",
         "It returned in 2h.",
         "Throughput is 3d/day at peak.",
+        "It took 3 days/run.",
+        "Each used 4 hours/session.",
         "See §3d, but the caller also waits 3d.",
     ],
 )
