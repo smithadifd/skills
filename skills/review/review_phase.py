@@ -155,10 +155,13 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
     """Bullets from `start` until the next heading.
 
     Returns `(real_bullets, unparsed, index)`. `unparsed` is true when the
-    section held at least one non-blank line but none of it survived as a
-    real finding and the section was not an explicit clean sentinel
-    (`- none` or `No bugs or security issues found.`) — the caller should
-    treat that as a parse failure, never a silent zero.
+    section held foreign prose (a non-blank line that is not a bullet, not an
+    indented continuation of one, and not exactly a clean marker), whether or
+    not real findings sit beside it; or when it held at least one non-blank
+    line but none of it survived as a real finding and the section was not an
+    explicit clean sentinel (`- none` or `No bugs or security issues found.`).
+    The caller should treat that as a parse failure, never a silent zero and
+    never a silently dropped paragraph.
     """
     bullets: list[str] = []
     had_content = False
@@ -178,8 +181,8 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
             bullets[-1] = bullets[-1] + " " + line.strip()
         elif line.strip():
             # Any other non-bullet line, before or after a bullet, is prose: a
-            # clean marker, or foreign prose that keeps the section from
-            # reading as clean (`- none` then a paragraph refuses).
+            # clean marker, or foreign prose that refuses the section (`- none`
+            # then a paragraph, or a finding then a paragraph).
             if _is_clean_marker(line):
                 saw_clean = True
             else:
@@ -191,7 +194,9 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
     real = [
         b for b in bullets if not (_is_clean_marker(b) or _PLACEHOLDER_BULLET.match(b))
     ]
-    unparsed = had_content and not real and not legit_empty
+    # Foreign prose refuses the section even beside a real finding: accepting
+    # the findings would drop that paragraph without a word.
+    unparsed = had_content and (saw_foreign_prose or (not real and not legit_empty))
     return real, unparsed, i
 
 
@@ -485,28 +490,40 @@ _UNIT_WORD = (
     r"ms|secs?|mins?|hrs?|wks?|[smhd])\b"
 )
 _NOT_A_CLAIM = rf"(?![\w.]|\s+{_UNIT_WORD})"
-_REFERENCE = re.compile(
+_SECTION_REFERENCE = re.compile(
     rf"§\s*\d[\w.]*{_NOT_A_CLAIM}"
-    rf"|\bsections?\s+\d[\w.]*{_NOT_A_CLAIM}"
-    r"|(?P<fileline>[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:(?P<line>\d[\w]*))",
+    rf"|\bsections?\s+\d[\w.]*{_NOT_A_CLAIM}",
     re.IGNORECASE,
 )
+# A file:line reference (`foo.py:12`, `src/pkg/foo.py:7m`) is a run of path
+# characters that ends in `<name>.<ext>` (the name holding a letter or `_`, the
+# extension starting with a letter), then `:` and a line number. It is found by
+# reading each run of path characters once (`_next_file_line`), never by one
+# regex with nested quantifiers over the run: that regex tried every split of a
+# long token and took seconds on a 4000-character hash, blob or minified line.
+_PATH_RUN = re.compile(r"[\w./+-]+")
+_LINE_NUMBER = re.compile(r":(\d\w*)")
+_EXTENSION = re.compile(r"\.[A-Za-z]\w*", re.IGNORECASE)
+_NAME_LETTER = re.compile(r"[A-Za-z_]", re.IGNORECASE)
 # Only the FIRST lexical component of a path-like token can be a claim glued
-# to it ("waits 3d/foo.py"), and only after the opening formatting delimiters
-# (quotes, backticks, `*`, `_`, `(`, `[`, `{`) are stripped. When that first
-# component is a duration ("3d", "days", "2.5h"), the token stays visible to the
-# scan with every formatting wrapper (those delimiters leading and trailing,
-# plus trailing punctuation) turned into a space, so the scan sees a word
-# boundary before the claim (`_3d/foo.py_` is read as ` 3d/foo.py `). Later
-# components never make a token a claim (`docs/3d/x.md` is just a path). Only
-# the scan text is rewritten, never the review artifact.
+# to it ("waits 3d/foo.py"), read from the token's one normalised form
+# (`_reference_form`: wrappers, then a `?query` / `#fragment` suffix, then
+# sentence punctuation stripped). When that first component is a duration
+# ("3d", "days", "2.5h", the `41m` of `41m?x/y.md`), the token stays visible to
+# the scan with every formatting wrapper (the opening delimiters leading, the
+# closing ones and trailing punctuation trailing) turned into a space, so the
+# scan sees a word boundary before the claim (`_3d/foo.py_` is read as
+# ` 3d/foo.py `). Later components never make a token a claim (`docs/3d/x.md`
+# is just a path). Only the scan text is rewritten, never the review artifact.
 _DURATION_COMPONENT = re.compile(
     r"^(?:\d+(?:\.\d+)?)?(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
     r"ms|secs?|mins?|hrs?|wks?|[smhd])$",
     re.IGNORECASE,
 )
 # The `(...)` target of a Markdown link; the label stays visible to the scan.
-_LINK_TARGET = re.compile(r"(?<=\])\([^)\s]*\)")
+# A `](` whose run never closes is matched too and kept as it is, so the scan
+# moves past it once instead of re-reading it from every later `](` in it.
+_LINK_TARGET = re.compile(r"(?<=\])\([^)\s]*\)?")
 _PATH_PREFIX = re.compile(r"^(?:/|\./|\.\./|~/)")
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 _OPENING_WRAPPERS = "\"'`*_([{<"
@@ -522,11 +539,14 @@ _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _UNIT_AFTER = re.compile(rf"\s+{_UNIT_WORD}", re.IGNORECASE)
 
 
-def _blank_reference(match: re.Match[str]) -> str:
-    """Replacement for a `_REFERENCE` match: what the scan should see instead."""
-    if match.group("fileline") is None:
-        return " "
-    token = match.group(0)
+def _blank_link_target(match: re.Match[str]) -> str:
+    target = match.group(0)
+    return "()" if target.endswith(")") else target
+
+
+def _blank_file_line(line: str, start: int, end: int, number: str) -> str:
+    """What the scan should see instead of the file:line reference `line[start:end]`."""
+    token = line[start:end]
     # A file:line reference follows the same path-token rule: only the first
     # `/`-component can be a claim. When it is a duration the whole token stays
     # visible, for the path-token pass to handle (`3d/foo.py:12`).
@@ -535,9 +555,64 @@ def _blank_reference(match: re.Match[str]) -> str:
         return token
     # A file:line reference followed by a spaced duration unit word is a claim
     # (`x.y:3 days`): only the reference is erased, the number stays.
-    if _UNIT_AFTER.match(match.string, match.end()):
-        return " " + match.group("line")
+    if _UNIT_AFTER.match(line, end):
+        return " " + number
     return " "
+
+
+def _ends_in_file_name(line: str, start: int, end: int) -> bool:
+    """Whether the path run `line[start:end]` ends in `<name>.<ext>`."""
+    mark = max(line.rfind(separator, start, end) for separator in "./+-")
+    if mark < start or line[mark] != "." or not _EXTENSION.fullmatch(line, mark, end):
+        return False
+    name_start = max(start, line.rfind(".", start, mark) + 1, line.rfind("/", start, mark) + 1)
+    return _NAME_LETTER.search(line, name_start, mark) is not None
+
+
+def _next_file_line(line: str, pos: int) -> tuple[int, int, str] | None:
+    """The leftmost file:line reference at or after `pos`: (start, end, line number).
+
+    A run that is not a file:line reference from its first position is not one
+    from any later position either (the name and extension tests only see less
+    of it), so each run is read once and the walk is linear in the line.
+    """
+    while True:
+        run = _PATH_RUN.search(line, pos)
+        if run is None:
+            return None
+        start, end = run.span()
+        number = _LINE_NUMBER.match(line, end)
+        if number and _ends_in_file_name(line, start, end):
+            return start, number.end(), number.group(1)
+        pos = end
+
+
+def _blank_references(line: str) -> str:
+    """`line` with each section and file:line reference blanked for the scan.
+
+    The references are taken leftmost first and never overlap, the way one
+    `re.sub` over both kinds would take them; each kind's next match is looked
+    up again only once the previous replacement has passed its start.
+    """
+    pieces: list[str] = []
+    pos = 0
+    section = _SECTION_REFERENCE.search(line)
+    file_line = _next_file_line(line, 0)
+    while section is not None or file_line is not None:
+        if file_line is None or (section is not None and section.start() < file_line[0]):
+            start, end, replacement = section.start(), section.end(), " "
+        else:
+            start, end, number = file_line
+            replacement = _blank_file_line(line, start, end, number)
+        pieces.append(line[pos:start])
+        pieces.append(replacement)
+        pos = end
+        if section is not None and section.start() < pos:
+            section = _SECTION_REFERENCE.search(line, pos)
+        if file_line is not None and file_line[0] < pos:
+            file_line = _next_file_line(line, pos)
+    pieces.append(line[pos:])
+    return "".join(pieces)
 
 
 # A path-like token is judged one piece at a time, split at the delimiters that
@@ -555,16 +630,27 @@ def _blank_path_token(match: re.Match[str]) -> str:
     )
 
 
+def _reference_form(token: str) -> str:
+    """The one normalised form that every check on a path piece reads.
+
+    The opening and closing Markdown wrappers come off first (`**docs/x.md**`,
+    `<./docs/notes>`), then a `?query` or `#fragment` suffix
+    (`docs/x.md?view=all`, and `41m?x/y.md` reads as `41m`), then trailing
+    sentence punctuation (`docs/x.md#top.`).
+    """
+    form = token.lstrip(_OPENING_WRAPPERS).rstrip(_CLOSING_WRAPPERS)
+    form = form.split("?", 1)[0].split("#", 1)[0]
+    return form.rstrip(_CLOSING_WRAPPERS + _SENTENCE_END)
+
+
 def _blank_path_piece(token: str) -> str:
-    bare = token.rstrip(".,;:)]}\"'`")
-    # Fail closed: a duration-shaped FIRST component, however quoted or
-    # wrapped, keeps the piece visible to the scan. Its wrappers become spaces
-    # so the claim has a word boundary in front of it.
-    unwrapped = token.lstrip(_OPENING_WRAPPERS)
-    first = unwrapped.split("/", 1)[0]
-    if "/" not in token:
-        first = first.rstrip(_CLOSING_WRAPPERS)
-    if _DURATION_COMPONENT.match(first):
+    form = _reference_form(token)
+    # Fail closed: a duration-shaped FIRST component of the normalised form,
+    # however the piece is wrapped or suffixed, keeps the piece visible to the
+    # scan. Its wrappers become spaces so the claim has a word boundary in
+    # front of it.
+    if _DURATION_COMPONENT.match(form.split("/", 1)[0]):
+        unwrapped = token.lstrip(_OPENING_WRAPPERS)
         core = unwrapped.rstrip(_CLOSING_WRAPPERS)
         leading = " " * (len(token) - len(unwrapped))
         trailing = " " * (len(unwrapped) - len(core))
@@ -573,25 +659,28 @@ def _blank_path_piece(token: str) -> str:
     if "/" not in token:
         return token
     # Only a token that is clearly a path is blanked: an explicit path prefix,
-    # a URI scheme, or a file extension on the last component once closing
-    # Markdown wrappers and sentence punctuation are stripped (`**docs/x.md**`,
+    # a URI scheme, or a file extension on the last component, each read from
+    # the same normalised form (`**./docs/notes**`, `docs/x.md?view=all`,
     # `docs/x.md?`). A plain `word/word` such as `days/run` or `3d/day` is a
     # rate, so a duration claim in front of it ("3 days/run") still counts.
-    core = unwrapped.rstrip(_CLOSING_WRAPPERS + _SENTENCE_END)
     is_path = (
-        _PATH_PREFIX.match(bare)
-        or _URI_SCHEME.match(unwrapped)
-        or _FILE_EXTENSION.search(core.rsplit("/", 1)[-1])
+        _PATH_PREFIX.match(form)
+        or _URI_SCHEME.match(form)
+        or _FILE_EXTENSION.search(form.rsplit("/", 1)[-1])
     )
     return " " if is_path else token
 
 
-_PATH_TOKEN_IN_TEXT = re.compile(r"[^\s/\[\]()]*/[^\s\])]*")
+# A path-like token: a run holding a `/`. The lookbehind lets it start only
+# where a run starts, the one place the scan can ever match it (a start later
+# in the same run needs the same `/` and fails the same way); without it every
+# start inside a long run with no `/` re-read the rest of the run.
+_PATH_TOKEN_IN_TEXT = re.compile(r"(?<![^\s/\[\]()])[^\s/\[\]()]*/[^\s\])]*")
 
 
 def _strip_references(line: str) -> str:
-    line = _LINK_TARGET.sub("()", line)
-    line = _REFERENCE.sub(_blank_reference, line)
+    line = _LINK_TARGET.sub(_blank_link_target, line)
+    line = _blank_references(line)
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
 

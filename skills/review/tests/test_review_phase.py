@@ -21,6 +21,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1162,3 +1163,376 @@ def test_prose_before_a_bulleted_clean_marker_refuses():
     text = _claude_approve_with("Checked.", issues="A real issue is described in prose.\n- none")
     with pytest.raises(review_phase.ParseError, match="ISSUES"):
         review_phase.parse_claude_fresh(text)
+
+
+# --- (a) one normalised reference form: wrappers x reference kinds x suffixes -
+
+# Opening and closing text around a reference.
+REFERENCE_WRAPPINGS = {
+    "plain": ("", ""),
+    "star": ("*", "*"),
+    "strong": ("**", "**"),
+    "underscore": ("_", "_"),
+    "backtick": ("`", "`"),
+    "angle": ("<", ">"),
+}
+# Each kind holds a duration-shaped LATER component, so only reading it as a
+# reference keeps it from being a claim.
+REFERENCE_KINDS = {
+    "dot-slash": "./docs/3d/notes",
+    "dot-dot-slash": "../docs/3d/notes",
+    "slash": "/docs/3d/notes",
+    "tilde-slash": "~/3d",
+    "uri-scheme": "https://example.com/3d/rule",
+    "relative-extension": "docs/3d/x.md",
+}
+# The same kinds led by a duration-shaped FIRST component, plus a duration
+# glued to a query or fragment (`41m?x/y.md`).
+DURATION_FIRST_KINDS = {
+    "dot-slash": "3d/./docs/notes",
+    "dot-dot-slash": "3d/../docs/notes",
+    "slash": "3d//docs/notes",
+    "tilde-slash": "3d/~/notes",
+    "uri-scheme": "3d/https://example.com/rule",
+    "relative-extension": "3d/docs/x.md",
+    "query-first-component": "41m?x/y.md",
+    "fragment-first-component": "41m#x/y.md",
+}
+# (id, text inside the wrapper, text after the wrapper).
+REFERENCE_SUFFIXES = [("none", "", "")]
+for _suffix_id, _suffix in (
+    ("query", "?q=1"),
+    ("fragment", "#frag"),
+    ("period", "."),
+    ("comma", ","),
+    ("question", "?"),
+    ("exclamation", "!"),
+    ("paren", ")"),
+):
+    REFERENCE_SUFFIXES.append((f"{_suffix_id}-inside", _suffix, ""))
+    REFERENCE_SUFFIXES.append((f"{_suffix_id}-outside", "", _suffix))
+
+
+def _reference_table(kinds: dict) -> list:
+    return [
+        pytest.param(
+            f"{opening}{reference}{inside}{closing}{outside}",
+            id=f"{wrapping}-{kind}-{suffix}",
+        )
+        for wrapping, (opening, closing) in REFERENCE_WRAPPINGS.items()
+        for kind, reference in kinds.items()
+        for suffix, inside, outside in REFERENCE_SUFFIXES
+    ]
+
+
+@pytest.mark.parametrize("reference", _reference_table(REFERENCE_KINDS))
+def test_wrapped_and_suffixed_reference_is_not_a_claim(reference):
+    text = f"Only touches {reference} and nothing else."
+    assert review_phase._has_duration_claim(text) is False, (
+        "an explicit path, a URI or a relative path with an extension is a "
+        "reference however it is wrapped, suffixed or punctuated"
+    )
+
+
+@pytest.mark.parametrize("reference", _reference_table(DURATION_FIRST_KINDS))
+def test_wrapped_and_suffixed_reference_with_a_duration_first_component_is_a_claim(
+    reference,
+):
+    text = f"The caller waits {reference} before retrying."
+    assert review_phase._has_duration_claim(text) is True, (
+        "a duration-shaped first component stays a claim however the token is "
+        "wrapped, suffixed or punctuated"
+    )
+
+
+# --- (b) prose under a findings section -------------------------------------
+
+FINDING = "- `a.py:1` — first issue"
+ISSUES_REFUSED = {
+    "finding-then-paragraph": f"{FINDING}\nA second issue is described in prose.",
+    "paragraph-then-finding": "A first issue is described in prose.\n- `a.py:1` — second issue",
+    "finding-blank-line-then-paragraph": f"{FINDING}\n\nA second issue is described in prose.",
+    "clean-marker-then-paragraph": "- none\nA real issue is described in prose.",
+}
+# (issues, expected finding descriptions)
+ISSUES_ACCEPTED = {
+    "finding-with-indented-continuation": (
+        f"{FINDING}\n  continued on an indented line.",
+        ["first issue continued on an indented line."],
+    ),
+    "finding-with-continuation-after-a-blank-line": (
+        f"{FINDING}\n\n  continued after a blank line.",
+        ["first issue continued after a blank line."],
+    ),
+    "finding-then-an-exact-clean-marker": (f"{FINDING}\nNothing to report.", ["first issue"]),
+    "none-then-nothing-to-report": ("- none\nNothing to report.", []),
+    "clean-marker-then-indented-continuation": (
+        "- None blocking.\n  Checked every call site.",
+        ["None blocking. Checked every call site."],
+    ),
+}
+
+
+@pytest.mark.parametrize("issues", list(ISSUES_REFUSED.values()), ids=list(ISSUES_REFUSED))
+def test_foreign_prose_under_issues_refuses_beside_any_bullet(issues):
+    text = _claude_approve_with("Checked.", issues=issues)
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+@pytest.mark.parametrize(
+    "issues, descriptions", list(ISSUES_ACCEPTED.values()), ids=list(ISSUES_ACCEPTED)
+)
+def test_bullets_continuations_and_exact_clean_markers_parse(issues, descriptions):
+    text = _claude_approve_with("Checked.", issues=issues)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert [f["description"] for f in findings] == descriptions
+
+
+def test_foreign_prose_beside_a_minor_note_refuses():
+    text = (
+        "## Verdict: APPROVE\n\n### Issues\n- none\n\n"
+        "### Minor notes\n- `a.py:1` — a note\nA paragraph about something else.\n"
+    )
+    with pytest.raises(review_phase.ParseError, match="MINOR NOTES"):
+        review_phase.parse_claude_fresh(text)
+
+
+def test_foreign_prose_beside_a_grok_finding_refuses():
+    text = (
+        "## FINDINGS\n- `a.py:1` — an issue\nA paragraph about something else.\n\n"
+        "## VERDICT\nflagged — one issue\n"
+    )
+    with pytest.raises(review_phase.ParseError, match="FINDINGS"):
+        review_phase.parse_grok_notools(text)
+
+
+# --- (c) end to end through run_phase ----------------------------------------
+
+
+def _sol_probe_return(body: str, issues: str = "- none") -> str:
+    """The return shape of the second-family review's probes."""
+    return (
+        "## Verdict: APPROVE\n\n"
+        f"{body}\n\n"
+        "### Issues\n"
+        f"{issues}\n\n"
+        "### Evidence\n"
+        "- Ran: checks passed\n"
+    )
+
+
+SOL_REFERENCE_PROBES = {
+    "bare-url": "See https://example.com/3d/rule for the details.",
+    "autolink": "See <https://example.com/3d/rule> for the details.",
+    "strong-extension-path": "Only touches **docs/3d/x.md** and nothing else.",
+    "question-path": "Only touches docs/3d/x.md?",
+    "exclamation-path": "Only touches docs/3d/x.md!",
+    "strong-explicit-relative-no-extension": "Only touches **./docs/3d/notes** and nothing else.",
+    "strong-explicit-absolute-no-extension": "Only touches **/docs/3d/notes** and nothing else.",
+    "relative-fragment": "Only touches docs/3d/x.md#anchor.",
+    "relative-query": "Only touches docs/3d/x.md?view=all.",
+}
+SOL_ISSUES_PROBES_REFUSED = {
+    "clean-then-foreign": "- none\nA real issue is described in prose.",
+    "real-then-foreign": "- `a.py:1` — first issue\nA second issue is described in prose.",
+    "foreign-then-real": "A first issue is described in prose.\n- `a.py:1` — second issue",
+}
+SOL_ISSUES_PROBES_ACCEPTED = {
+    "clean-then-indented": "- None blocking.\n  Checked every call site.",
+}
+
+
+@pytest.mark.parametrize(
+    "body", list(SOL_REFERENCE_PROBES.values()), ids=list(SOL_REFERENCE_PROBES)
+)
+def test_run_phase_accepts_the_second_family_reference_probes(body):
+    result = review_phase.run_phase(_envelope("claude-fresh", _sol_probe_return(body)))
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
+
+
+@pytest.mark.parametrize(
+    "issues",
+    list(SOL_ISSUES_PROBES_REFUSED.values()),
+    ids=list(SOL_ISSUES_PROBES_REFUSED),
+)
+def test_run_phase_refuses_the_second_family_prose_probes(issues):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _sol_probe_return("Checked.", issues=issues))
+    )
+    assert result["status"] == "failure"
+    assert "ISSUES" in result["reason"]
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize(
+    "issues",
+    list(SOL_ISSUES_PROBES_ACCEPTED.values()),
+    ids=list(SOL_ISSUES_PROBES_ACCEPTED),
+)
+def test_run_phase_accepts_the_second_family_continuation_probe(issues):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _sol_probe_return("Checked.", issues=issues))
+    )
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
+
+
+@pytest.mark.parametrize("issues", list(ISSUES_REFUSED.values()), ids=list(ISSUES_REFUSED))
+def test_run_phase_refuses_foreign_prose_under_issues(issues):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _claude_approve_with("Checked.", issues=issues))
+    )
+    assert result["status"] == "failure"
+    assert "ISSUES" in result["reason"]
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize(
+    "issues, descriptions", list(ISSUES_ACCEPTED.values()), ids=list(ISSUES_ACCEPTED)
+)
+def test_run_phase_accepts_bullets_continuations_and_exact_clean_markers(issues, descriptions):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _claude_approve_with("Checked.", issues=issues))
+    )
+    assert result["status"] == "success", result["reason"]
+    findings = result["artifacts"]["findings.json"]["findings"]
+    assert [f["description"] for f in findings] == descriptions
+
+
+def test_run_phase_accepts_a_wrapped_query_reference_and_refuses_its_duration_first_form():
+    accepted = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("Only touches **./docs/3d/notes?q=1** and nothing else."),
+        )
+    )
+    assert accepted["status"] == "success", accepted["reason"]
+    refused = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("The caller waits **41m?x/y.md** before retrying."),
+        )
+    )
+    assert refused["status"] == "failure"
+    assert "review_interval_endpoints_missing" in refused["reason"]
+
+
+# --- (d) the reference scan is linear in the length of a long token ----------
+
+REDOS_LIMIT_SECONDS = 1.0
+
+
+def _base64_like(length: int) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    return "".join(alphabet[(index * 7 + index // 64) % 64] for index in range(length))
+
+
+def _minified_js_like(length: int) -> str:
+    chunk = "function a(b,c){return b.c+d.e(f,g);}var h=i.j.k(l);if(m){n.o=p/q}"
+    return (chunk * (length // len(chunk) + 1))[:length]
+
+
+LONG_TOKENS = {
+    "dotless": lambda length: "x" * length,
+    "dotless-then-slashes": lambda length: "x" * length + "/" * 50,
+    "base64-like": _base64_like,
+    "minified-js-like": _minified_js_like,
+    "unclosed-link-targets": lambda length: "](" * (length // 2),
+    "dotted-run": lambda length: "a." * (length // 2),
+}
+REFERENCE_SCANS = {
+    "has-duration-claim": lambda text: review_phase._has_duration_claim(text),
+    "blank-references": lambda text: review_phase._blank_references(text),
+}
+
+
+def _one_call_seconds(scan, text: str) -> float:
+    start = time.perf_counter()
+    scan(text)
+    return time.perf_counter() - start
+
+
+def _best_seconds_per_call(scan, text: str, trials: int = 5, calls: int = 10) -> float:
+    """The fastest per-call time over several trials; one slow call ends it."""
+    best = float("inf")
+    for _ in range(trials):
+        start = time.perf_counter()
+        for _ in range(calls):
+            call = _one_call_seconds(scan, text)
+            if call > REDOS_LIMIT_SECONDS:
+                return call
+        best = min(best, (time.perf_counter() - start) / calls)
+    return best
+
+
+@pytest.mark.parametrize("scan", list(REFERENCE_SCANS))
+@pytest.mark.parametrize("token", list(LONG_TOKENS))
+def test_reference_scan_finishes_a_4000_character_token_within_a_second(scan, token):
+    text = LONG_TOKENS[token](4000)
+    elapsed = _one_call_seconds(REFERENCE_SCANS[scan], text)
+    assert elapsed <= REDOS_LIMIT_SECONDS, (
+        f"{scan} took {elapsed:.2f}s on a {len(text)}-character {token} token"
+    )
+
+
+@pytest.mark.parametrize("scan", list(REFERENCE_SCANS))
+@pytest.mark.parametrize("token", list(LONG_TOKENS))
+def test_reference_scan_time_grows_linearly_with_token_length(scan, token):
+    shorter = _best_seconds_per_call(REFERENCE_SCANS[scan], LONG_TOKENS[token](4000))
+    assert shorter <= REDOS_LIMIT_SECONDS, (
+        f"{scan} took {shorter:.2f}s on a 4000-character {token} token"
+    )
+    longer = _best_seconds_per_call(REFERENCE_SCANS[scan], LONG_TOKENS[token](8000))
+    assert longer <= 3 * shorter, (
+        f"{scan} on a {token} token: doubling 4000 to 8000 characters took "
+        f"{shorter * 1e3:.3f}ms to {longer * 1e3:.3f}ms, more than three times"
+    )
+
+
+def test_run_phase_accepts_a_review_holding_a_long_hash_quickly():
+    body = "Checked the artifact " + "x" * 4000 + "/" * 50 + " against its digest."
+    start = time.perf_counter()
+    result = review_phase.run_phase(_envelope("claude-fresh", _claude_approve_with(body)))
+    elapsed = time.perf_counter() - start
+    assert result["status"] == "success", result["reason"]
+    assert elapsed <= REDOS_LIMIT_SECONDS, f"run_phase took {elapsed:.2f}s"
+
+
+# --- (e) a Markdown link target is a reference; its label is not --------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("See [label](docs/x.md) for the rule.", id="docs-target"),
+        pytest.param("See [x](#3d) for the rule.", id="hash-target"),
+        pytest.param("See [label](docs/3d) for the rule.", id="extensionless-target"),
+        pytest.param("See [label](3d/x.md) for the rule.", id="duration-first-target"),
+        pytest.param("See [label](docs/x.md) and §3d for the rule.", id="docs-target-beside-section"),
+        pytest.param("See [x](#3d) and docs/3d/x.md for the rule.", id="hash-target-beside-path"),
+    ],
+)
+def test_link_target_as_a_pure_reference_is_not_a_claim(text):
+    assert review_phase._has_duration_claim(text) is False, (
+        "a Markdown link target is a reference, never a timing claim"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("See [label](docs/x.md); the caller waits 3d.", id="docs-target"),
+        pytest.param("See [x](#3d); the caller waits 3d.", id="hash-target"),
+        pytest.param("See [label](docs/3d); it took 2h.", id="extensionless-target"),
+        pytest.param("See [took 3d](#x) for the rule.", id="claim-in-the-label"),
+        pytest.param("See [x](#3d for the rule.", id="unclosed-target-stays-visible"),
+    ],
+)
+def test_link_target_beside_a_real_claim_is_a_claim(text):
+    assert review_phase._has_duration_claim(text) is True, (
+        "a real claim beside a link target, in its label, or after an "
+        "unclosed target stays a claim"
+    )
