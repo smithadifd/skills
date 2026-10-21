@@ -107,7 +107,11 @@ _HEADING = re.compile(
 def _heading_title(match: re.Match[str]) -> str:
     return next(group for group in match.groups() if group is not None)
 _BULLET = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$")
-_NONE_BULLET = re.compile(r"^`?none`?\.?$", re.IGNORECASE)
+# The clean markers under an Issues heading: `none`, `None.`, `None blocking.`,
+# `No issues`, `No issues.`, with an optional leading `- `.
+_NONE_BULLET = re.compile(
+    r"^(?:[-*]\s+)?`?(?:none(?:\s+blocking)?|no\s+issues)`?\.?$", re.IGNORECASE
+)
 _CLEAN_SENTINEL = re.compile(r"^\W*No bugs or security issues found\.?\W*$", re.IGNORECASE)
 
 
@@ -468,9 +472,37 @@ _DURATION_CLAIM = re.compile(
 )
 
 
+# Section and file references that merely look like a duration: `§3d`,
+# `section 3d`, `foo.py:12d`, and tokens that are paths (`docs/3d/x.md`).
+_REFERENCE = re.compile(
+    r"§\s*\d[\w.]*"
+    r"|\bsections?\s+\d[\w.]*"
+    r"|[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:\d[\w]*",
+    re.IGNORECASE,
+)
+_CLAIM_LIKE_FIRST_COMPONENT = re.compile(r"^\d+(?:\.\d+)?[a-z]+$", re.IGNORECASE)
+
+
+def _blank_path_token(match: re.Match[str]) -> str:
+    token = match.group(0)
+    first = token.split("/", 1)[0]
+    # `3d/day` is a rate, not a path: keep a claim-shaped first component.
+    return token if _CLAIM_LIKE_FIRST_COMPONENT.match(first) else " "
+
+
+_PATH_TOKEN_IN_TEXT = re.compile(r"[^\s/]*/\S*")
+
+
+def _strip_references(line: str) -> str:
+    line = _REFERENCE.sub(" ", line)
+    return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
+
+
 def _text_for_duration_scan(text: str) -> str:
     return "\n".join(
-        line for line in text.splitlines() if not _INTERVAL_LINE.match(line)
+        _strip_references(line)
+        for line in text.splitlines()
+        if not _INTERVAL_LINE.match(line)
     )
 
 

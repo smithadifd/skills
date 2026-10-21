@@ -803,3 +803,98 @@ def test_interval_missing_duration_is_refused():
     assert "review_interval_endpoints_missing" in result["reason"]
     assert "duration" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
+
+
+# --- section/file references are not duration claims; prose clean markers ----
+
+
+def _claude_approve_with(body: str, issues: str = "- none") -> str:
+    return (
+        "## Verdict: APPROVE\n\n"
+        f"### Summary\n{body}\n\n"
+        f"### Issues\n{issues}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Checked the rule in §3d against the diff.",
+        "Checked § 3d against the diff.",
+        "See section 3d for the rule.",
+        "See Section 3d for the rule.",
+        "See SECTION 12h for the rule.",
+        "The call site at foo.py:12d is unchanged.",
+        "The call site at src/pkg/foo.py:7m is unchanged.",
+        "Only touches docs/3d/notes.md and nothing else.",
+    ],
+)
+def test_section_and_file_references_are_not_duration_claims(body):
+    text = _claude_approve_with(body)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
+    assert "intervals" not in result
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "The caller waits 3d for the lock.",
+        "The job ran 3 days before failing.",
+        "It returned in 2h.",
+        "Throughput is 3d/day at peak.",
+        "See §3d, but the caller also waits 3d.",
+    ],
+)
+def test_real_duration_claims_still_require_an_interval(body):
+    text = _claude_approve_with(body)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
+PROSE_CLEAN_MARKERS = [
+    "None",
+    "None.",
+    "None blocking.",
+    "No issues",
+    "No issues.",
+    "none blocking",
+    "NO ISSUES.",
+    "- None",
+    "- None blocking.",
+    "- No issues.",
+]
+
+
+@pytest.mark.parametrize("marker", PROSE_CLEAN_MARKERS)
+def test_prose_clean_marker_under_issues_parses_as_zero_findings(marker):
+    text = _claude_approve_with("Looks fine.", issues=marker)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert findings == []
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+
+
+@pytest.mark.parametrize("marker", PROSE_CLEAN_MARKERS)
+def test_prose_clean_marker_without_a_verdict_line_still_refuses(marker):
+    text = f"### Summary\nLooks fine.\n\n### Issues\n{marker}\n"
+    with pytest.raises(review_phase.ParseError, match="no verdict"):
+        review_phase.parse_claude_fresh(text)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Nothing much to report here.",
+        "None of the call sites were updated.",
+        "No issues were found in the parser but the tests are thin.",
+        "Several things look odd.",
+    ],
+)
+def test_other_prose_under_issues_still_refuses(prose):
+    text = _claude_approve_with("Looks fine.", issues=prose)
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
