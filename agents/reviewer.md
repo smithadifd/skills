@@ -96,6 +96,7 @@ If approving with no issues, keep the prose short: verdict, one confirmation sen
 
 Callers may parse this block, so keep its shape:
 - Keep the verdict header and the `` `path:line` — `` issue prefix exactly as shown.
+- With no issues, either leave out the **Issues** section or put exactly `- none` under it. Never write prose there ("None blocking."): a parser reads that as content it cannot parse, and the review fails.
 - Use only the four section headings shown. Never start any other heading with "Issues", "Minor" or "Findings"; a parser can read anything under such a heading as a new finding.
 - Leave durations out of the whole reply: report test results as pass/fail counts, and describe timing problems without quoting a measured time ("the retry loop never backs off", not "it retries every 3 seconds"). A parser may reject a reply that quotes a duration without the caller's timing record.
 - If the brief asks for extra lines or a different layout (a timing record, say), add them as asked; the rules above still hold for everything else.
