@@ -880,6 +880,103 @@ def test_real_duration_claims_still_require_an_interval(body):
     assert "review_interval_endpoints_missing" in result["reason"]
 
 
+# --- file:line references and delimiter-glued paths never hide a claim --------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("it waited 3d/foo.py:12 before failing", id="plain"),
+        pytest.param("it waited _3d/foo.py:12_ before failing", id="underscore-wrapped"),
+        pytest.param("it waited `3d/foo.py:12` before failing", id="backtick-wrapped"),
+    ],
+)
+def test_file_line_reference_with_a_duration_first_component_is_a_claim(text):
+    assert review_phase._has_duration_claim(text) is True, (
+        "a file:line reference whose first path component is a duration must "
+        "stay visible to the scan"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("see foo.py:12 for the bound", id="plain-reference"),
+        pytest.param("see docs/3d/x.md:12 for the bound", id="later-component-duration"),
+        pytest.param("see src/days/run.py:7 for the bound", id="later-component-unit-word"),
+        pytest.param("The call site at foo.py:12d is unchanged.", id="line-suffix"),
+    ],
+)
+def test_file_line_reference_without_a_duration_first_component_is_not_a_claim(text):
+    assert review_phase._has_duration_claim(text) is False, (
+        "a file:line reference whose first path component is not a duration "
+        "must stay a non-claim"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("waited 41m:/x/y.md", id="colon"),
+        pytest.param("3h;src/a.py", id="semicolon"),
+        pytest.param("41m,docs/x.md", id="comma"),
+        pytest.param("waited _3h;src/a.py_ now", id="wrapped-semicolon"),
+        pytest.param("see docs/x.md,3d/y.md", id="later-list-entry"),
+        pytest.param("see docs/x.md,3d", id="trailing-list-duration"),
+    ],
+)
+def test_delimiter_glued_duration_before_or_after_a_path_is_a_claim(text):
+    assert review_phase._has_duration_claim(text) is True, (
+        "a duration glued to a path by a colon, semicolon or comma must stay "
+        "visible to the scan"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("docs/x.md,docs/y.md", id="comma-list"),
+        pytest.param("src/a.py;docs/b.md", id="semicolon-list"),
+        pytest.param("src/a.py:12, docs/b.md:7", id="reference-list"),
+        pytest.param("see docs/3d/x.md,docs/2h/y.md", id="later-components-durations"),
+        pytest.param("see https://example.com/x/y and more", id="url-scheme"),
+    ],
+)
+def test_delimited_path_lists_without_a_duration_are_not_claims(text):
+    assert review_phase._has_duration_claim(text) is False, (
+        "delimited paths with no duration first component must stay non-claims"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("ran x.y:3 days", id="bare-file"),
+        pytest.param("ran src/x.py:3 days", id="path-file"),
+        pytest.param("ran x.y:3 hours before failing", id="longer-sentence"),
+    ],
+)
+def test_file_line_reference_followed_by_a_spaced_duration_unit_is_a_claim(text):
+    assert review_phase._has_duration_claim(text) is True, (
+        "a file:line reference followed by a spaced duration unit word is a "
+        "claim, the same as a section id followed by one"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("see x.y:3 for the bound", id="bare-file"),
+        pytest.param("see src/x.py:3 for the bound", id="path-file"),
+        pytest.param("see x.y:3, then continue", id="comma-after"),
+    ],
+)
+def test_file_line_reference_followed_by_other_words_is_not_a_claim(text):
+    assert review_phase._has_duration_claim(text) is False, (
+        "a file:line reference followed by ordinary words must stay a non-claim"
+    )
+
+
 PROSE_CLEAN_MARKERS = [
     "None",
     "None.",

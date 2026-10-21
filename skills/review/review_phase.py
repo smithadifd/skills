@@ -485,7 +485,7 @@ _NOT_A_CLAIM = rf"(?![\w.]|\s+{_UNIT_WORD})"
 _REFERENCE = re.compile(
     rf"§\s*\d[\w.]*{_NOT_A_CLAIM}"
     rf"|\bsections?\s+\d[\w.]*{_NOT_A_CLAIM}"
-    r"|[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:\d[\w]*",
+    r"|(?P<fileline>[\w./+-]*[A-Za-z_][\w+-]*\.[A-Za-z]\w*:(?P<line>\d[\w]*))",
     re.IGNORECASE,
 )
 # Only the FIRST lexical component of a path-like token can be a claim glued
@@ -510,18 +510,59 @@ _OPENING_WRAPPERS = "\"'`*_([{"
 _CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}"
 
 
-def _blank_path_token(match: re.Match[str]) -> str:
+_UNIT_AFTER = re.compile(rf"\s+{_UNIT_WORD}", re.IGNORECASE)
+
+
+def _blank_reference(match: re.Match[str]) -> str:
+    """Replacement for a `_REFERENCE` match: what the scan should see instead."""
+    if match.group("fileline") is None:
+        return " "
     token = match.group(0)
+    # A file:line reference follows the same path-token rule: only the first
+    # `/`-component can be a claim. When it is a duration the whole token stays
+    # visible, for the path-token pass to handle (`3d/foo.py:12`).
+    first = token.lstrip(_OPENING_WRAPPERS).split("/", 1)[0]
+    if "/" in token and _DURATION_COMPONENT.match(first):
+        return token
+    # A file:line reference followed by a spaced duration unit word is a claim
+    # (`x.y:3 days`): only the reference is erased, the number stays.
+    if _UNIT_AFTER.match(match.string, match.end()):
+        return " " + match.group("line")
+    return " "
+
+
+# A path-like token is judged one piece at a time, split at the delimiters that
+# can glue a claim to a path (`41m:/x/y.md`, `3h;src/a.py`, `41m,docs/x.md`).
+# A `:` that opens `//` is a URL scheme and is not a split point.
+_PATH_DELIMITERS = re.compile(r"([;,]+|:+(?!//))")
+
+
+def _blank_path_token(match: re.Match[str]) -> str:
+    pieces = _PATH_DELIMITERS.split(match.group(0))
+    # Odd entries are the delimiters themselves; they are kept as they are.
+    return "".join(
+        piece if index % 2 else _blank_path_piece(piece)
+        for index, piece in enumerate(pieces)
+    )
+
+
+def _blank_path_piece(token: str) -> str:
     bare = token.rstrip(".,;:)]}\"'`")
     # Fail closed: a duration-shaped FIRST component, however quoted or
-    # wrapped, keeps the token visible to the scan. Its wrappers become spaces
+    # wrapped, keeps the piece visible to the scan. Its wrappers become spaces
     # so the claim has a word boundary in front of it.
     unwrapped = token.lstrip(_OPENING_WRAPPERS)
-    if _DURATION_COMPONENT.match(unwrapped.split("/", 1)[0]):
+    first = unwrapped.split("/", 1)[0]
+    if "/" not in token:
+        first = first.rstrip(_CLOSING_WRAPPERS)
+    if _DURATION_COMPONENT.match(first):
         core = unwrapped.rstrip(_CLOSING_WRAPPERS)
         leading = " " * (len(token) - len(unwrapped))
         trailing = " " * (len(unwrapped) - len(core))
         return leading + core + trailing
+    # A piece with no `/` is not a path; it stays visible (`41m` in `41m,x/y`).
+    if "/" not in token:
+        return token
     # Only a token that is clearly a path is blanked: an explicit path prefix,
     # or a file extension on the last component. A plain
     # `word/word` such as `days/run` or `3d/day` is a rate, so a duration
@@ -538,7 +579,7 @@ _PATH_TOKEN_IN_TEXT = re.compile(r"[^\s/\[\]()]*/[^\s\])]*")
 
 def _strip_references(line: str) -> str:
     line = _LINK_TARGET.sub("()", line)
-    line = _REFERENCE.sub(" ", line)
+    line = _REFERENCE.sub(_blank_reference, line)
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
 
