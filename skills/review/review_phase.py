@@ -108,9 +108,11 @@ def _heading_title(match: re.Match[str]) -> str:
     return next(group for group in match.groups() if group is not None)
 _BULLET = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$")
 # The clean markers under an Issues heading: `none`, `None.`, `None blocking.`,
-# `No issues`, `No issues.`, with an optional leading `- `.
+# `No issues`, `No issues.`, `Nothing to report.`, with an optional leading `- `.
+# Each is the whole line; `Nothing to report, but see below.` is prose.
 _NONE_BULLET = re.compile(
-    r"^(?:[-*]\s+)?`?(?:none(?:\s+blocking)?|no\s+issues)`?\.?$", re.IGNORECASE
+    r"^(?:[-*]\s+)?`?(?:none(?:\s+blocking)?|no\s+issues|nothing\s+to\s+report)`?\.?$",
+    re.IGNORECASE,
 )
 _CLEAN_SENTINEL = re.compile(r"^\W*No bugs or security issues found\.?\W*$", re.IGNORECASE)
 
@@ -174,16 +176,17 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
             bullets.append(matched.group(1))
         elif bullets and line.startswith((" ", "\t")) and line.strip():
             bullets[-1] = bullets[-1] + " " + line.strip()
-        elif line.strip() and not bullets:
+        elif line.strip():
+            # Any other non-bullet line, before or after a bullet, is prose: a
+            # clean marker, or foreign prose that keeps the section from
+            # reading as clean (`- none` then a paragraph refuses).
             if _is_clean_marker(line):
                 saw_clean = True
             else:
                 saw_foreign_prose = True
-            i += 1
-            continue
         i += 1
-    legit_empty = (saw_clean and not saw_foreign_prose) or (
-        bool(bullets) and all(_is_clean_marker(b) for b in bullets)
+    legit_empty = not saw_foreign_prose and (
+        saw_clean or (bool(bullets) and all(_is_clean_marker(b) for b in bullets))
     )
     real = [
         b for b in bullets if not (_is_clean_marker(b) or _PLACEHOLDER_BULLET.match(b))
@@ -506,8 +509,14 @@ _DURATION_COMPONENT = re.compile(
 _LINK_TARGET = re.compile(r"(?<=\])\([^)\s]*\)")
 _PATH_PREFIX = re.compile(r"^(?:/|\./|\.\./|~/)")
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
-_OPENING_WRAPPERS = "\"'`*_([{"
-_CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}"
+_OPENING_WRAPPERS = "\"'`*_([{<"
+_CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}>"
+# Sentence punctuation that can close a path (`see docs/x.md?`).
+_SENTENCE_END = "?!"
+# A URI scheme (RFC 3986: a letter, then letters, digits, `+`, `-`, `.`) opening
+# the token, as in a bare URL or a `<...>` autolink. A scheme cannot start with
+# a digit, so a duration glued in front of a URL never reads as one.
+_URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
 _UNIT_AFTER = re.compile(rf"\s+{_UNIT_WORD}", re.IGNORECASE)
@@ -564,12 +573,15 @@ def _blank_path_piece(token: str) -> str:
     if "/" not in token:
         return token
     # Only a token that is clearly a path is blanked: an explicit path prefix,
-    # or a file extension on the last component. A plain
-    # `word/word` such as `days/run` or `3d/day` is a rate, so a duration
-    # claim in front of it ("3 days/run") still counts.
+    # a URI scheme, or a file extension on the last component once closing
+    # Markdown wrappers and sentence punctuation are stripped (`**docs/x.md**`,
+    # `docs/x.md?`). A plain `word/word` such as `days/run` or `3d/day` is a
+    # rate, so a duration claim in front of it ("3 days/run") still counts.
+    core = unwrapped.rstrip(_CLOSING_WRAPPERS + _SENTENCE_END)
     is_path = (
         _PATH_PREFIX.match(bare)
-        or _FILE_EXTENSION.search(bare.rsplit("/", 1)[-1])
+        or _URI_SCHEME.match(unwrapped)
+        or _FILE_EXTENSION.search(core.rsplit("/", 1)[-1])
     )
     return " " if is_path else token
 

@@ -1021,3 +1021,144 @@ def test_other_prose_under_issues_still_refuses(prose):
     text = _claude_approve_with("Looks fine.", issues=prose)
     with pytest.raises(review_phase.ParseError, match="ISSUES"):
         review_phase.parse_claude_fresh(text)
+
+
+# --- URLs, wrapped paths and trailing punctuation are references -------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("See https://example.com/3d/rule for the details.", id="bare-url"),
+        pytest.param("See <https://example.com/3d/rule> for the details.", id="autolink"),
+        pytest.param("Only touches **docs/3d/x.md** and nothing else.", id="strong-path"),
+        pytest.param("Only touches docs/3d/x.md?", id="path-question"),
+        pytest.param("Only touches docs/3d/x.md!", id="path-exclamation"),
+    ],
+)
+def test_url_wrapped_and_punctuated_references_are_not_claims(text):
+    assert review_phase._has_duration_claim(text) is False, (
+        "a URL, an autolink, an emphasised path, or a path before sentence "
+        "punctuation is a reference, not a timing claim"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("See 3d/https://example.com/rule for the details.", id="bare-url"),
+        pytest.param("See <3d/https://example.com/rule> for the details.", id="autolink"),
+        pytest.param("Only touches **3d/x.md** and nothing else.", id="strong-path"),
+        pytest.param("Only touches 3d/x.md?", id="path-question"),
+        pytest.param("Only touches 3d/x.md!", id="path-exclamation"),
+    ],
+)
+def test_same_reference_forms_with_a_duration_first_component_are_claims(text):
+    assert review_phase._has_duration_claim(text) is True, (
+        "a duration-shaped first component keeps the token visible to the "
+        "scan however the reference is wrapped or punctuated"
+    )
+
+
+def test_run_phase_accepts_an_autolink_and_refuses_its_duration_first_variant():
+    accepted = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("See <https://example.com/3d/rule> for the details."),
+        )
+    )
+    assert accepted["status"] == "success", accepted["reason"]
+    assert accepted["reason"] == "claude-fresh: approved, 0 finding(s)"
+    refused = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("See <3d/https://example.com/rule> for the details."),
+        )
+    )
+    assert refused["status"] == "failure"
+    assert "review_interval_endpoints_missing" in refused["reason"]
+
+
+# --- prose after a bulleted clean marker refuses ----------------------------
+
+CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."
+CLEAN_MARKER_THEN_CONTINUATION = "- None blocking.\n  Checked every call site."
+
+
+def test_bulleted_clean_marker_followed_by_prose_refuses():
+    text = _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_PROSE)
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+def test_bulleted_clean_marker_followed_by_an_indented_continuation_approves():
+    text = _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_CONTINUATION)
+    verdict, _findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+
+
+def test_run_phase_refuses_prose_after_a_bulleted_clean_marker():
+    refused = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_PROSE),
+        )
+    )
+    assert refused["status"] == "failure"
+    assert "ISSUES" in refused["reason"]
+    assert refused["artifacts"]["findings.json"] is None
+    continued = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_CONTINUATION),
+        )
+    )
+    assert continued["status"] == "success", continued["reason"]
+    assert continued["artifacts"]["findings.json"]["verdict"] == "approved"
+
+
+@pytest.mark.parametrize(
+    "issues",
+    [
+        pytest.param("- none\nNothing to report.", id="adjacent"),
+        pytest.param("- none\n\nNothing to report.", id="blank-line-between"),
+        pytest.param("- none\nnothing to report", id="lowercase-no-period"),
+    ],
+)
+def test_bulleted_clean_marker_followed_by_nothing_to_report_approves(issues):
+    text = _claude_approve_with("Checked.", issues=issues)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert findings == []
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "A real issue is described in prose.",
+        "Nothing much to report here.",
+        "None of the call sites were updated.",
+        "Nothing to report, but see below.",
+    ],
+)
+def test_bulleted_clean_marker_followed_by_other_prose_refuses(prose):
+    text = _claude_approve_with("Checked.", issues=f"- none\n{prose}")
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+def test_nothing_to_report_with_more_on_the_line_is_foreign_prose():
+    text = _claude_approve_with("Checked.", issues="Nothing to report, but see below.")
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "ISSUES" in result["reason"]
+
+
+def test_prose_before_a_bulleted_clean_marker_refuses():
+    text = _claude_approve_with("Checked.", issues="A real issue is described in prose.\n- none")
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
