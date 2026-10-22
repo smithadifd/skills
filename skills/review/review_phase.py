@@ -71,7 +71,7 @@ import re
 import sys
 from pathlib import Path
 
-from jev_client import JevClient, JevClosed, trim_payload
+from jev_client import _ANY_HEADING, JevClient, JevClosed, trim_payload
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "findings.schema.json"
 SCHEMA_ID = "review-findings/v1"
@@ -94,20 +94,10 @@ class ParseError(ValueError):
 # --- text helpers shared by the adapters -------------------------------------
 
 # A markdown heading, or a bare section label (`FINDINGS:`, `VERDICT: …`) in
-# the headless shape that writes no `#` at all.
-# This runs on every line of every review, so it has to stay linear on any
-# line. A title starts on a non-space character, so it never shares the
-# marker's whitespace. It ends on a character the closing `#`/space tail cannot
-# hold, so no lazy quantifier rescans that tail. A label's payload stops at the
-# first newline and allows only whitespace after it. The lines and titles it
-# accepts are exactly those of the lazy `(.+?)\s*#*` and `:.*` form it replaces.
-_HEADING = re.compile(
-    r"^\s*(?:#{1,6}\s*(\S(?:.*[^\s#]|.*#(?=\s+#))?|[^\S\n])(?:\s*#+)?"
-    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**\s*:[^\n]*(?:\n\s*)?$"
-    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**"
-    r")\s*$",
-    re.IGNORECASE,
-)
+# the headless shape that writes no `#` at all. This is the same compiled
+# pattern the Jev payload trim uses, so the two can never drift apart; its
+# grammar, and why it stays linear on any line, is described in jev_client.py.
+_HEADING = _ANY_HEADING
 
 
 def _heading_title(match: re.Match[str]) -> str:
@@ -248,7 +238,12 @@ def _finding(text: str, rule: str, severity: str) -> dict:
 _GROK_VERDICT = re.compile(r"^`?\*{0,2}(cleared|flagged)\b", re.IGNORECASE)
 # The bare `VERDICT: flagged — …` shape carries the value on the heading's
 # own line, not the next one — the generic `_HEADING` match discards it.
-_GROK_VERDICT_LABEL = re.compile(r"^\s*\**VERDICT\**\s*:\s*\**\s*(cleared|flagged)\b", re.IGNORECASE)
+# The whitespace after the colon and the whitespace after optional `*` marks
+# are two runs only when a `*` sits between them, so one long space run is
+# never split two ways (the `\s*\**\s*` form it replaces was quadratic).
+_GROK_VERDICT_LABEL = re.compile(
+    r"^\s*\**VERDICT\**\s*:\s*(?:\*+\s*)?(cleared|flagged)\b", re.IGNORECASE
+)
 
 
 def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
@@ -293,12 +288,16 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     return outcome, [_finding(b, "finding", severity) for b in bullets]
 
 
+# These run on every line of a review. The whitespace after the colon and the
+# whitespace after an optional `[` or run of `*` marks are two runs only when
+# a mark sits between them, so one long space run is never split two ways (the
+# `\s*\[?\s*` and `\s*\**\s*` forms they replace were quadratic).
 _CLAUDE_VERDICT_HEADING = re.compile(
-    r"^\s*#{1,6}\s*\**Verdict\**\s*:\s*\[?\s*(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)",
+    r"^\s*#{1,6}\s*\**Verdict\**\s*:\s*(?:\[\s*)?(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)",
     re.IGNORECASE,
 )
 _CLAUDE_VERDICT_LABEL = re.compile(
-    r"^\s*\**VERDICT\**\s*:\s*\**\s*(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)\b",
+    r"^\s*\**VERDICT\**\s*:\s*(?:\*+\s*)?(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)\b",
     re.IGNORECASE,
 )
 _CLAUDE_SECTIONS = (

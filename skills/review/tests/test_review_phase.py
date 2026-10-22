@@ -1675,3 +1675,101 @@ def test_heading_forms_keep_main_titles(line, title):
     matched = review_phase._HEADING.match(line)
     got = None if matched is None else review_phase._heading_title(matched)
     assert got == title
+
+
+# --- the verdict lines stay linear on a long whitespace run ------------------
+#
+# The verdict heading and label patterns run on every line of a review. A
+# colon, a long space run, an optional `[` or `*` mark and a second space run
+# used to let two adjacent whitespace sub-patterns split the first run every
+# way, which is quadratic. Each form below keeps the verdict word the earlier
+# patterns gave.
+
+
+def _best_match_seconds(pattern, line: str, trials: int = 7, calls: int = 50) -> float:
+    """The fastest per-call time over several trials; one slow call ends it."""
+    best = float("inf")
+    for _ in range(trials):
+        start = time.perf_counter()
+        for _ in range(calls):
+            call_start = time.perf_counter()
+            pattern.match(line)
+            call = time.perf_counter() - call_start
+            if call > HEADING_LIMIT_SECONDS:
+                return call
+        best = min(best, (time.perf_counter() - start) / calls)
+    return best
+
+
+VERDICT_GROWTH_CASES = [
+    ("_CLAUDE_VERDICT_HEADING", "colon-spaces-x", lambda n: "## Verdict:" + " " * n + "x"),
+    (
+        "_CLAUDE_VERDICT_HEADING",
+        "colon-spaces-bracket-spaces-x",
+        lambda n: "## Verdict:" + " " * n + "[" + " " * n + "x",
+    ),
+    ("_CLAUDE_VERDICT_LABEL", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
+    (
+        "_CLAUDE_VERDICT_LABEL",
+        "colon-spaces-stars-spaces-x",
+        lambda n: "VERDICT:" + " " * n + "**" + " " * n + "x",
+    ),
+    ("_GROK_VERDICT_LABEL", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
+    (
+        "_GROK_VERDICT_LABEL",
+        "colon-spaces-stars-spaces-x",
+        lambda n: "VERDICT:" + " " * n + "**" + " " * n + "x",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "shape", "build"),
+    VERDICT_GROWTH_CASES,
+    ids=[f"{name}-{shape}" for name, shape, _ in VERDICT_GROWTH_CASES],
+)
+def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
+    pattern = getattr(review_phase, name)
+    shorter = _best_match_seconds(pattern, build(3000))
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"{name} took {shorter:.2f}s on the 3000-space {shape} line"
+    )
+    longer = _best_match_seconds(pattern, build(6000))
+    assert longer <= 3 * shorter, (
+        f"{name} on a {shape} line: doubling 3000 to 6000 spaces took "
+        f"{shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than three times"
+    )
+
+
+VERDICT_FORMS = [
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: APPROVE", "APPROVE"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [APPROVE_WITH_FINDINGS]", "APPROVE_WITH_FINDINGS"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [ REQUEST CHANGES ]", "REQUEST CHANGES"),
+    ("_CLAUDE_VERDICT_HEADING", "### **Verdict**:REQUEST-CHANGES", "REQUEST-CHANGES"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict:\t[\tapprove", "approve"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [[APPROVE", None),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: * APPROVE", None),
+    ("_CLAUDE_VERDICT_HEADING", "####### Verdict: APPROVE", None),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: APPROVE", "APPROVE"),
+    ("_CLAUDE_VERDICT_LABEL", "**VERDICT:** REQUEST_CHANGES", "REQUEST_CHANGES"),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: ** APPROVE", "APPROVE"),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT:**APPROVE**", "APPROVE"),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: * * APPROVE", None),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: [APPROVE", None),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: APPROVED", None),
+    ("_GROK_VERDICT_LABEL", "VERDICT: flagged — the retry logic needs work.", "flagged"),
+    ("_GROK_VERDICT_LABEL", "**VERDICT**: **cleared**", "cleared"),
+    ("_GROK_VERDICT_LABEL", "VERDICT:\tcleared", "cleared"),
+    ("_GROK_VERDICT_LABEL", "VERDICT: * * cleared", None),
+    ("_GROK_VERDICT_LABEL", "VERDICT: clearedx", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "line", "word"),
+    VERDICT_FORMS,
+    ids=[f"{name}-{line!r}" for name, line, _ in VERDICT_FORMS],
+)
+def test_verdict_forms_keep_main_words(name, line, word):
+    matched = getattr(review_phase, name).match(line)
+    assert (None if matched is None else matched.group(1)) == word
