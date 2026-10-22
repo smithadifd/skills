@@ -980,13 +980,149 @@ def _blank_quoted_inputs(lines: list[str]) -> list[str]:
     return out
 
 
-def _text_for_duration_scan(text: str) -> str:
-    lines = text.splitlines()
-    return "\n".join(
-        _EMPHASISED_DURATION.sub(_unwrap_emphasised_duration, _strip_references(scanned))
-        for line, scanned in zip(lines, _blank_quoted_inputs(lines))
-        if not _INTERVAL_LINE.match(line)
+# --- quoted examples (double quotes, any non-verdict line) -------------------
+#
+# A duration the reviewer quotes as an example of input text is not a
+# measured-interval claim. The span is a same-line pair of ASCII double
+# quotes whose interior is 1..200 characters, contains a duration token,
+# and is not bare: the stripped interior does not fullmatch a duration
+# token, and it contains whitespace. So `"ran for 120 seconds"` is an
+# example; `"41 seconds"` and `"3d/foo.py"` stay claims (`took "41 seconds"`
+# still needs INTERVAL endpoints). Unmatched quotes, interiors longer than
+# 200, heading lines, and grok `cleared`/`flagged` verdict-value lines fail
+# closed (stay in scope). Backtick spans stay the Evidence / Minor notes
+# rule above; a backtick-wrapped `"…"` is handled here.
+#
+# The walk is left-to-right str.find of `"`. No regex, no nested
+# quantifiers; a 100 KB adversarial line stays linear.
+
+_QUOTED_EXAMPLE_MAX = 200
+_REFUSAL_LINE_MAX = 200
+
+
+def _is_verdict_or_heading_line(line: str) -> bool:
+    return bool(
+        _HEADING.match(line)
+        or _GROK_VERDICT.match(line)
+        or _GROK_VERDICT_LABEL.match(line)
+        or _CLAUDE_VERDICT_HEADING.match(line)
+        or _CLAUDE_VERDICT_LABEL.match(line)
     )
+
+
+def _is_quoted_example(interior: str) -> bool:
+    stripped = interior.strip()
+    if not stripped or len(interior) > _QUOTED_EXAMPLE_MAX:
+        return False
+    if _DURATION_CLAIM.search(stripped) is None:
+        return False
+    if _DURATION_CLAIM.fullmatch(stripped):
+        return False
+    if not any(ch.isspace() for ch in stripped):
+        return False
+    return True
+
+
+def _blank_double_quoted_examples(line: str) -> str:
+    """`line` with quoted-example interiors turned into spaces."""
+    if '"' not in line:
+        return line
+    pieces: list[str] = []
+    pos = 0
+    length = len(line)
+    while pos < length:
+        open_at = line.find('"', pos)
+        if open_at < 0:
+            pieces.append(line[pos:])
+            break
+        pieces.append(line[pos : open_at + 1])
+        close_limit = open_at + 1 + _QUOTED_EXAMPLE_MAX
+        close_at = line.find('"', open_at + 1, close_limit + 1)
+        if close_at < 0:
+            close_at = line.find('"', close_limit + 1)
+            if close_at < 0:
+                pieces.append(line[open_at + 1 :])
+                break
+            pieces.append(line[open_at + 1 : close_at])
+            pieces.append('"')
+            pos = close_at + 1
+            continue
+        interior = line[open_at + 1 : close_at]
+        if _is_quoted_example(interior):
+            pieces.append(" " * len(interior))
+        else:
+            pieces.append(interior)
+        pieces.append('"')
+        pos = close_at + 1
+    return "".join(pieces)
+
+
+def _blank_quoted_examples(original: str, scanned: str) -> str:
+    if _is_verdict_or_heading_line(original):
+        return scanned
+    return _blank_double_quoted_examples(scanned)
+
+
+def _scan_line(original: str, quoted_blanked: str) -> str:
+    scanned = _blank_quoted_examples(original, quoted_blanked)
+    return _EMPHASISED_DURATION.sub(
+        _unwrap_emphasised_duration, _strip_references(scanned)
+    )
+
+
+def _iter_scanned_lines(text: str):
+    lines = text.splitlines()
+    quoted = _blank_quoted_inputs(lines)
+    for number, (original, blanked) in enumerate(zip(lines, quoted), start=1):
+        yield number, original, _scan_line(original, blanked)
+
+
+def _text_for_duration_scan(text: str) -> str:
+    return "\n".join(
+        scanned
+        for _, original, scanned in _iter_scanned_lines(text)
+        if not _INTERVAL_LINE.match(original)
+    )
+
+
+def _named_refusal(rule: str, line_number: int, line: str) -> str:
+    shown = line if len(line) <= _REFUSAL_LINE_MAX else line[:_REFUSAL_LINE_MAX]
+    return f"{rule}: line {line_number}: {shown}"
+
+
+def _first_duration_claim_line(text: str) -> tuple[int, str] | None:
+    """The first original line that participates in a duration claim.
+
+    The claim is found on the joined scan text, the same string
+    `_has_duration_claim` searches, so a number at the end of one line and a
+    unit on the next (`3` then `hours`) still names the line that holds the
+    number.
+    """
+    pairs = [
+        (number, original, scanned)
+        for number, original, scanned in _iter_scanned_lines(text)
+        if not _INTERVAL_LINE.match(original)
+    ]
+    if not pairs:
+        return None
+    joined = "\n".join(scanned for _, _, scanned in pairs)
+    match = _DURATION_CLAIM.search(joined)
+    if match is None:
+        return None
+    index = joined.count("\n", 0, match.start())
+    number, original, _ = pairs[index]
+    return number, original
+
+
+def _first_incomplete_interval_line(text: str) -> tuple[int, str] | None:
+    for number, line in enumerate(text.splitlines(), start=1):
+        matched = _INTERVAL_LINE.match(line)
+        if matched is None:
+            continue
+        _, missing = _parse_interval_body(matched.group(1))
+        if missing:
+            return number, line
+    return None
 
 
 def _has_duration_claim(text: str) -> bool:
@@ -1038,15 +1174,17 @@ def _collect_intervals(text: str) -> tuple[list[dict], list[list[str]]]:
 
 def _require_intervals(text: str) -> list[dict]:
     complete, incomplete = _collect_intervals(text)
-    if not _has_duration_claim(text):
+    claim = _first_duration_claim_line(text)
+    if claim is None:
         return complete
     if complete:
         return complete
     if incomplete:
-        raise ParseError(
-            f"{INTERVAL_ENDPOINTS_MISSING}: missing {', '.join(incomplete[0])}"
-        )
-    raise ParseError(f"{INTERVAL_ENDPOINTS_MISSING}: no INTERVAL record")
+        located = _first_incomplete_interval_line(text)
+        number, line = located if located is not None else claim
+        raise ParseError(_named_refusal(INTERVAL_ENDPOINTS_MISSING, number, line))
+    number, line = claim
+    raise ParseError(_named_refusal(INTERVAL_ENDPOINTS_MISSING, number, line))
 
 
 def _attach_intervals(result: dict, intervals: list[dict]) -> dict:
