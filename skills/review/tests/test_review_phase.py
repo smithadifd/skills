@@ -17,7 +17,9 @@ from the implementation. Hermetic: no network, no environment lookups.
 from __future__ import annotations
 
 import copy
+import itertools
 import json
+import random
 import re
 import subprocess
 import sys
@@ -2743,3 +2745,368 @@ def test_unmatched_opening_quote_with_a_duration_still_refuses():
     result = review_phase.run_phase(_envelope("claude-fresh", text))
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
+
+
+# --- INTERVAL line and body patterns stay linear and keep their grammar ------
+#
+# `_INTERVAL_LINE` runs on every line of every successfully parsed review.
+# `_INTERVAL_PARTS` runs on each body it accepted. A body of `from a,` plus n
+# spaces plus `b` used to backtrack about cubically; a line of `INTERVAL: a`,
+# n spaces and `b` was quadratic. The cases below are every fixture INTERVAL
+# line plus the edge forms, each with the match/groups the earlier patterns
+# gave.
+
+OLD_INTERVAL_LINE = re.compile(
+    r"^[ \t]*INTERVAL[ \t]*:[ \t]*(.*?)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+OLD_INTERVAL_PARTS = re.compile(
+    r"^from\s+(?P<start_event>.*?),\s*"
+    r"(?P<start_source>.*?)\s*to\s+"
+    r"(?P<end_event>.*?),\s*"
+    r"(?P<end_source>.*?)\s*=\s*"
+    r"(?P<duration>.*)$",
+    re.IGNORECASE,
+)
+
+INTERVAL_PARTS_LIMIT_SECONDS = 1.0
+INTERVAL_LINE_LIMIT_SECONDS = 0.05
+INTERVAL_INTERNAL_WS_LIMIT_SECONDS = 0.05
+INTERVAL_NEWLINE_FREE_OUTER_LIMIT_SECONDS = 0.001
+INTERVAL_NEWLINE_FREE_TO_LIMIT_SECONDS = 0.01
+INTERVAL_NEWLINE_FREE_COMMA_LIMIT_SECONDS = 0.01
+REPEATED_TO_OUTER_PARTS = "from a, " + "to x, " * 4000 + "y"
+REPEATED_TO_LEVEL_PARTS = "from a, src " + "to x " * 40000 + "y"
+REPEATED_COMMA_LEVEL_PARTS = "from a, src to end, " + "x, " * 40000 + "y"
+TEN_THOUSAND_SPACE_PARTS = "from a," + " " * 10_000 + "b"
+TEN_THOUSAND_SPACE_LINE = "INTERVAL: a" + " " * 10_000 + "b"
+TEN_THOUSAND_INTERNAL_WS_PARTS = (
+    "from a, foo" + " " * 10_000 + "x to end, bar" + " " * 10_000 + "y = 1s"
+)
+SOL_INTERVAL_NEWLINE_BODY = "from event,ignored,\nsource to end, result = 1s"
+SOL_INTERVAL_NEWLINE_GROUPS = ("event,ignored", "source", "end", "result", "1s")
+_INTERVAL_FUZZ_ALPHABET = ("a", ",", " ", "\n", "t", "o", "=", "F")
+_INTERVAL_S_TRAILING = re.compile(r"\s+$")
+
+
+def _fixture_interval_lines() -> list[str]:
+    found = []
+    for path in sorted(FIXTURES.glob("*.md")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "INTERVAL" in line.upper():
+                found.append(line)
+    return found
+
+
+def _interval_line_cases() -> list[str]:
+    return _fixture_interval_lines() + [
+        "INTERVAL:",
+        "INTERVAL:   ",
+        "  INTERVAL: x",
+        "\tINTERVAL\t:\tfoo\t",
+        "interval: from a, b to c, d = 1s",
+        "Interval : from a, b to c, d = 1s",
+        "INTERVAL: a" + (" " * 20) + "b",
+        "INTERVAL: a" + (" " * 20) + "b   ",
+        "INTERVAL:" + (" " * 20),
+        "INTERVAL:" + ("\t" * 5) + "x" + ("\t" * 3),
+        "INTERVAL:from a, b to c, d = 1s",
+        "INTERVAL  :  body  ",
+        " INTERVAL : body",
+        "XINTERVAL: x",
+        "INTERVALS: x",
+        "INTERVAL x",
+        "INTERVAL",
+        "# INTERVAL: x",
+        "INTERVAL :",
+        "interval:",
+        "InTeRvAl: z",
+        "INTERVAL:\ta\tb\t",
+        "INTERVAL: three\n",
+        "INTERVAL:\n",
+        "INTERVAL: x \n",
+        "",
+        "   ",
+        TEN_THOUSAND_SPACE_LINE,
+    ]
+
+
+def _interval_parts_cases() -> list[str]:
+    bodies = []
+    for line in _fixture_interval_lines():
+        matched = OLD_INTERVAL_LINE.match(line)
+        if matched is not None:
+            bodies.append(matched.group(1))
+            bodies.append(matched.group(1).strip())
+    return bodies + [
+        "from a, b to c, d = e",
+        "from request start, events.tsv:14 to result write, result.md mtime = 41m",
+        "FROM A, B TO C, D = E",
+        "from  a,  b  to  c,  d  =  e",
+        "from\ta,\tb\tto\tc,\td\t=\te",
+        "from a, b to c, d =",
+        "from , b to c, d = e",
+        "from a,  to c, d = e",
+        "from a, b to , d = e",
+        "from a, b to c,  = e",
+        "from a, b to c, d = e  ",
+        "from a, b to c, d =  e",
+        "from a,b to c,d =e",
+        "from a, xto y to c, d = e",
+        "from a, total time to c, d = e",
+        "from a, b to c, d = e, extra",
+        "from a, b, extra to c, d = e",
+        "from , , to x, y = 1",
+        "from a," + (" " * 50) + "b",
+        "from a, b to c, d=e",
+        "from a, b to c,d= e",
+        "not from a, b to c, d = e",
+        "fromage a, b to c, d = e",
+        "from a, b toward c, d = e",
+        "from a, b to c, d == e",
+        "from a b to c, d = e",
+        "from a, b to c d = e",
+        "from a, b to c, d",
+        "froma, b to c, d = e",
+        " from a, b to c, d = e",
+        "from a, b to c, d = e\n",
+        "from a, b to c, d = e\n\n",
+        "from a, photo to album, x = 1s",
+        "from a , b to c, d = e",
+        "from a, b to c , d = e",
+        "from a,to b, c = d",
+        "from a, to b, c = d",
+        "from to x, y to z, w = 1",
+        "from a, x to y to z, w = 1",
+        "from a  a, b  b to c  c, d  d = e  e",
+        "from a, b to c, d = e f g",
+        "",
+        "from",
+        "from ",
+        "from event,ignored,\nsource to end, result = 1s",
+        "from a, b to foo\n to end, x = 1s",
+        "from a, b to c, d = e \n = 1s",
+        "from a,\nb to c, d = e",
+        "from\na, b to c, d = e",
+    ]
+
+
+def _line_groups(matched):
+    if matched is None:
+        return None
+    return matched.groups()
+
+
+def _parts_groups(matched):
+    if matched is None:
+        return None
+    return tuple(matched.group(name) for name in review_phase._INTERVAL_FIELDS)
+
+
+def test_interval_patterns_accept_exactly_the_old_grammar():
+    mismatches = []
+    for text in _interval_line_cases():
+        old = _line_groups(OLD_INTERVAL_LINE.match(text))
+        new = _line_groups(review_phase._INTERVAL_LINE.match(text))
+        if old != new:
+            mismatches.append(("line", text, old, new))
+        old_iter = [m.groups() for m in OLD_INTERVAL_LINE.finditer(text)]
+        new_iter = [m.groups() for m in review_phase._INTERVAL_LINE.finditer(text)]
+        if old_iter != new_iter:
+            mismatches.append(("line-finditer", text, old_iter, new_iter))
+    for text in _interval_parts_cases():
+        old = _parts_groups(OLD_INTERVAL_PARTS.match(text))
+        new = _parts_groups(review_phase._INTERVAL_PARTS.match(text))
+        if old != new:
+            mismatches.append(("parts", text, old, new))
+    assert mismatches == [], mismatches
+
+
+def test_interval_parts_match_finishes_10000_spaces_well_under_a_second():
+    code = (
+        "import time, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import review_phase\n"
+        "start = time.perf_counter()\n"
+        "matched = review_phase._INTERVAL_PARTS.match(sys.argv[2])\n"
+        "elapsed = time.perf_counter() - start\n"
+        "print('matched' if matched else 'none')\n"
+        "print(elapsed)\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(SKILL_DIR), TEN_THOUSAND_SPACE_PARTS],
+            capture_output=True,
+            text=True,
+            timeout=INTERVAL_PARTS_LIMIT_SECONDS,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"_INTERVAL_PARTS still running after {INTERVAL_PARTS_LIMIT_SECONDS:.0f}s "
+            "on a 10,000-space body"
+        )
+    status, elapsed_s = proc.stdout.strip().splitlines()
+    assert status == "none"
+    elapsed = float(elapsed_s)
+    assert elapsed <= INTERVAL_PARTS_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.2f}s on a 10,000-space body"
+    )
+
+
+def test_interval_line_match_finishes_10000_spaces_well_under_a_second():
+    start = time.perf_counter()
+    matched = review_phase._INTERVAL_LINE.match(TEN_THOUSAND_SPACE_LINE)
+    elapsed = time.perf_counter() - start
+    assert matched is not None
+    assert matched.group(1) == "a" + " " * 10_000 + "b"
+    assert elapsed <= INTERVAL_LINE_LIMIT_SECONDS, (
+        f"_INTERVAL_LINE took {elapsed:.2f}s on a 10,000-space line"
+    )
+
+
+def test_interval_parts_match_skips_comma_when_newline_blocks_source():
+    old = _parts_groups(OLD_INTERVAL_PARTS.match(SOL_INTERVAL_NEWLINE_BODY))
+    new = _parts_groups(review_phase._INTERVAL_PARTS.match(SOL_INTERVAL_NEWLINE_BODY))
+    assert old == SOL_INTERVAL_NEWLINE_GROUPS
+    assert new == old
+
+
+def _interval_parts_fuzz_bodies() -> list[str]:
+    bodies = [SOL_INTERVAL_NEWLINE_BODY]
+    for n in range(0, 5):
+        for prod in itertools.product(_INTERVAL_FUZZ_ALPHABET, repeat=n):
+            tail = "".join(prod)
+            bodies.append(tail)
+            bodies.append("from " + tail)
+    rng = random.Random(35)
+    for _ in range(400):
+        n = rng.randint(5, 12)
+        tail = "".join(rng.choice(_INTERVAL_FUZZ_ALPHABET) for _ in range(n))
+        bodies.append(tail)
+        bodies.append("from " + tail)
+    return bodies
+
+
+def test_interval_parts_match_old_grammar_on_newline_fuzz():
+    mismatches = []
+    for text in _interval_parts_fuzz_bodies():
+        old = _parts_groups(OLD_INTERVAL_PARTS.match(text))
+        new = _parts_groups(review_phase._INTERVAL_PARTS.match(text))
+        if old != new:
+            mismatches.append((text, old, new))
+    assert mismatches == [], mismatches[:5]
+
+
+def _s_whitespace_code_points() -> list[str]:
+    return [chr(cp) for cp in range(0x110000) if _INTERVAL_S_TRAILING.match(chr(cp))]
+
+
+def test_interval_parts_rstrip_strips_every_s_whitespace_code_point():
+    chars = _s_whitespace_code_points()
+    named = {"\u0085", "\u00a0", "\u2028", "\u3000"}
+    assert named <= set(chars)
+    for ch in chars:
+        assert ("keep" + ch).rstrip() == "keep"
+        body = "from a, src" + ch + " to end, dst" + ch + " = 1s"
+        old = _parts_groups(OLD_INTERVAL_PARTS.match(body))
+        new = _parts_groups(review_phase._INTERVAL_PARTS.match(body))
+        assert new == old
+        assert new == ("a", "src", "end", "dst", "1s")
+
+
+def test_interval_parts_match_finishes_10000_internal_spaces_well_under_a_second():
+    code = (
+        "import time, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import review_phase\n"
+        "start = time.perf_counter()\n"
+        "matched = review_phase._INTERVAL_PARTS.match(sys.argv[2])\n"
+        "elapsed = time.perf_counter() - start\n"
+        "print('matched' if matched else 'none')\n"
+        "print(elapsed)\n"
+        "if matched:\n"
+        "    print(matched.group('start_source'))\n"
+        "    print(matched.group('end_source'))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(SKILL_DIR), TEN_THOUSAND_INTERNAL_WS_PARTS],
+            capture_output=True,
+            text=True,
+            timeout=INTERVAL_PARTS_LIMIT_SECONDS,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"_INTERVAL_PARTS still running after {INTERVAL_PARTS_LIMIT_SECONDS:.0f}s "
+            "on a 10,000-internal-space body"
+        )
+    lines = proc.stdout.strip().splitlines()
+    status, elapsed_s = lines[0], lines[1]
+    assert status == "matched"
+    elapsed = float(elapsed_s)
+    assert elapsed <= INTERVAL_INTERNAL_WS_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.2f}s on a 10,000-internal-space body"
+    )
+    assert lines[2] == "foo" + " " * 10_000 + "x"
+    assert lines[3] == "bar" + " " * 10_000 + "y"
+
+
+def _interval_parts_timed_match(body: str) -> tuple[str, float]:
+    code = (
+        "import time, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import review_phase\n"
+        "start = time.perf_counter()\n"
+        "matched = review_phase._INTERVAL_PARTS.match(sys.argv[2])\n"
+        "elapsed = time.perf_counter() - start\n"
+        "print('matched' if matched else 'none')\n"
+        "print(elapsed)\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(SKILL_DIR), body],
+            capture_output=True,
+            text=True,
+            timeout=INTERVAL_PARTS_LIMIT_SECONDS,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"_INTERVAL_PARTS still running after "
+            f"{INTERVAL_PARTS_LIMIT_SECONDS:.0f}s on a newline-free interval body"
+        )
+    status, elapsed_s = proc.stdout.strip().splitlines()
+    return status, float(elapsed_s)
+
+
+def test_interval_parts_match_finishes_repeated_to_x_well_under_bound():
+    small = "from a, " + "to x, " * 3 + "y"
+    assert _parts_groups(review_phase._INTERVAL_PARTS.match(small)) == (
+        _parts_groups(OLD_INTERVAL_PARTS.match(small))
+    )
+    assert "\n" not in REPEATED_TO_OUTER_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_TO_OUTER_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_OUTER_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated-to-x body"
+    )
+
+
+def test_interval_parts_match_finishes_repeated_to_without_comma_well_under_bound():
+    assert "\n" not in REPEATED_TO_LEVEL_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_TO_LEVEL_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_TO_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated-to body"
+    )
+
+
+def test_interval_parts_match_finishes_repeated_end_event_comma_well_under_bound():
+    assert "\n" not in REPEATED_COMMA_LEVEL_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_COMMA_LEVEL_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_COMMA_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated end-event-comma body"
+    )

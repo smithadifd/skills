@@ -461,15 +461,121 @@ def _check(value: object, schema: dict, path: str, errors: list[str]) -> None:
 # phase result as `intervals`, not inside findings.json.
 INTERVAL_ENDPOINTS_MISSING = "review_interval_endpoints_missing"
 _INTERVAL_FIELDS = ("start_event", "start_source", "end_event", "end_source", "duration")
-_INTERVAL_LINE = re.compile(r"^[ \t]*INTERVAL[ \t]*:[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
-_INTERVAL_PARTS = re.compile(
-    r"^from\s+(?P<start_event>.*?),\s*"
-    r"(?P<start_source>.*?)\s*to\s+"
-    r"(?P<end_event>.*?),\s*"
-    r"(?P<end_source>.*?)\s*=\s*"
-    r"(?P<duration>.*)$",
-    re.IGNORECASE,
+# `_INTERVAL_LINE` runs on every line of every successfully parsed review;
+# `_INTERVAL_PARTS` runs on each body it accepted. The line body ends on a
+# non-space/tab (or is empty), so the trailing `[ \t]*` never shares a
+# whitespace run with a lazy group (the `(.*?)[ \t]*$` form it replaces was
+# quadratic on `INTERVAL: a` + n spaces + `b`). The body form walks separators
+# left to right, advancing to the next candidate when a part would contain a
+# newline or the remaining grammar cannot complete, so five lazy `(.*?)`
+# groups never split the same whitespace (that form was cubic on `from a,`
+# + n spaces + `b`). Trailing whitespace on the source groups is a linear
+# `str.rstrip()` (the same Unicode set as `\s`); `\s+$` was quadratic on a
+# long internal whitespace run then a non-space. The lines and groups they
+# accept are exactly those of the patterns they replace.
+_INTERVAL_LINE = re.compile(
+    r"^[ \t]*INTERVAL[ \t]*:[ \t]*((?:[^\n]*[^ \t\n])?)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
 )
+_INTERVAL_FROM = re.compile(r"^from\s+", re.IGNORECASE)
+_INTERVAL_TO = re.compile(r"to\s+", re.IGNORECASE)
+_INTERVAL_WS = re.compile(r"\s*")
+
+
+class _IntervalPartsMatch:
+    def __init__(self, groups: dict[str, str]) -> None:
+        self._groups = groups
+
+    def group(self, name: str) -> str:
+        return self._groups[name]
+
+
+class _IntervalParts:
+    """INTERVAL body grammar: from <e>, <s> to <e>, <s> = <d>.
+
+    Left-to-right separator scan; later candidates only when a part would
+    contain a newline or the remaining grammar cannot complete.
+    """
+
+    def match(self, text: str) -> _IntervalPartsMatch | None:
+        headed = _INTERVAL_FROM.match(text)
+        if headed is None:
+            return None
+        start_at = headed.end()
+
+        def from_end_source(source_at: int) -> tuple[str, str] | None:
+            eq = source_at - 1
+            while True:
+                eq = text.find("=", eq + 1)
+                if eq < 0:
+                    return None
+                end_source = text[source_at:eq].rstrip()
+                if "\n" in end_source:
+                    return None
+                duration_at = _INTERVAL_WS.match(text, eq + 1).end()
+                duration = text[duration_at:]
+                if duration.endswith("\n"):
+                    duration = duration[:-1]
+                if "\n" in duration:
+                    continue
+                return end_source, duration
+
+        def from_end_event(event_at: int) -> tuple[str, str, str] | None:
+            comma = event_at - 1
+            while True:
+                comma = text.find(",", comma + 1)
+                if comma < 0:
+                    return None
+                end_event = text[event_at:comma]
+                if "\n" in end_event:
+                    return None
+                rest = from_end_source(_INTERVAL_WS.match(text, comma + 1).end())
+                if rest is not None:
+                    return (end_event,) + rest
+                if "\n" not in text:
+                    return None
+
+        def from_start_source(source_at: int) -> tuple[str, str, str, str] | None:
+            to_at = source_at
+            while True:
+                to = _INTERVAL_TO.search(text, to_at)
+                if to is None:
+                    return None
+                start_source = text[source_at : to.start()].rstrip()
+                if "\n" in start_source:
+                    return None
+                rest = from_end_event(to.end())
+                if rest is not None:
+                    return (start_source,) + rest
+                if "\n" not in text:
+                    return None
+                to_at = to.start() + 1
+
+        comma = start_at - 1
+        while True:
+            comma = text.find(",", comma + 1)
+            if comma < 0:
+                return None
+            start_event = text[start_at:comma]
+            if "\n" in start_event:
+                return None
+            rest = from_start_source(_INTERVAL_WS.match(text, comma + 1).end())
+            if rest is not None:
+                start_source, end_event, end_source, duration = rest
+                return _IntervalPartsMatch(
+                    {
+                        "start_event": start_event,
+                        "start_source": start_source,
+                        "end_event": end_event,
+                        "end_source": end_source,
+                        "duration": duration,
+                    }
+                )
+            if "\n" not in text:
+                return None
+
+
+_INTERVAL_PARTS = _IntervalParts()
 # Conservative detector: a number followed by a time unit, word-bounded.
 # Compact attached units omit `s` so a code timeout like `900s` is not a
 # measured-interval claim; `41m` / `2h` / `3d` / `500ms` still are. Spaced
