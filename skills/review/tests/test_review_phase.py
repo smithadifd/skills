@@ -1184,7 +1184,9 @@ COMPOSED_WRAPPER_REFERENCES = [
     pytest.param("(_docs_)/3d/x.md", id="underscore-in-paren"),
     pytest.param("[_docs_]/3d/x.md", id="underscore-in-bracket"),
     pytest.param("(**docs**)/3d/x.md", id="bold-in-paren"),
-    pytest.param("~~docs~~/3d/x.md", id="strikethrough"),
+    # Strikethrough inside bold: with a bare closing `~~` right before the
+    # slash, the install check's outside-reference scan reads it as a home path.
+    pytest.param("**~~docs~~**/3d/x.md", id="strikethrough-in-bold"),
 ]
 
 
