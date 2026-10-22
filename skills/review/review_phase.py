@@ -689,10 +689,168 @@ def _strip_references(line: str) -> str:
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
 
+# --- quoted inputs in the Evidence and Minor notes sections ------------------
+#
+# Evidence and Minor notes record what the reviewer ran and fed to it, so a
+# duration-shaped token there may be a quoted probe input, not the reviewer's
+# own timing claim. Only the inside of a well-formed backtick code span, or of
+# a fenced block that closes inside the section, counts as quoted, and only in
+# those two sections. Everything else stays in scope: prose in every section,
+# every heading line (so every verdict line), the Issues section quoted or not,
+# and any markup that does not close where it opens.
+#
+# A section is one of the two only under the documented level-three heading:
+# `### Evidence` or `### Minor notes` (bold allowed, as in `### **Evidence**`).
+# Other levels, `###Evidence` with no space, a `#` run glued to the title, and
+# the bare `MINOR NOTES:` label all stay in scope.
+#
+# Sections are found with `_HEADING`, the pattern the adapters split sections
+# with, so the scan and the parser never disagree on where a section ends. That
+# pattern does not know about fences: a `# comment` inside a fenced block is a
+# heading to the parser, so it ends the section here too.
+_QUOTED_INPUT_SECTIONS = frozenset({"EVIDENCE", "MINOR NOTES"})
+# Exactly three `#` (up to three spaces before them), then at least one space.
+_QUOTED_INPUT_HEADING = re.compile(r"^ {0,3}### +")
+# A fence line: up to three spaces, three or more backticks or tildes, then the
+# rest of the line (an opener's info string; a closer allows only whitespace).
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_BACKTICK_RUN = re.compile(r"`+")
+# A number at the end of a fence opener, bounded the way `_DURATION_CLAIM`
+# bounds one, so `\s+` across the newline would join it to a unit below.
+_NUMBER_AT_END = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*$")
+
+
+def _is_quoted_input_section(line: str, heading: re.Match[str]) -> bool:
+    if _QUOTED_INPUT_HEADING.match(line) is None:
+        return False
+    if _strip_marks(_heading_title(heading)).upper() not in _QUOTED_INPUT_SECTIONS:
+        return False
+    # A closing `#` run counts only when a space or tab sets it apart from the
+    # title (`### Evidence ###`); `### Evidence#` is not the documented heading.
+    line = line.rstrip()
+    title_end = line.rstrip("#")
+    return title_end == line or title_end.endswith((" ", "\t"))
+
+
+def _is_tagged_bullet(line: str) -> bool:
+    bullet = _BULLET.match(line)
+    return bool(bullet and _TAG.match(bullet.group(1)))
+
+
+def _fence_opener(line: str) -> str | None:
+    """The fence marker that `line` opens, or None.
+
+    A backtick fence whose info string holds a backtick is not a fence
+    (CommonMark); that line is read for inline code spans instead.
+    """
+    fence = _FENCE_LINE.match(line)
+    if fence is None:
+        return None
+    marker, info = fence.group(1), fence.group(2)
+    if marker[0] == "`" and "`" in info:
+        return None
+    return marker
+
+
+def _closes_fence(line: str, marker: str) -> bool:
+    fence = _FENCE_LINE.match(line)
+    return (
+        fence is not None
+        and fence.group(1)[0] == marker[0]
+        and len(fence.group(1)) >= len(marker)
+        and not fence.group(2).strip()
+    )
+
+
+def _blank_code_spans(line: str) -> str:
+    """`line` with the inside of each inline code span turned into spaces.
+
+    A span opens at a run of backticks and closes at the next run of exactly
+    the same length on the same line. The backticks themselves stay, so the
+    text on either side keeps the neighbours it had. Fail closed: when any run
+    finds no closing run on its line (a span never crosses a line), or any
+    backtick follows a backslash, the line is returned unchanged.
+    """
+    if "`" not in line or "\\`" in line:
+        return line
+    runs = [run.span() for run in _BACKTICK_RUN.finditer(line)]
+    pieces: list[str] = []
+    pos = 0
+    index = 0
+    while index < len(runs):
+        open_start, open_end = runs[index]
+        width = open_end - open_start
+        close = index + 1
+        while close < len(runs) and runs[close][1] - runs[close][0] != width:
+            close += 1
+        if close == len(runs):
+            return line
+        close_start, close_end = runs[close]
+        pieces.append(line[pos:open_end])
+        pieces.append(" " * (close_start - open_end))
+        pos = close_start
+        index = close + 1
+    pieces.append(line[pos:])
+    return "".join(pieces)
+
+
+def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: int) -> None:
+    """Blank the quoted inputs of `lines[start:stop]` into `out`."""
+    i = start
+    while i < stop:
+        marker = _fence_opener(lines[i])
+        if marker is None:
+            out[i] = _blank_code_spans(lines[i])
+            i += 1
+            continue
+        close = i + 1
+        while close < stop and not _closes_fence(lines[close], marker):
+            close += 1
+        if close == stop:
+            # Fail closed: an unclosed fence leaves its own line and every
+            # later line of the section in scope, as written.
+            return
+        if _NUMBER_AT_END.search(lines[i]):
+            # The opener ends in a number that the scan reads as a claim
+            # together with the block's first line ("3", then "hours"), so the
+            # claim is not wholly inside the block: nothing in it is quoted.
+            i = close + 1
+            continue
+        # The fence lines stay as written; only the lines between are quoted.
+        for inner in range(i + 1, close):
+            out[inner] = ""
+        i = close + 1
+
+
+def _blank_quoted_inputs(lines: list[str]) -> list[str]:
+    """`lines` with the quoted inputs of Evidence and Minor notes blanked."""
+    out = list(lines)
+    i = 0
+    while i < len(lines):
+        heading = _HEADING.match(lines[i])
+        line = lines[i]
+        i += 1
+        if heading is None or not _is_quoted_input_section(line, heading):
+            continue
+        end = i
+        while end < len(lines) and not _HEADING.match(lines[end]):
+            end += 1
+        # A `[BUG]` / `[SECURITY]` bullet is a finding wherever it sits (the
+        # adapter collects it, and in Evidence every bullet after it), so the
+        # section's quoting ends at the first one.
+        stop = i
+        while stop < end and not _is_tagged_bullet(lines[stop]):
+            stop += 1
+        _blank_quoted_section(lines, out, i, stop)
+        i = end
+    return out
+
+
 def _text_for_duration_scan(text: str) -> str:
+    lines = text.splitlines()
     return "\n".join(
-        _strip_references(line)
-        for line in text.splitlines()
+        _strip_references(scanned)
+        for line, scanned in zip(lines, _blank_quoted_inputs(lines))
         if not _INTERVAL_LINE.match(line)
     )
 
