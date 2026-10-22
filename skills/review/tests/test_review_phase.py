@@ -1224,6 +1224,58 @@ def test_from_text_accepts_a_non_duration_first_component_in_composed_wrappers(
     assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
 
 
+# Emphasis underscores around a duration are a boundary, so a timing claim
+# written in italics still needs an INTERVAL record. Underscores that a letter
+# or digit touches belong to an identifier, which stays a non-claim.
+EMPHASISED_DURATION_CLAIMS = [
+    pytest.param("The suite took _3h_", id="italic-at-line-end"),
+    pytest.param("The suite took __3h__", id="strong-underscore"),
+    pytest.param("The suite took _3h_.", id="italic-before-period"),
+    pytest.param("The suite took _3 hours_ in all.", id="italic-spaced-unit"),
+    pytest.param("The suite took ___2.5h___ in all.", id="triple-underscore-decimal"),
+    pytest.param("The suite took *_41m_* in all.", id="italic-inside-star"),
+    pytest.param("The suite took (_3h_) in all.", id="italic-in-paren"),
+    pytest.param("See [_3h_](docs/run.md) for the run.", id="italic-link-label"),
+    pytest.param("The suite took _3h in all.", id="leading-underscore-only"),
+    pytest.param("The suite took 3h_ in all.", id="trailing-underscore-only"),
+]
+EMPHASISED_DURATION_NON_CLAIMS = [
+    pytest.param("Set retry_3h_window to two.", id="identifier-inner"),
+    pytest.param("Call foo_3h now.", id="identifier-suffix"),
+    pytest.param("Call _3h_window now.", id="identifier-leading-underscore"),
+    pytest.param("Call 3h_window now.", id="identifier-duration-first"),
+    pytest.param("Set v1_3h now.", id="identifier-digit-before"),
+]
+
+
+def _run_body_from_text(tmp_path: Path, body: str) -> tuple[subprocess.CompletedProcess[str], dict]:
+    text = _claude_approve_with(body)
+    _assert_not_quoted_input(text)
+    review = tmp_path / "return.md"
+    review.write_text(text, encoding="utf-8")
+    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
+    return proc, json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("body", EMPHASISED_DURATION_CLAIMS)
+def test_from_text_refuses_an_emphasised_duration_without_an_interval(tmp_path: Path, body):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "failure", (
+        f"a duration in emphasis underscores is a timing claim: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+
+
+@pytest.mark.parametrize("body", EMPHASISED_DURATION_NON_CLAIMS)
+def test_from_text_accepts_a_duration_shaped_part_of_an_identifier(tmp_path: Path, body):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "success", (
+        f"a duration-shaped part of an identifier is not a timing claim: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
 # --- prose after a bulleted clean marker refuses ----------------------------
 
 CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."

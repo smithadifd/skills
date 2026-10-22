@@ -474,15 +474,30 @@ _INTERVAL_PARTS = re.compile(
 # Compact attached units omit `s` so a code timeout like `900s` is not a
 # measured-interval claim; `41m` / `2h` / `3d` / `500ms` still are. Spaced
 # `min` is omitted for the same reason (`15 min` in a finding about a bound).
-_DURATION_CLAIM = re.compile(
-    r"(?<![\w.])(?:"
+_DURATION_TOKEN = (
+    r"(?:"
     r"\d+(?:\.\d+)?(?:ms|[mhd])"
     r"|"
     r"\d+(?:\.\d+)?\s+(?:milliseconds|seconds|second|minutes|minute|"
     r"hours|hour|days|day|ms|secs|sec|mins|hrs|hr|[smhd])"
-    r")\b",
-    re.IGNORECASE,
+    r")"
 )
+_DURATION_CLAIM = re.compile(rf"(?<![\w.]){_DURATION_TOKEN}\b", re.IGNORECASE)
+# Emphasis underscores around a duration (`_3h_`, `__3h__`, `_3 hours_`) are
+# word characters, so they would hide the claim's word boundary. A run of
+# underscores on either side of a duration token is read as a boundary when
+# the whole run sits at a word edge: nothing word-like (or a `.`) before the
+# leading run, nothing word-like after the trailing run. Those underscores
+# become spaces in the scan text. An identifier keeps its underscores and
+# stays a non-claim, because a letter or digit touches the run
+# (`retry_3h_window`, `foo_3h`, `_3h_window`, `3h_window`).
+_EMPHASISED_DURATION = re.compile(
+    rf"(?<![\w.])(_*)({_DURATION_TOKEN})(_*)(?!\w)", re.IGNORECASE
+)
+
+
+def _unwrap_emphasised_duration(match: re.Match[str]) -> str:
+    return " " * len(match.group(1)) + match.group(2) + " " * len(match.group(3))
 
 
 # Section and file references that merely look like a duration: `§3d`,
@@ -923,7 +938,7 @@ def _blank_quoted_inputs(lines: list[str]) -> list[str]:
 def _text_for_duration_scan(text: str) -> str:
     lines = text.splitlines()
     return "\n".join(
-        _strip_references(scanned)
+        _EMPHASISED_DURATION.sub(_unwrap_emphasised_duration, _strip_references(scanned))
         for line, scanned in zip(lines, _blank_quoted_inputs(lines))
         if not _INTERVAL_LINE.match(line)
     )
