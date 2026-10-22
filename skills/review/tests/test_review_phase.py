@@ -782,6 +782,27 @@ def test_measured_duration_still_requires_interval_endpoints(body):
     assert "review_interval_endpoints_missing" in result["reason"]
 
 
+def test_bound_noun_on_next_line_does_not_exempt_a_duration_claim():
+    text = _claude_approve_with("The caller took 120 seconds\nlimit hit")
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("The caller took 120 seconds limit", id="space-before-limit"),
+        pytest.param("The caller took 120 seconds\tlimit", id="tab-before-limit"),
+    ],
+)
+def test_same_line_bound_noun_still_exempts(body):
+    text = _claude_approve_with(body)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+    assert "intervals" not in result
+
+
 def test_duration_without_interval_is_refused():
     result = review_phase.run_phase(
         _envelope("grok-notools", DURATION_WITHOUT_INTERVAL)

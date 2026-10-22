@@ -477,9 +477,10 @@ _INTERVAL_PARTS = re.compile(
 # A spaced number and unit that name a configured bound are not a claim:
 # the next token is timeout, bound, limit, cap or deadline (optional `s`,
 # case-insensitive). Optional closing backticks (at most three) then
-# whitespace may sit between the unit and that token, so a backticked
-# bound still exempts. The lookahead is one word, so "took 120 seconds
-# before the timeout" still claims. Hyphenated `120-second` is not a
+# spaces or tabs may sit between the unit and that token, so a backticked
+# bound still exempts. A newline between the unit and the bound noun does
+# not exempt. The lookahead is one word, so "took 120 seconds before the
+# timeout" still claims. Hyphenated `120-second` is not a
 # token (the separator is `-`, not whitespace).
 _DURATION_TOKEN = (
     r"(?:"
@@ -491,7 +492,7 @@ _DURATION_TOKEN = (
 )
 _BOUND_NOUN = r"(?:timeout|bound|limit|cap|deadline)s?"
 _DURATION_CLAIM = re.compile(
-    rf"(?<![\w.]){_DURATION_TOKEN}\b(?!`{{0,3}}\s+{_BOUND_NOUN}\b)",
+    rf"(?<![\w.]){_DURATION_TOKEN}\b(?!`{{0,3}}[ \t]+{_BOUND_NOUN}\b)",
     re.IGNORECASE,
 )
 # Emphasis underscores around a duration (`_3h_`, `__3h__`, `_3 hours_`) are
