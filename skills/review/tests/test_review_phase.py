@@ -1276,6 +1276,62 @@ def test_from_text_accepts_a_duration_shaped_part_of_an_identifier(tmp_path: Pat
     assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
 
 
+# Only a path's first component can be a claim. The path-token pass splits a
+# token at brackets, so a bracketed later component (`docs/(3h)/x.md`) used to
+# stay visible on its own; the whole recognised path is now read first and its
+# later components blanked. Text in front of a bracket in the first component
+# stays as before (`took(3h)/run.md`), and a file:line reference keeps working.
+LATER_COMPONENT_REFERENCES = [
+    pytest.param("It reads (docs/_3h_/x.md) first.", id="paren-around-path-italic-later"),
+    pytest.param("It reads [a/3h/b.md] first.", id="bracket-around-path"),
+    pytest.param("It reads docs/(3h)/x.md first.", id="paren-later"),
+    pytest.param("It reads docs/(3h)/x.md.", id="paren-later-before-period"),
+    pytest.param("It uses a (docs/3h/x.md)-style layout.", id="paren-path-glued-to-a-word"),
+    pytest.param("It reads docs/(_3h_)/x.md first.", id="paren-italic-later"),
+    pytest.param("It reads docs/[_3h_]/x.md first.", id="bracket-italic-later"),
+    pytest.param("It reads docs/[3h]/x.md first.", id="bracket-later"),
+    pytest.param("It reads docs/_(3h)_/x.md first.", id="italic-paren-later"),
+    pytest.param("It reads docs/a/(3h)/x.md first.", id="paren-third-component"),
+    pytest.param("It reads docs/(_3h_).md first.", id="paren-italic-file-name"),
+    pytest.param("It reads docs/(3h)/x.md:12 first.", id="paren-later-file-line"),
+    pytest.param("It reads docs/a.md,b.py:12d first.", id="list-entry-file-line"),
+    pytest.param("It reads ./docs/3h:12 first.", id="extensionless-name-then-line"),
+    pytest.param("It reads docs/3h.md,12 first.", id="file-name-then-comma-number"),
+    pytest.param("It reads docs/3h.md:x first.", id="file-name-then-colon-word"),
+]
+LATER_COMPONENT_CLAIMS = [
+    pytest.param("It waits took(3h)/run.md here.", id="paren-in-first-component"),
+    pytest.param("It waits took[3h]/run.md here.", id="bracket-in-first-component"),
+    pytest.param("It waited 3h(docs/x.md) here.", id="duration-before-paren-path"),
+    pytest.param("It waited 3h[docs/x.md] here.", id="duration-before-bracket-path"),
+    pytest.param("It waits docs/x.md,(3h)/y.md here.", id="duration-first-list-entry"),
+    pytest.param("It ran docs/(x)/y.md:3 days", id="file-line-then-unit-word"),
+    pytest.param("It waited )3h/a.py here.", id="stray-close-paren-before-duration"),
+    pytest.param("It waited ]3h/a.py here.", id="stray-close-bracket-before-duration"),
+]
+
+
+@pytest.mark.parametrize("body", LATER_COMPONENT_REFERENCES)
+def test_from_text_accepts_a_duration_later_component_inside_brackets(tmp_path: Path, body):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "success", (
+        f"a later path component is never a claim, bracketed or not: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
+@pytest.mark.parametrize("body", LATER_COMPONENT_CLAIMS)
+def test_from_text_refuses_a_first_component_or_glued_duration_beside_a_bracketed_path(
+    tmp_path: Path, body
+):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "failure", (
+        f"a duration before the path's later components is still a claim: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+
+
 # --- prose after a bulleted clean marker refuses ----------------------------
 
 CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."
