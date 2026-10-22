@@ -1080,6 +1080,87 @@ def test_run_phase_accepts_an_autolink_and_refuses_its_duration_first_variant():
     assert "review_interval_endpoints_missing" in refused["reason"]
 
 
+# --- a duration first component wrapped on both sides stays a claim ----------
+#
+# Every text here is prose (the Summary section, never a quoted Evidence or
+# Minor notes span), so the reference scan decides it, not the quoted-input
+# blanking that runs before it.
+
+WRAPPED_FIRST_COMPONENT_CLAIMS = [
+    pytest.param("The caller waits **3h**/a.py before retrying.", id="bold"),
+    pytest.param("The caller waits `41m`/x.md before retrying.", id="backtick"),
+    pytest.param('The caller waits "3h"/a.py before retrying.', id="double-quote"),
+    pytest.param("The caller waits '3h'/a.py before retrying.", id="single-quote"),
+    pytest.param("The caller waits *3h*/a.py before retrying.", id="star"),
+    pytest.param("The caller waits _3h_/a.py before retrying.", id="underscore"),
+    pytest.param("The caller waits [3h]/a.py before retrying.", id="square-bracket"),
+    pytest.param("The caller waits (3h)/a.py before retrying.", id="paren"),
+    pytest.param("The caller waits {3h}/a.py before retrying.", id="brace"),
+    pytest.param("The caller waits <3h>/a.py before retrying.", id="angle"),
+    pytest.param("The caller waits 3h**/a.py before retrying.", id="bold-right-only"),
+    pytest.param("The caller waits **3h/a.py before retrying.", id="bold-left-only"),
+    pytest.param("The caller waits 3h_/a.py before retrying.", id="underscore-right-only"),
+    pytest.param("The caller waits **3h**?q/a.py before retrying.", id="bold-query"),
+    pytest.param("The caller waits _3h_?q/a.py before retrying.", id="underscore-query"),
+    pytest.param("The caller waits _3h_/a.py:12 before retrying.", id="underscore-file-line"),
+    # A later piece of a delimited token can carry an opening bracket after
+    # its first component; a closing one ends the token before any `/`.
+    pytest.param("It waited docs/x.md,3h(/a.py before retrying.", id="paren-right-in-list"),
+    pytest.param("It waited docs/x.md,3h[/a.py before retrying.", id="bracket-right-in-list"),
+    pytest.param("It took 3 **days**/run.", id="bold-unit-word"),
+    pytest.param("The caller waits _3d/foo.py_ before retrying.", id="whole-token-underscore"),
+    pytest.param("The caller waits 3d/foo.py before retrying.", id="bare"),
+]
+WRAPPED_FIRST_COMPONENT_REFERENCES = [
+    pytest.param("Only touches docs/3d/x.md and nothing else.", id="later-component"),
+    pytest.param("Only touches **docs**/3d/x.md and nothing else.", id="bold-name"),
+    pytest.param("Only touches `docs`/3d/x.md and nothing else.", id="backtick-name"),
+    pytest.param('Only touches "docs"/3d/x.md and nothing else.', id="quoted-name"),
+    pytest.param("Only touches **/a.py and nothing else.", id="wrapper-only"),
+]
+
+
+def _assert_not_quoted_input(text: str) -> None:
+    lines = text.splitlines()
+    assert review_phase._blank_quoted_inputs(lines) == lines, (
+        "the text must reach the reference scan as written, outside any quoted span"
+    )
+
+
+@pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_CLAIMS)
+def test_wrapped_duration_first_component_is_a_claim(text):
+    _assert_not_quoted_input(text)
+    assert review_phase._has_duration_claim(text) is True, (
+        "a duration-shaped first path component is a claim whatever formatting "
+        "wraps it, on either side or both"
+    )
+
+
+@pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_REFERENCES)
+def test_wrapped_non_duration_first_component_is_still_a_reference(text):
+    _assert_not_quoted_input(text)
+    assert review_phase._has_duration_claim(text) is False, (
+        "a path whose first component is not a duration stays a reference "
+        "however that component is wrapped"
+    )
+
+
+def _assert_summary_claim_refused(body: str) -> None:
+    text = _claude_approve_with(body)
+    _assert_not_quoted_input(text)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure", result["reason"]
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
+def test_run_phase_refuses_a_bold_wrapped_duration_first_component():
+    _assert_summary_claim_refused("The caller waits **3h**/a.py before retrying.")
+
+
+def test_run_phase_refuses_a_backtick_wrapped_duration_first_component():
+    _assert_summary_claim_refused("The caller waits `41m`/x.md before retrying.")
+
+
 # --- prose after a bulleted clean marker refuses ----------------------------
 
 CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."
