@@ -554,9 +554,11 @@ _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 _OPENING_WRAPPERS = "\"'`*_([{<"
 _CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}>"
 # The formatting wrappers that can sit on either side of a path's first
-# component, alone or composed (`_(3h)_`, `[**3h**]`): emphasis and
-# strikethrough marks, quotes, backticks and brackets.
-_FORMATTING_WRAPPERS = "\"'`*_~()[]{}<>"
+# component, alone or composed (`**3h**`, `_~~3h~~_`): emphasis and
+# strikethrough marks, quotes, backticks, braces and angle brackets. Round and
+# square brackets are not among them: the path-token pass never lets one into
+# a token before its first `/`, and a file:line run holds none.
+_FORMATTING_WRAPPERS = "\"'`*_~{}<>"
 # Sentence punctuation that can close a path (`see docs/x.md?`).
 _SENTENCE_END = "?!"
 # A URI scheme (RFC 3986: a letter, then letters, digits, `+`, `-`, `.`) opening
@@ -726,39 +728,67 @@ _PATH_TOKEN_IN_TEXT = re.compile(r"(?<![^\s/\[\]()])[^\s/\[\]()]*/[^\s\])]*")
 # token `docs/(_3h_` (no extension, so kept) and the path `/x.md`, and the
 # later component `_3h_` stayed visible as a claim.
 _WHITESPACE_TOKEN = re.compile(r"\S+")
-# The brackets the path-token pattern never lets into a token before its
-# first `/`.
-_TOKEN_BREAKS = "[]()"
+# The brackets a path's later components may hold, each closer mapped to the
+# opener it pairs with.
+_BRACKET = re.compile(r"[\[\]()]")
+_OPENERS = "(["
+_OPENER_OF = {")": "(", "]": "["}
 
 
 def _shield_later_components(piece: str, line_number: bool) -> str:
-    """`piece` with the later components of a recognised path blanked.
+    """`piece` with the later components of each recognised path in it blanked.
 
-    A piece holding a `/` whose normalised form is clearly a path
-    (`_is_path_form`) and whose first component is not a duration is blanked
-    from where the path-token pass would start it (the last bracket before the
-    first `/`, else the start of the piece) to its end. So `docs/(3h)/x.md`
-    and `(docs/_3h_/x.md)` hide every later component, while text before a
-    bracket in the first component stays as the path-token pass would leave
-    it (`took(3h)/run.md` keeps `took`, `3h`). A duration first component
-    leaves the piece as it is, for the passes that keep its claim.
+    Only a path's first component can be a claim, so this pass blanks a
+    path's later components and nothing else: the span from its first `/` to
+    its end. It never blanks the first component (the text before that `/`)
+    or anything in front of it, so `note(3h/run.md`, `x)3h/run.md` and
+    `took(3h)/run.md` keep their `3h` for the passes that read it as a claim.
 
-    When a `:` and a line number follow (`line_number`) and the last component
-    is a file name, that name stays, so the file:line pass still reads
-    `foo.py:7m` as a reference (and `x.md:3 days` as a claim).
+    A path runs from its first `/` while the brackets after that `/` pair up
+    (`docs/(3h)/x.md`, `docs/_(3h)_/x.md`). A closer with no opener to pair
+    with ends it there, and the scan looks for the next path from that closer
+    on (`(docs/a.md)3h/b.md`: the path is `docs/a.md`, and `3h/b.md` after
+    the `)` is a path of its own whose `3h` stays). An opener left unpaired
+    ends the path just before it (`./docs/(3h`), so neither an unpaired
+    bracket nor the text after it is ever blanked as a later component.
+
+    A path is recognised when its text, from the start of the piece or from
+    the closer that ended the path before it, is clearly a path
+    (`_is_path_form` of `_reference_form`). Anything else is left as it is,
+    for the passes after this one.
+
+    When a `:` and a line number follow the piece (`line_number`) and the
+    path that runs to the piece's end has a file name last, that name stays,
+    so the file:line pass still reads `foo.py:7m` as a reference (and
+    `x.md:3 days` as a claim).
     """
-    if "/" not in piece:
-        return piece
-    form = _reference_form(piece)
-    if _DURATION_COMPONENT.match(_first_component(form)) or not _is_path_form(form):
-        return piece
-    first = piece[: piece.index("/")]
-    start = max(0, *(first.rfind(bracket) for bracket in _TOKEN_BREAKS))
-    end = len(piece)
-    name = piece.rindex("/") + 1
-    if line_number and _FILE_EXTENSION.search(piece, name):
-        end = name
-    return piece[:start] + " " * (end - start) + piece[end:]
+    parts: list[str] = []
+    kept = 0
+    start = 0
+    slash = piece.find("/")
+    while slash >= 0:
+        openers: list[int] = []
+        resume = len(piece)
+        for bracket in _BRACKET.finditer(piece, slash):
+            mark = bracket.group()
+            if mark in _OPENERS:
+                openers.append(bracket.start())
+            elif openers and piece[openers[-1]] == _OPENER_OF[mark]:
+                openers.pop()
+            else:
+                resume = bracket.start()
+                break
+        end = openers[0] if openers else resume
+        if _is_path_form(_reference_form(piece[start:end])):
+            stop = end
+            name = piece.rindex("/", slash, end) + 1
+            if line_number and end == len(piece) and _FILE_EXTENSION.search(piece, name):
+                stop = name
+            parts += [piece[kept:slash], " " * (stop - slash)]
+            kept = stop
+        start = resume
+        slash = piece.find("/", resume)
+    return "".join(parts) + piece[kept:]
 
 
 def _shield_path_token(match: re.Match[str]) -> str:
