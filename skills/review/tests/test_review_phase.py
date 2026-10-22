@@ -714,6 +714,95 @@ def test_code_timeout_mentions_are_not_duration_claims():
     assert result["artifacts"]["review.md"] == GROK_FLAGGED
 
 
+def test_from_text_parses_a_120_second_timeout_finding(tmp_path: Path):
+    text = _claude_approve_with(
+        "The change sizes the weekly chain timeout.",
+        issues=(
+            "- `skills/sample-monitor/sample-monitor-run.sh:212` — "
+            "the 120 second timeout never fires."
+        ),
+    )
+    review = tmp_path / "return.md"
+    review.write_text(text, encoding="utf-8")
+    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
+    result = json.loads(proc.stdout)
+    assert result["status"] == "success", result["reason"]
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+    assert "intervals" not in result
+    assert result["artifacts"]["findings.json"] is not None
+
+
+@pytest.mark.parametrize(
+    "issues",
+    [
+        pytest.param("- the 120 second timeout never fires.", id="spaced-timeout"),
+        pytest.param("- the 120 second bound never fires.", id="spaced-bound"),
+        pytest.param("- the 120 second limit never fires.", id="spaced-limit"),
+        pytest.param("- the 120 second cap never fires.", id="spaced-cap"),
+        pytest.param("- the 120 second deadline never fires.", id="spaced-deadline"),
+        pytest.param("- the 120-second timeout never fires.", id="hyphenated-timeout"),
+        pytest.param("- the 120-second bound never fires.", id="hyphenated-bound"),
+        pytest.param("- the 120-second limit never fires.", id="hyphenated-limit"),
+        pytest.param("- the 120-second cap never fires.", id="hyphenated-cap"),
+        pytest.param("- the 120-second deadline never fires.", id="hyphenated-deadline"),
+        pytest.param("- the `120 second timeout` never fires.", id="backticked-timeout"),
+        pytest.param("- the `120 second bound` never fires.", id="backticked-bound"),
+        pytest.param("- the `120 second limit` never fires.", id="backticked-limit"),
+        pytest.param("- the `120 second cap` never fires.", id="backticked-cap"),
+        pytest.param("- the `120 second deadline` never fires.", id="backticked-deadline"),
+        pytest.param("- the 120 SECOND TIMEOUT never fires.", id="spaced-timeout-caps"),
+        pytest.param("- the `120 second` timeout never fires.", id="backticked-unit-then-timeout"),
+    ],
+)
+def test_configured_bound_is_not_a_duration_claim(issues):
+    text = _claude_approve_with(
+        "The change sizes the weekly chain timeout.",
+        issues=issues,
+    )
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+    assert "intervals" not in result
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("The job ran for 120 seconds.", id="ran-for-120-seconds"),
+        pytest.param("The caller took 41 seconds.", id="took-41-seconds"),
+        pytest.param(
+            "The caller took 120 seconds before the timeout.",
+            id="took-120-seconds-before-the-timeout",
+        ),
+    ],
+)
+def test_measured_duration_still_requires_interval_endpoints(body):
+    text = _claude_approve_with(body)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
+def test_bound_noun_on_next_line_does_not_exempt_a_duration_claim():
+    text = _claude_approve_with("The caller took 120 seconds\nlimit hit")
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("The caller took 120 seconds limit", id="space-before-limit"),
+        pytest.param("The caller took 120 seconds\tlimit", id="tab-before-limit"),
+    ],
+)
+def test_same_line_bound_noun_still_exempts(body):
+    text = _claude_approve_with(body)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+    assert "intervals" not in result
+
+
 def test_duration_without_interval_is_refused():
     result = review_phase.run_phase(
         _envelope("grok-notools", DURATION_WITHOUT_INTERVAL)
@@ -1948,6 +2037,27 @@ def test_run_phase_accepts_a_review_holding_a_long_hash_quickly():
     elapsed = time.perf_counter() - start
     assert result["status"] == "success", result["reason"]
     assert elapsed <= REDOS_LIMIT_SECONDS, f"run_phase took {elapsed:.2f}s"
+
+
+def test_bound_exemption_finishes_a_100kb_line_within_a_second():
+    chunk = "120 second timeout "
+    line = chunk * (100_000 // len(chunk) + 1)
+    assert len(line) >= 100_000
+    start = time.perf_counter()
+    claimed = review_phase._has_duration_claim(line)
+    elapsed = time.perf_counter() - start
+    assert claimed is False, "a 100 KB line of configured bounds is not a claim"
+    assert elapsed <= REDOS_LIMIT_SECONDS, (
+        f"_has_duration_claim took {elapsed:.2f}s on a {len(line)}-character bound line"
+    )
+    mixed = line[:100_000] + " took 120 seconds before the timeout"
+    start = time.perf_counter()
+    claimed = review_phase._has_duration_claim(mixed)
+    elapsed = time.perf_counter() - start
+    assert claimed is True, "a measured interval after 100 KB of bounds is still a claim"
+    assert elapsed <= REDOS_LIMIT_SECONDS, (
+        f"_has_duration_claim took {elapsed:.2f}s on a 100KB near-miss line"
+    )
 
 
 # --- (e) a Markdown link target is a reference; its label is not --------------
