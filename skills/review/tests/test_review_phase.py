@@ -2772,6 +2772,12 @@ OLD_INTERVAL_PARTS = re.compile(
 INTERVAL_PARTS_LIMIT_SECONDS = 1.0
 INTERVAL_LINE_LIMIT_SECONDS = 0.05
 INTERVAL_INTERNAL_WS_LIMIT_SECONDS = 0.05
+INTERVAL_NEWLINE_FREE_OUTER_LIMIT_SECONDS = 0.001
+INTERVAL_NEWLINE_FREE_TO_LIMIT_SECONDS = 0.01
+INTERVAL_NEWLINE_FREE_COMMA_LIMIT_SECONDS = 0.01
+REPEATED_TO_OUTER_PARTS = "from a, " + "to x, " * 4000 + "y"
+REPEATED_TO_LEVEL_PARTS = "from a, src " + "to x " * 40000 + "y"
+REPEATED_COMMA_LEVEL_PARTS = "from a, src to end, " + "x, " * 40000 + "y"
 TEN_THOUSAND_SPACE_PARTS = "from a," + " " * 10_000 + "b"
 TEN_THOUSAND_SPACE_LINE = "INTERVAL: a" + " " * 10_000 + "b"
 TEN_THOUSAND_INTERNAL_WS_PARTS = (
@@ -3045,3 +3051,62 @@ def test_interval_parts_match_finishes_10000_internal_spaces_well_under_a_second
     )
     assert lines[2] == "foo" + " " * 10_000 + "x"
     assert lines[3] == "bar" + " " * 10_000 + "y"
+
+
+def _interval_parts_timed_match(body: str) -> tuple[str, float]:
+    code = (
+        "import time, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import review_phase\n"
+        "start = time.perf_counter()\n"
+        "matched = review_phase._INTERVAL_PARTS.match(sys.argv[2])\n"
+        "elapsed = time.perf_counter() - start\n"
+        "print('matched' if matched else 'none')\n"
+        "print(elapsed)\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(SKILL_DIR), body],
+            capture_output=True,
+            text=True,
+            timeout=INTERVAL_PARTS_LIMIT_SECONDS,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"_INTERVAL_PARTS still running after "
+            f"{INTERVAL_PARTS_LIMIT_SECONDS:.0f}s on a newline-free interval body"
+        )
+    status, elapsed_s = proc.stdout.strip().splitlines()
+    return status, float(elapsed_s)
+
+
+def test_interval_parts_match_finishes_repeated_to_x_well_under_bound():
+    small = "from a, " + "to x, " * 3 + "y"
+    assert _parts_groups(review_phase._INTERVAL_PARTS.match(small)) == (
+        _parts_groups(OLD_INTERVAL_PARTS.match(small))
+    )
+    assert "\n" not in REPEATED_TO_OUTER_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_TO_OUTER_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_OUTER_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated-to-x body"
+    )
+
+
+def test_interval_parts_match_finishes_repeated_to_without_comma_well_under_bound():
+    assert "\n" not in REPEATED_TO_LEVEL_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_TO_LEVEL_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_TO_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated-to body"
+    )
+
+
+def test_interval_parts_match_finishes_repeated_end_event_comma_well_under_bound():
+    assert "\n" not in REPEATED_COMMA_LEVEL_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_COMMA_LEVEL_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_COMMA_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated end-event-comma body"
+    )
