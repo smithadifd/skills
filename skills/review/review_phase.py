@@ -95,9 +95,15 @@ class ParseError(ValueError):
 
 # A markdown heading, or a bare section label (`FINDINGS:`, `VERDICT: …`) in
 # the headless shape that writes no `#` at all.
+# This runs on every line of every review, so it has to stay linear on any
+# line. A title starts on a non-space character, so it never shares the
+# marker's whitespace. It ends on a character the closing `#`/space tail cannot
+# hold, so no lazy quantifier rescans that tail. A label's payload stops at the
+# first newline and allows only whitespace after it. The lines and titles it
+# accepts are exactly those of the lazy `(.+?)\s*#*` and `:.*` form it replaces.
 _HEADING = re.compile(
-    r"^\s*(?:#{1,6}\s*(.+?)\s*#*"
-    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**\s*:.*"
+    r"^\s*(?:#{1,6}\s*(\S(?:.*[^\s#]|.*#(?=\s+#))?|[^\S\n])(?:\s*#+)?"
+    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**\s*:[^\n]*(?:\n\s*)?$"
     r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**"
     r")\s*$",
     re.IGNORECASE,
