@@ -1028,8 +1028,14 @@ def _blank_double_quoted_examples(line: str) -> str:
         close_limit = open_at + 1 + _QUOTED_EXAMPLE_MAX
         close_at = line.find('"', open_at + 1, close_limit + 1)
         if close_at < 0:
-            pieces.append(line[open_at + 1 :])
-            break
+            close_at = line.find('"', close_limit + 1)
+            if close_at < 0:
+                pieces.append(line[open_at + 1 :])
+                break
+            pieces.append(line[open_at + 1 : close_at])
+            pieces.append('"')
+            pos = close_at + 1
+            continue
         interior = line[open_at + 1 : close_at]
         if _is_quoted_example(interior):
             pieces.append(" " * len(interior))

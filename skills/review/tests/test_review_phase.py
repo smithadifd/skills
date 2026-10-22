@@ -2610,3 +2610,26 @@ def test_quoted_example_scan_finishes_a_100kb_unmatched_quote_within_a_second():
     review_phase._has_duration_claim(text)
     elapsed = time.perf_counter() - start
     assert elapsed <= REDOS_LIMIT_SECONDS, f"unmatched-quote scan took {elapsed:.2f}s"
+
+
+def test_overlong_quoted_span_does_not_stop_a_later_quoted_example():
+    overlong = "x" * 201
+    text = _claude_approve_with(
+        f'Preamble "{overlong}" then a quoted example "ran for 120 seconds".'
+    )
+    _assert_quoted_parses(text)
+
+
+def test_overlong_quoted_span_containing_a_duration_still_refuses():
+    interior = ("x" * 201) + " took 41 seconds"
+    text = _claude_approve_with(f'"{interior}"')
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
+def test_unmatched_opening_quote_with_a_duration_still_refuses():
+    text = _claude_approve_with('"then it took 41 seconds')
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"]
