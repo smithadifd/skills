@@ -474,15 +474,30 @@ _INTERVAL_PARTS = re.compile(
 # Compact attached units omit `s` so a code timeout like `900s` is not a
 # measured-interval claim; `41m` / `2h` / `3d` / `500ms` still are. Spaced
 # `min` is omitted for the same reason (`15 min` in a finding about a bound).
-_DURATION_CLAIM = re.compile(
-    r"(?<![\w.])(?:"
+_DURATION_TOKEN = (
+    r"(?:"
     r"\d+(?:\.\d+)?(?:ms|[mhd])"
     r"|"
     r"\d+(?:\.\d+)?\s+(?:milliseconds|seconds|second|minutes|minute|"
     r"hours|hour|days|day|ms|secs|sec|mins|hrs|hr|[smhd])"
-    r")\b",
-    re.IGNORECASE,
+    r")"
 )
+_DURATION_CLAIM = re.compile(rf"(?<![\w.]){_DURATION_TOKEN}\b", re.IGNORECASE)
+# Emphasis underscores around a duration (`_3h_`, `__3h__`, `_3 hours_`) are
+# word characters, so they would hide the claim's word boundary. A run of
+# underscores on either side of a duration token is read as a boundary when
+# the whole run sits at a word edge: nothing word-like (or a `.`) before the
+# leading run, nothing word-like after the trailing run. Those underscores
+# become spaces in the scan text. An identifier keeps its underscores and
+# stays a non-claim, because a letter or digit touches the run
+# (`retry_3h_window`, `foo_3h`, `_3h_window`, `3h_window`).
+_EMPHASISED_DURATION = re.compile(
+    rf"(?<![\w.])(_*)({_DURATION_TOKEN})(_*)(?!\w)", re.IGNORECASE
+)
+
+
+def _unwrap_emphasised_duration(match: re.Match[str]) -> str:
+    return " " * len(match.group(1)) + match.group(2) + " " * len(match.group(3))
 
 
 # Section and file references that merely look like a duration: `§3d`,
@@ -513,13 +528,18 @@ _NAME_LETTER = re.compile(r"[A-Za-z_]", re.IGNORECASE)
 # Only the FIRST lexical component of a path-like token can be a claim glued
 # to it ("waits 3d/foo.py"), read from the token's one normalised form
 # (`_reference_form`: wrappers, then a `?query` / `#fragment` suffix, then
-# sentence punctuation stripped). When that first component is a duration
-# ("3d", "days", "2.5h", the `41m` of `41m?x/y.md`), the token stays visible to
-# the scan with every formatting wrapper (the opening delimiters leading, the
-# closing ones and trailing punctuation trailing) turned into a space, so the
-# scan sees a word boundary before the claim (`_3d/foo.py_` is read as
-# ` 3d/foo.py `). Later components never make a token a claim (`docs/3d/x.md`
-# is just a path). Only the scan text is rewritten, never the review artifact.
+# sentence punctuation stripped). That component is tested with the
+# formatting wrappers on each side of it stripped too (`_first_component`),
+# so a component wrapped on both sides (`**3h**/a.py`, `` `41m`/x.md ``) is
+# read as `3h` / `41m`. When it is a duration ("3d", "days", "2.5h", the
+# `41m` of `41m?x/y.md`), the token stays visible to the scan with its outer
+# formatting wrappers (the opening delimiters leading, the closing ones and
+# trailing punctuation trailing) turned into spaces, so the scan sees a word
+# boundary before the claim (`_3d/foo.py_` is read as ` 3d/foo.py `).
+# Underscores left right after the duration (`3h_/a.py`) are read as a
+# boundary by `_EMPHASISED_DURATION`. Later components never make a token a
+# claim (`docs/3d/x.md` is just a path). Only the scan text is rewritten,
+# never the review artifact.
 _DURATION_COMPONENT = re.compile(
     r"^(?:\d+(?:\.\d+)?)?(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
     r"ms|secs?|mins?|hrs?|wks?|[smhd])$",
@@ -533,6 +553,12 @@ _PATH_PREFIX = re.compile(r"^(?:/|\./|\.\./|~/)")
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 _OPENING_WRAPPERS = "\"'`*_([{<"
 _CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}>"
+# The formatting wrappers that can sit on either side of a path's first
+# component, alone or composed (`**3h**`, `_~~3h~~_`): emphasis and
+# strikethrough marks, quotes, backticks, braces and angle brackets. Round and
+# square brackets are not among them: the path-token pass never lets one into
+# a token before its first `/`, and a file:line run holds none.
+_FORMATTING_WRAPPERS = "\"'`*_~{}<>"
 # Sentence punctuation that can close a path (`see docs/x.md?`).
 _SENTENCE_END = "?!"
 # A URI scheme (RFC 3986: a letter, then letters, digits, `+`, `-`, `.`) opening
@@ -542,6 +568,16 @@ _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
 _UNIT_AFTER = re.compile(rf"\s+{_UNIT_WORD}", re.IGNORECASE)
+
+
+def _first_component(form: str) -> str:
+    """The first `/`-component of `form`, formatting wrappers stripped from each side.
+
+    This is the text tested against `_DURATION_COMPONENT`: `**3h**/a.py`,
+    `` `41m`/x.md `` and `"3h"/a.py` all give a duration, `docs/3d/x.md` gives
+    `docs`.
+    """
+    return form.split("/", 1)[0].strip(_FORMATTING_WRAPPERS)
 
 
 def _blank_link_target(match: re.Match[str]) -> str:
@@ -555,8 +591,7 @@ def _blank_file_line(line: str, start: int, end: int, number: str) -> str:
     # A file:line reference follows the same path-token rule: only the first
     # `/`-component can be a claim. When it is a duration the whole token stays
     # visible, for the path-token pass to handle (`3d/foo.py:12`).
-    first = token.lstrip(_OPENING_WRAPPERS).split("/", 1)[0]
-    if "/" in token and _DURATION_COMPONENT.match(first):
+    if "/" in token and _DURATION_COMPONENT.match(_first_component(token)):
         return token
     # A file:line reference followed by a spaced duration unit word is a claim
     # (`x.y:3 days`): only the reference is erased, the number stays.
@@ -651,10 +686,10 @@ def _reference_form(token: str) -> str:
 def _blank_path_piece(token: str) -> str:
     form = _reference_form(token)
     # Fail closed: a duration-shaped FIRST component of the normalised form,
-    # however the piece is wrapped or suffixed, keeps the piece visible to the
-    # scan. Its wrappers become spaces so the claim has a word boundary in
-    # front of it.
-    if _DURATION_COMPONENT.match(form.split("/", 1)[0]):
+    # however the piece or that component is wrapped or suffixed, keeps the
+    # piece visible to the scan. Its outer wrappers become spaces so the claim
+    # has a word boundary in front of it.
+    if _DURATION_COMPONENT.match(_first_component(form)):
         unwrapped = token.lstrip(_OPENING_WRAPPERS)
         core = unwrapped.rstrip(_CLOSING_WRAPPERS)
         leading = " " * (len(token) - len(unwrapped))
@@ -663,17 +698,22 @@ def _blank_path_piece(token: str) -> str:
     # A piece with no `/` is not a path; it stays visible (`41m` in `41m,x/y`).
     if "/" not in token:
         return token
-    # Only a token that is clearly a path is blanked: an explicit path prefix,
-    # a URI scheme, or a file extension on the last component, each read from
-    # the same normalised form (`**./docs/notes**`, `docs/x.md?view=all`,
-    # `docs/x.md?`). A plain `word/word` such as `days/run` or `3d/day` is a
-    # rate, so a duration claim in front of it ("3 days/run") still counts.
-    is_path = (
+    return " " if _is_path_form(form) else token
+
+
+def _is_path_form(form: str) -> bool:
+    """Whether the normalised form of a piece is clearly a path.
+
+    That is an explicit path prefix, a URI scheme, or a file extension on the
+    last component (`**./docs/notes**`, `docs/x.md?view=all`, `docs/x.md?`).
+    A plain `word/word` such as `days/run` or `3d/day` is a rate, so a
+    duration claim in front of it ("3 days/run") still counts.
+    """
+    return bool(
         _PATH_PREFIX.match(form)
         or _URI_SCHEME.match(form)
         or _FILE_EXTENSION.search(form.rsplit("/", 1)[-1])
     )
-    return " " if is_path else token
 
 
 # A path-like token: a run holding a `/`. The lookbehind lets it start only
@@ -683,8 +723,91 @@ def _blank_path_piece(token: str) -> str:
 _PATH_TOKEN_IN_TEXT = re.compile(r"(?<![^\s/\[\]()])[^\s/\[\]()]*/[^\s\])]*")
 
 
+# A whitespace-delimited token, read whole before the path-token pass splits
+# it at brackets. Without this pass, `docs/(_3h_)/x.md` became the path
+# token `docs/(_3h_` (no extension, so kept) and the path `/x.md`, and the
+# later component `_3h_` stayed visible as a claim.
+_WHITESPACE_TOKEN = re.compile(r"\S+")
+# The brackets a path's later components may hold, each closer mapped to the
+# opener it pairs with.
+_BRACKET = re.compile(r"[\[\]()]")
+_OPENERS = "(["
+_OPENER_OF = {")": "(", "]": "["}
+
+
+def _shield_later_components(piece: str, line_number: bool) -> str:
+    """`piece` with the later components of each recognised path in it blanked.
+
+    Only a path's first component can be a claim, so this pass blanks a
+    path's later components and nothing else: the span from its first `/` to
+    its end. It never blanks the first component (the text before that `/`)
+    or anything in front of it, so `note(3h/run.md`, `x)3h/run.md` and
+    `took(3h)/run.md` keep their `3h` for the passes that read it as a claim.
+
+    A path runs from its first `/` while the brackets after that `/` pair up
+    (`docs/(3h)/x.md`, `docs/_(3h)_/x.md`). A closer with no opener to pair
+    with ends it there, and the scan looks for the next path from that closer
+    on (`(docs/a.md)3h/b.md`: the path is `docs/a.md`, and `3h/b.md` after
+    the `)` is a path of its own whose `3h` stays). An opener left unpaired
+    ends the path just before it (`./docs/(3h`), so neither an unpaired
+    bracket nor the text after it is ever blanked as a later component.
+
+    A path is recognised when its text, from the start of the piece or from
+    the closer that ended the path before it, is clearly a path
+    (`_is_path_form` of `_reference_form`). Anything else is left as it is,
+    for the passes after this one.
+
+    When a `:` and a line number follow the piece (`line_number`) and the
+    path that runs to the piece's end has a file name last, that name stays,
+    so the file:line pass still reads `foo.py:7m` as a reference (and
+    `x.md:3 days` as a claim).
+    """
+    parts: list[str] = []
+    kept = 0
+    start = 0
+    slash = piece.find("/")
+    while slash >= 0:
+        openers: list[int] = []
+        resume = len(piece)
+        for bracket in _BRACKET.finditer(piece, slash):
+            mark = bracket.group()
+            if mark in _OPENERS:
+                openers.append(bracket.start())
+            elif openers and piece[openers[-1]] == _OPENER_OF[mark]:
+                openers.pop()
+            else:
+                resume = bracket.start()
+                break
+        end = openers[0] if openers else resume
+        if _is_path_form(_reference_form(piece[start:end])):
+            stop = end
+            name = piece.rindex("/", slash, end) + 1
+            if line_number and end == len(piece) and _FILE_EXTENSION.search(piece, name):
+                stop = name
+            parts += [piece[kept:slash], " " * (stop - slash)]
+            kept = stop
+        start = resume
+        slash = piece.find("/", resume)
+    return "".join(parts) + piece[kept:]
+
+
+def _shield_path_token(match: re.Match[str]) -> str:
+    # Each piece between `;`, `,` and `:` delimiters is its own path, as in
+    # the path-token pass (`docs/x.md,(3h)/y.md` keeps the `3h` claim).
+    pieces = _PATH_DELIMITERS.split(match.group(0))
+    for index in range(0, len(pieces), 2):
+        line_number = (
+            index + 1 < len(pieces)
+            and pieces[index + 1].startswith(":")
+            and pieces[index + 2][:1].isdigit()
+        )
+        pieces[index] = _shield_later_components(pieces[index], line_number)
+    return "".join(pieces)
+
+
 def _strip_references(line: str) -> str:
     line = _LINK_TARGET.sub(_blank_link_target, line)
+    line = _WHITESPACE_TOKEN.sub(_shield_path_token, line)
     line = _blank_references(line)
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
@@ -849,7 +972,7 @@ def _blank_quoted_inputs(lines: list[str]) -> list[str]:
 def _text_for_duration_scan(text: str) -> str:
     lines = text.splitlines()
     return "\n".join(
-        _strip_references(scanned)
+        _EMPHASISED_DURATION.sub(_unwrap_emphasised_duration, _strip_references(scanned))
         for line, scanned in zip(lines, _blank_quoted_inputs(lines))
         if not _INTERVAL_LINE.match(line)
     )

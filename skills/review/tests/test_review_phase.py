@@ -1080,6 +1080,452 @@ def test_run_phase_accepts_an_autolink_and_refuses_its_duration_first_variant():
     assert "review_interval_endpoints_missing" in refused["reason"]
 
 
+# --- a duration first component wrapped on both sides stays a claim ----------
+#
+# Every text here is prose (the Summary section, never a quoted Evidence or
+# Minor notes span), so the reference scan decides it, not the quoted-input
+# blanking that runs before it.
+
+WRAPPED_FIRST_COMPONENT_CLAIMS = [
+    pytest.param("The caller waits **3h**/a.py before retrying.", id="bold"),
+    pytest.param("The caller waits `41m`/x.md before retrying.", id="backtick"),
+    pytest.param('The caller waits "3h"/a.py before retrying.', id="double-quote"),
+    pytest.param("The caller waits '3h'/a.py before retrying.", id="single-quote"),
+    pytest.param("The caller waits *3h*/a.py before retrying.", id="star"),
+    pytest.param("The caller waits _3h_/a.py before retrying.", id="underscore"),
+    pytest.param("The caller waits [3h]/a.py before retrying.", id="square-bracket"),
+    pytest.param("The caller waits (3h)/a.py before retrying.", id="paren"),
+    pytest.param("The caller waits {3h}/a.py before retrying.", id="brace"),
+    pytest.param("The caller waits <3h>/a.py before retrying.", id="angle"),
+    pytest.param("The caller waits 3h**/a.py before retrying.", id="bold-right-only"),
+    pytest.param("The caller waits **3h/a.py before retrying.", id="bold-left-only"),
+    pytest.param("The caller waits 3h_/a.py before retrying.", id="underscore-right-only"),
+    pytest.param("The caller waits **3h**?q/a.py before retrying.", id="bold-query"),
+    pytest.param("The caller waits _3h_?q/a.py before retrying.", id="underscore-query"),
+    pytest.param("The caller waits _3h_/a.py:12 before retrying.", id="underscore-file-line"),
+    # A later piece of a delimited token can carry an opening bracket after
+    # its first component; a closing one ends the token before any `/`.
+    pytest.param("It waited docs/x.md,3h(/a.py before retrying.", id="paren-right-in-list"),
+    pytest.param("It waited docs/x.md,3h[/a.py before retrying.", id="bracket-right-in-list"),
+    pytest.param("It took 3 **days**/run.", id="bold-unit-word"),
+    pytest.param("The caller waits _3d/foo.py_ before retrying.", id="whole-token-underscore"),
+    pytest.param("The caller waits 3d/foo.py before retrying.", id="bare"),
+]
+WRAPPED_FIRST_COMPONENT_REFERENCES = [
+    pytest.param("Only touches docs/3d/x.md and nothing else.", id="later-component"),
+    pytest.param("Only touches **docs**/3d/x.md and nothing else.", id="bold-name"),
+    pytest.param("Only touches `docs`/3d/x.md and nothing else.", id="backtick-name"),
+    pytest.param('Only touches "docs"/3d/x.md and nothing else.', id="quoted-name"),
+    pytest.param("Only touches **/a.py and nothing else.", id="wrapper-only"),
+]
+
+
+def _assert_not_quoted_input(text: str) -> None:
+    lines = text.splitlines()
+    assert review_phase._blank_quoted_inputs(lines) == lines, (
+        "the text must reach the reference scan as written, outside any quoted span"
+    )
+
+
+@pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_CLAIMS)
+def test_wrapped_duration_first_component_is_a_claim(text):
+    _assert_not_quoted_input(text)
+    assert review_phase._has_duration_claim(text) is True, (
+        "a duration-shaped first path component is a claim whatever formatting "
+        "wraps it, on either side or both"
+    )
+
+
+@pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_REFERENCES)
+def test_wrapped_non_duration_first_component_is_still_a_reference(text):
+    _assert_not_quoted_input(text)
+    assert review_phase._has_duration_claim(text) is False, (
+        "a path whose first component is not a duration stays a reference "
+        "however that component is wrapped"
+    )
+
+
+def _assert_summary_claim_refused(body: str) -> None:
+    text = _claude_approve_with(body)
+    _assert_not_quoted_input(text)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure", result["reason"]
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
+def test_run_phase_refuses_a_bold_wrapped_duration_first_component():
+    _assert_summary_claim_refused("The caller waits **3h**/a.py before retrying.")
+
+
+def test_run_phase_refuses_a_backtick_wrapped_duration_first_component():
+    _assert_summary_claim_refused("The caller waits `41m`/x.md before retrying.")
+
+
+# Composed wrappers: any mix or nesting of the formatting wrappers around a
+# duration first component. The path-token pass splits a token at brackets, so
+# `(_3h_)/a.py` never reached the first-component test as one token. These run
+# the whole gate (`review_phase.py --from-text`) on a review that carries the
+# token in Summary prose and has no INTERVAL record.
+COMPOSED_WRAPPER_CLAIMS = [
+    pytest.param("(_3h_)/a.py", id="underscore-in-paren"),
+    pytest.param("[_3h_]/a.py", id="underscore-in-bracket"),
+    pytest.param("_(3h)_/a.py", id="paren-in-underscore"),
+    pytest.param("(**3h**)/a.py", id="bold-in-paren"),
+    pytest.param("_[3h]_/a.py", id="bracket-in-underscore"),
+    pytest.param("_[_3h_]_/a.py", id="underscore-bracket-underscore"),
+    pytest.param("([_3h_])/a.py", id="paren-bracket-underscore"),
+    pytest.param("(_3h_)?q/a.py", id="underscore-in-paren-query"),
+    pytest.param("[_3h_]/a.py:12", id="underscore-in-bracket-file-line"),
+    pytest.param("docs/x.md,(_3h_)/a.py", id="underscore-in-paren-list-piece"),
+    pytest.param("a.py,(_3h_)/b.py", id="underscore-in-paren-after-a-plain-entry"),
+    pytest.param("~~3h~~/a.py", id="strikethrough"),
+]
+COMPOSED_WRAPPER_REFERENCES = [
+    pytest.param("(_docs_)/3d/x.md", id="underscore-in-paren"),
+    pytest.param("[_docs_]/3d/x.md", id="underscore-in-bracket"),
+    pytest.param("(**docs**)/3d/x.md", id="bold-in-paren"),
+    # Strikethrough inside bold: with a bare closing `~~` right before the
+    # slash, the install check's outside-reference scan reads it as a home path.
+    pytest.param("**~~docs~~**/3d/x.md", id="strikethrough-in-bold"),
+]
+
+
+def _run_from_text(tmp_path: Path, token: str) -> tuple[subprocess.CompletedProcess[str], dict]:
+    text = _claude_approve_with(f"The caller waits {token} before retrying.")
+    _assert_not_quoted_input(text)
+    review = tmp_path / "return.md"
+    review.write_text(text, encoding="utf-8")
+    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
+    return proc, json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("token", COMPOSED_WRAPPER_CLAIMS)
+def test_from_text_refuses_a_duration_first_component_in_composed_wrappers(
+    tmp_path: Path, token
+):
+    proc, result = _run_from_text(tmp_path, token)
+    assert result["status"] == "failure", (
+        f"a duration first component in composed wrappers must need an INTERVAL "
+        f"record: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+
+
+@pytest.mark.parametrize("token", COMPOSED_WRAPPER_REFERENCES)
+def test_from_text_accepts_a_non_duration_first_component_in_composed_wrappers(
+    tmp_path: Path, token
+):
+    proc, result = _run_from_text(tmp_path, token)
+    assert result["status"] == "success", (
+        f"a path whose first component is not a duration stays a reference "
+        f"however that component is wrapped: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
+# Emphasis underscores around a duration are a boundary, so a timing claim
+# written in italics still needs an INTERVAL record. Underscores that a letter
+# or digit touches belong to an identifier, which stays a non-claim.
+EMPHASISED_DURATION_CLAIMS = [
+    pytest.param("The suite took _3h_", id="italic-at-line-end"),
+    pytest.param("The suite took __3h__", id="strong-underscore"),
+    pytest.param("The suite took _3h_.", id="italic-before-period"),
+    pytest.param("The suite took _3 hours_ in all.", id="italic-spaced-unit"),
+    pytest.param("The suite took ___2.5h___ in all.", id="triple-underscore-decimal"),
+    pytest.param("The suite took *_41m_* in all.", id="italic-inside-star"),
+    pytest.param("The suite took (_3h_) in all.", id="italic-in-paren"),
+    pytest.param("See [_3h_](docs/run.md) for the run.", id="italic-link-label"),
+    pytest.param("The suite took _3h in all.", id="leading-underscore-only"),
+    pytest.param("The suite took 3h_ in all.", id="trailing-underscore-only"),
+    pytest.param("The suite took _3 Hours_ in all.", id="italic-capitalised-unit"),
+]
+EMPHASISED_DURATION_NON_CLAIMS = [
+    pytest.param("Set retry_3h_window to two.", id="identifier-inner"),
+    pytest.param("Call foo_3h now.", id="identifier-suffix"),
+    pytest.param("Call _3h_window now.", id="identifier-leading-underscore"),
+    pytest.param("Call 3h_window now.", id="identifier-duration-first"),
+    pytest.param("Set v1_3h now.", id="identifier-digit-before"),
+]
+
+
+def _run_body_from_text(tmp_path: Path, body: str) -> tuple[subprocess.CompletedProcess[str], dict]:
+    text = _claude_approve_with(body)
+    _assert_not_quoted_input(text)
+    review = tmp_path / "return.md"
+    review.write_text(text, encoding="utf-8")
+    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
+    return proc, json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("body", EMPHASISED_DURATION_CLAIMS)
+def test_from_text_refuses_an_emphasised_duration_without_an_interval(tmp_path: Path, body):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "failure", (
+        f"a duration in emphasis underscores is a timing claim: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+
+
+@pytest.mark.parametrize("body", EMPHASISED_DURATION_NON_CLAIMS)
+def test_from_text_accepts_a_duration_shaped_part_of_an_identifier(tmp_path: Path, body):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "success", (
+        f"a duration-shaped part of an identifier is not a timing claim: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
+# Only a path's first component can be a claim. The path-token pass splits a
+# token at brackets, so a bracketed later component (`docs/(3h)/x.md`) used to
+# stay visible on its own; the whole recognised path is now read first and its
+# later components blanked. Text in front of a bracket in the first component
+# stays as before (`took(3h)/run.md`), and a file:line reference keeps working.
+LATER_COMPONENT_REFERENCES = [
+    pytest.param("It reads (docs/_3h_/x.md) first.", id="paren-around-path-italic-later"),
+    pytest.param("It reads [a/3h/b.md] first.", id="bracket-around-path"),
+    pytest.param("It reads docs/(3h)/x.md first.", id="paren-later"),
+    pytest.param("It reads docs/(3h)/x.md.", id="paren-later-before-period"),
+    pytest.param("It uses a (docs/3h/x.md)-style layout.", id="paren-path-glued-to-a-word"),
+    pytest.param("It reads docs/(_3h_)/x.md first.", id="paren-italic-later"),
+    pytest.param("It reads docs/[_3h_]/x.md first.", id="bracket-italic-later"),
+    pytest.param("It reads docs/[3h]/x.md first.", id="bracket-later"),
+    pytest.param("It reads docs/_(3h)_/x.md first.", id="italic-paren-later"),
+    pytest.param("It reads docs/a/(3h)/x.md first.", id="paren-third-component"),
+    pytest.param("It reads docs/(_3h_).md first.", id="paren-italic-file-name"),
+    pytest.param("It reads docs/(3h)/x.md:12 first.", id="paren-later-file-line"),
+    pytest.param("It reads docs/a.md,b.py:12d first.", id="list-entry-file-line"),
+    pytest.param("It reads ./docs/3h:12 first.", id="extensionless-name-then-line"),
+    pytest.param("It reads docs/3h.md,12 first.", id="file-name-then-comma-number"),
+    pytest.param("It reads docs/3h.md:x first.", id="file-name-then-colon-word"),
+]
+LATER_COMPONENT_CLAIMS = [
+    pytest.param("It waits took(3h)/run.md here.", id="paren-in-first-component"),
+    pytest.param("It waits took[3h]/run.md here.", id="bracket-in-first-component"),
+    pytest.param("It waited 3h(docs/x.md) here.", id="duration-before-paren-path"),
+    pytest.param("It waited 3h[docs/x.md] here.", id="duration-before-bracket-path"),
+    pytest.param("It waits docs/x.md,(3h)/y.md here.", id="duration-first-list-entry"),
+    pytest.param("It ran docs/(x)/y.md:3 days", id="file-line-then-unit-word"),
+    pytest.param("It waited )3h/a.py here.", id="stray-close-paren-before-duration"),
+    pytest.param("It waited ]3h/a.py here.", id="stray-close-bracket-before-duration"),
+]
+
+
+@pytest.mark.parametrize("body", LATER_COMPONENT_REFERENCES)
+def test_from_text_accepts_a_duration_later_component_inside_brackets(tmp_path: Path, body):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "success", (
+        f"a later path component is never a claim, bracketed or not: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
+@pytest.mark.parametrize("body", LATER_COMPONENT_CLAIMS)
+def test_from_text_refuses_a_first_component_or_glued_duration_beside_a_bracketed_path(
+    tmp_path: Path, body
+):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "failure", (
+        f"a duration before the path's later components is still a claim: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+
+
+# The shield for later components blanks only a recognised path's later
+# components, from its first `/` to its end. It never blanks the first
+# component or text in front of it, whatever bracket sits before the `/`; a
+# closer with no opener ends the path, and what follows it is read again; an
+# unpaired opener ends the path before it, so the opener and what follows it
+# stay visible. Every text here refuses: the `3h` is outside any recognised
+# path's later components.
+SHIELD_KEEPS_CLAIMS = [
+    pytest.param("It took note(3h/docs/a/b.md here.", id="unmatched-paren-before-duration"),
+    pytest.param("It waited note[3h/run.md here.", id="unmatched-bracket-before-duration"),
+    pytest.param("It ran x)3h/docs/a/b.md here.", id="preceding-close-paren"),
+    pytest.param("It waited note]3h/run.md here.", id="preceding-close-bracket"),
+    pytest.param("A note[_3h_/docs/x/y.md here.", id="prefix-then-bracket-italic-duration"),
+    pytest.param("A note(**3h**/docs/x/y.md here.", id="prefix-then-paren-bold-duration"),
+    pytest.param("A note({3h}/docs/x/y.md here.", id="prefix-then-paren-brace-duration"),
+    pytest.param("It read docs/a.md)3h/b.md here.", id="duration-after-a-path-and-closer"),
+    pytest.param("It read (docs/a.md)3h/b.md here.", id="duration-after-a-paren-wrapped-path"),
+    pytest.param("It read [docs/a.md]3h/b.md here.", id="duration-after-a-bracket-wrapped-path"),
+    pytest.param("It read docs/(a]3h/b.md here.", id="mismatched-closer-ends-the-path"),
+    pytest.param("It read ./docs/(3h here.", id="unpaired-opener-and-what-follows"),
+    pytest.param("It read ./docs/(3h/(a here.", id="first-of-two-unpaired-openers"),
+    pytest.param("It read docs/(a/[3h]/x.md here.", id="unpaired-opener-around-a-pair"),
+    pytest.param("It read ./a)x/3h here.", id="next-path-read-from-the-closer"),
+    pytest.param(
+        "It read docs/a.md)./x/(a)3h/b here.", id="next-path-text-starts-at-the-closer"
+    ),
+    pytest.param("It read (docs/a.md)3h/b.md) here.", id="duration-between-two-closers"),
+    pytest.param("It read x/3h)y/b.md here.", id="unrecognised-path-before-a-closer"),
+    pytest.param("It read ./docs/([3h)/x) here.", id="crossed-brackets-end-the-path"),
+]
+# A path after a closer is still recognised and shielded, and only the path
+# that runs to the end of the piece keeps its file name for a `:line`.
+SHIELD_BLANKS_LATER_COMPONENTS = [
+    pytest.param("It read docs/a.md)x/(3h)/b.md here.", id="next-path-later-component"),
+    pytest.param("It read ./docs/3h)x/b.md:12 here.", id="file-line-name-only-on-the-last-path"),
+    pytest.param("It reads /docs/(a)3h/x.md first.", id="absolute-path-pair-then-duration"),
+    pytest.param(
+        "It reads docs/a.md,docs/(3h)/x.md first.", id="bracketed-later-component-in-a-list-piece"
+    ),
+]
+
+
+# An opener left unpaired after the `/` ends the shielded path before it, so
+# these tokens reach the path-token pass whole. That pass still reads the first
+# component with every formatting wrapper stripped from both sides, so the
+# duration stays a claim. A `?` in front of a file:line path hides it from the
+# shield's path test in the same way, and the file:line pass reads its first
+# component with the wrappers stripped too.
+SHIELD_KEEPS_CLAIMS += [
+    pytest.param("It waited **3h**/(a.py here.", id="bold-first-component-unpaired-opener"),
+    pytest.param("It waited `3h`/(a.py here.", id="backtick-first-component-unpaired-opener"),
+    pytest.param('It waited "3h"/(a.py here.', id="double-quote-first-component-unpaired-opener"),
+    pytest.param("It waited '3h'/(a.py here.", id="single-quote-first-component-unpaired-opener"),
+    pytest.param("It waited _3h_/(a.py here.", id="underscore-first-component-unpaired-opener"),
+    pytest.param("It waited ~~3h~~/(a.py here.", id="strikethrough-first-component-unpaired-opener"),
+    pytest.param("It waited {3h}/(a.py here.", id="brace-first-component-unpaired-opener"),
+    pytest.param("It waited <3h>/(a.py here.", id="angle-first-component-unpaired-opener"),
+    pytest.param("It waited 3h{/(a.py here.", id="open-brace-after-duration-unpaired-opener"),
+    pytest.param("It waited 3h</(a.py here.", id="open-angle-after-duration-unpaired-opener"),
+    pytest.param("It waited x?3h_/a.py:12 here.", id="query-mark-before-file-line-duration"),
+]
+
+
+@pytest.mark.parametrize("body", SHIELD_KEEPS_CLAIMS)
+def test_from_text_refuses_a_duration_the_shield_cannot_place_in_later_components(
+    tmp_path: Path, body
+):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "failure", (
+        f"a duration outside a recognised path's later components is a claim: "
+        f"{result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+
+
+@pytest.mark.parametrize("body", SHIELD_BLANKS_LATER_COMPONENTS)
+def test_from_text_accepts_a_duration_in_a_later_component_after_a_closer(
+    tmp_path: Path, body
+):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "success", (
+        f"a later path component is never a claim: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
+# A closer that does not pair with the open bracket (`(` then `]`) ends the
+# path, and the scan for the next path starts at that closer, not at the
+# opener before it. Text in front of the closer is not part of the next path,
+# so an absolute prefix after the opener (`(/`, `(./`) cannot make it a path
+# and blank a duration that follows the closer.
+#
+# Level one: the shield itself, as `(piece, line_number, shield)`. Each piece
+# keeps its trailing `3h` visible; reading the next path from the opener
+# instead would blank it.
+SHIELD_KEEPS_A_DURATION_AFTER_A_MISMATCHED_CLOSER = [
+    pytest.param("/(/]/3h", False, " (/]/3h", id="rooted-paren-bracket"),
+    pytest.param("3h/(/]/3h", False, "3h/(/]/3h", id="duration-first-paren-bracket"),
+    pytest.param("/[/)/3h", False, " [/)/3h", id="rooted-bracket-paren"),
+    pytest.param("/3h(/]/3h", False, "   (/]/3h", id="rooted-duration-then-paren-bracket"),
+    pytest.param("docs/(./x]a/3h", False, "docs/(./x]a/3h", id="dot-slash-after-the-opener"),
+    pytest.param("docs/(./x]a/x/3h", False, "docs/(./x]a/x/3h", id="duration-two-components-on"),
+    pytest.param("/(/]/3h", True, " (/]/3h", id="rooted-paren-bracket-before-a-line-number"),
+    pytest.param(
+        "docs/(./x]a/3h", True, "docs/(./x]a/3h", id="dot-slash-after-the-opener-before-a-line"
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("piece", "line_number", "shield"), SHIELD_KEEPS_A_DURATION_AFTER_A_MISMATCHED_CLOSER
+)
+def test_shield_reads_the_next_path_from_a_mismatched_closer_not_the_opener(
+    piece: str, line_number: bool, shield: str
+):
+    assert review_phase._shield_later_components(piece, line_number) == shield
+
+
+# Level two, through the review text: each pair is a mismatched-closer piece
+# with a trailing duration that refuses, and the same text without the
+# duration, which approves. The duration follows the first component of the
+# path that starts at the closer (`a/3h`), so it is a claim; the text in front
+# of the closer starts like a path (`(./`, `(/`, `(~/`), which is the only
+# thing that could hide it.
+MISMATCHED_CLOSER_DURATION_PAIRS = [
+    pytest.param(
+        "It read docs/(./x]a/3h here.", "It read docs/(./x]a here.", id="dot-slash-paren-bracket"
+    ),
+    pytest.param(
+        "It read docs/(/x]a/3h here.", "It read docs/(/x]a here.", id="slash-paren-bracket"
+    ),
+    pytest.param(
+        "It read docs/(~/x]a/3h here.", "It read docs/(~/x]a here.", id="tilde-paren-bracket"
+    ),
+    pytest.param(
+        "It read docs/(https://x]a/3h here.",
+        "It read docs/(https://x]a here.",
+        id="uri-paren-bracket",
+    ),
+    pytest.param(
+        "It read docs/[./x)a/3h here.", "It read docs/[./x)a here.", id="dot-slash-bracket-paren"
+    ),
+    pytest.param(
+        "It read x/(/a]a/3h here.", "It read x/(/a]a here.", id="rooted-after-a-component"
+    ),
+    pytest.param(
+        "It read docs/(./x]a/3h:12 here.",
+        "It read docs/(./x]a:12 here.",
+        id="before-a-line-number",
+    ),
+]
+
+
+@pytest.mark.parametrize(("with_duration", "without_duration"), MISMATCHED_CLOSER_DURATION_PAIRS)
+def test_from_text_refuses_a_duration_after_a_mismatched_closer_and_approves_without_it(
+    tmp_path: Path, with_duration: str, without_duration: str
+):
+    proc, result = _run_body_from_text(tmp_path, with_duration)
+    assert result["status"] == "failure", (
+        f"a duration after a closer that pairs with no opener is a claim: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+    proc, result = _run_body_from_text(tmp_path, without_duration)
+    assert result["status"] == "success", (
+        f"the same text without the duration approves: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
+# The closer can also be followed by `/` at once (`]/3h/run.md`). That text is
+# itself a rooted path whose later components are `3h` and `run.md`, so the
+# duration is a later component of a recognised path and approves, with or
+# without the opener's text in front of it.
+SHIELD_BLANKS_A_ROOTED_PATH_AFTER_A_MISMATCHED_CLOSER = [
+    pytest.param("see docs/(a]/3h/run.md", id="rooted-path-after-the-closer"),
+    pytest.param("It reads docs/(x]/3h/b.md first.", id="token-glued-rooted-path-after-the-closer"),
+]
+
+
+@pytest.mark.parametrize("body", SHIELD_BLANKS_A_ROOTED_PATH_AFTER_A_MISMATCHED_CLOSER)
+def test_from_text_accepts_a_duration_in_a_rooted_path_after_a_mismatched_closer(
+    tmp_path: Path, body: str
+):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "success", (
+        f"a later component of the path that starts at the closer is not a claim: "
+        f"{result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
 # --- prose after a bulleted clean marker refuses ----------------------------
 
 CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."
@@ -1442,6 +1888,8 @@ LONG_TOKENS = {
     "minified-js-like": _minified_js_like,
     "unclosed-link-targets": lambda length: "](" * (length // 2),
     "dotted-run": lambda length: "a." * (length // 2),
+    "closer-separated-paths": lambda length: ("a/b.md)" * length)[:length],
+    "unpaired-openers": lambda length: ("a/(" * length)[:length],
 }
 REFERENCE_SCANS = {
     "has-duration-claim": lambda text: review_phase._has_duration_claim(text),
