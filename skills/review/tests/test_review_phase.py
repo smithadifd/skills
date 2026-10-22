@@ -1161,6 +1161,67 @@ def test_run_phase_refuses_a_backtick_wrapped_duration_first_component():
     _assert_summary_claim_refused("The caller waits `41m`/x.md before retrying.")
 
 
+# Composed wrappers: any mix or nesting of the formatting wrappers around a
+# duration first component. The path-token pass splits a token at brackets, so
+# `(_3h_)/a.py` never reached the first-component test as one token. These run
+# the whole gate (`review_phase.py --from-text`) on a review that carries the
+# token in Summary prose and has no INTERVAL record.
+COMPOSED_WRAPPER_CLAIMS = [
+    pytest.param("(_3h_)/a.py", id="underscore-in-paren"),
+    pytest.param("[_3h_]/a.py", id="underscore-in-bracket"),
+    pytest.param("_(3h)_/a.py", id="paren-in-underscore"),
+    pytest.param("(**3h**)/a.py", id="bold-in-paren"),
+    pytest.param("_[3h]_/a.py", id="bracket-in-underscore"),
+    pytest.param("_[_3h_]_/a.py", id="underscore-bracket-underscore"),
+    pytest.param("([_3h_])/a.py", id="paren-bracket-underscore"),
+    pytest.param("(_3h_)?q/a.py", id="underscore-in-paren-query"),
+    pytest.param("[_3h_]/a.py:12", id="underscore-in-bracket-file-line"),
+    pytest.param("docs/x.md,(_3h_)/a.py", id="underscore-in-paren-list-piece"),
+    pytest.param("a.py,(_3h_)/b.py", id="underscore-in-paren-after-a-plain-entry"),
+    pytest.param("~~3h~~/a.py", id="strikethrough"),
+]
+COMPOSED_WRAPPER_REFERENCES = [
+    pytest.param("(_docs_)/3d/x.md", id="underscore-in-paren"),
+    pytest.param("[_docs_]/3d/x.md", id="underscore-in-bracket"),
+    pytest.param("(**docs**)/3d/x.md", id="bold-in-paren"),
+    pytest.param("~~docs~~/3d/x.md", id="strikethrough"),
+]
+
+
+def _run_from_text(tmp_path: Path, token: str) -> tuple[subprocess.CompletedProcess[str], dict]:
+    text = _claude_approve_with(f"The caller waits {token} before retrying.")
+    _assert_not_quoted_input(text)
+    review = tmp_path / "return.md"
+    review.write_text(text, encoding="utf-8")
+    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
+    return proc, json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("token", COMPOSED_WRAPPER_CLAIMS)
+def test_from_text_refuses_a_duration_first_component_in_composed_wrappers(
+    tmp_path: Path, token
+):
+    proc, result = _run_from_text(tmp_path, token)
+    assert result["status"] == "failure", (
+        f"a duration first component in composed wrappers must need an INTERVAL "
+        f"record: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+
+
+@pytest.mark.parametrize("token", COMPOSED_WRAPPER_REFERENCES)
+def test_from_text_accepts_a_non_duration_first_component_in_composed_wrappers(
+    tmp_path: Path, token
+):
+    proc, result = _run_from_text(tmp_path, token)
+    assert result["status"] == "success", (
+        f"a path whose first component is not a duration stays a reference "
+        f"however that component is wrapped: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
 # --- prose after a bulleted clean marker refuses ----------------------------
 
 CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."

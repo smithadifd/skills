@@ -538,8 +538,9 @@ _FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
 _OPENING_WRAPPERS = "\"'`*_([{<"
 _CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}>"
 # The formatting wrappers that can sit on either side of a path's first
-# component: emphasis marks, quotes, backticks and brackets.
-_FORMATTING_WRAPPERS = "\"'`*_()[]{}<>"
+# component, alone or composed (`_(3h)_`, `[**3h**]`): emphasis and
+# strikethrough marks, quotes, backticks and brackets.
+_FORMATTING_WRAPPERS = "\"'`*_~()[]{}<>"
 # Where the first component of a path piece ends: the first `/`, or the
 # `?query` / `#fragment` suffix that `_reference_form` cuts off before it.
 _FIRST_COMPONENT_END = re.compile(r"[/?#]")
@@ -717,8 +718,47 @@ def _blank_path_piece(token: str) -> str:
 _PATH_TOKEN_IN_TEXT = re.compile(r"(?<![^\s/\[\]()])[^\s/\[\]()]*/[^\s\])]*")
 
 
+# A whitespace-delimited token, read whole before the path-token pass splits
+# it at brackets. That split is why this pass exists: in `(_3h_)/a.py` the
+# path token starts after the `)`, so the wrapped duration in front of it
+# never reaches the first-component test, and its `_` marks hide the word
+# boundary the scan needs.
+_WHITESPACE_TOKEN = re.compile(r"\S+")
+
+
+def _expose_wrapped_duration(piece: str) -> str:
+    """`piece` with a wrapped duration first component laid bare for the scan.
+
+    The first component is the text before the first `/`, `?` or `#`, and the
+    piece must hold a `/`. When that component, with every formatting wrapper
+    stripped from each side (any mix and nesting: `(_3h_)`, `_[3h]_`,
+    `(**3h**)`, `~~3h~~`), is a duration, those wrappers become spaces.
+    Anything else is returned as it is.
+    """
+    if "/" not in piece:
+        return piece
+    stem = piece[: _FIRST_COMPONENT_END.search(piece).start()]
+    if not _DURATION_COMPONENT.match(stem.strip(_FORMATTING_WRAPPERS)):
+        return piece
+    return _space_first_component_wrappers(piece)
+
+
+def _expose_wrapped_durations(match: re.Match[str]) -> str:
+    token = match.group(0)
+    if "/" not in token:
+        return token
+    # Each piece between `;`, `,` and `:` delimiters has its own first
+    # component, as in the path-token pass (`docs/x.md,(_3h_)/a.py`).
+    pieces = _PATH_DELIMITERS.split(token)
+    return "".join(
+        piece if index % 2 else _expose_wrapped_duration(piece)
+        for index, piece in enumerate(pieces)
+    )
+
+
 def _strip_references(line: str) -> str:
     line = _LINK_TARGET.sub(_blank_link_target, line)
+    line = _WHITESPACE_TOKEN.sub(_expose_wrapped_durations, line)
     line = _blank_references(line)
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
