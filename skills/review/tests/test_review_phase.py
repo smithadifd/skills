@@ -1420,6 +1420,112 @@ def test_from_text_accepts_a_duration_in_a_later_component_after_a_closer(
     assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
 
 
+# A closer that does not pair with the open bracket (`(` then `]`) ends the
+# path, and the scan for the next path starts at that closer, not at the
+# opener before it. Text in front of the closer is not part of the next path,
+# so an absolute prefix after the opener (`(/`, `(./`) cannot make it a path
+# and blank a duration that follows the closer.
+#
+# Level one: the shield itself, as `(piece, line_number, shield)`. Each piece
+# keeps its trailing `3h` visible; reading the next path from the opener
+# instead would blank it.
+SHIELD_KEEPS_A_DURATION_AFTER_A_MISMATCHED_CLOSER = [
+    pytest.param("/(/]/3h", False, " (/]/3h", id="rooted-paren-bracket"),
+    pytest.param("3h/(/]/3h", False, "3h/(/]/3h", id="duration-first-paren-bracket"),
+    pytest.param("/[/)/3h", False, " [/)/3h", id="rooted-bracket-paren"),
+    pytest.param("/3h(/]/3h", False, "   (/]/3h", id="rooted-duration-then-paren-bracket"),
+    pytest.param("docs/(./x]a/3h", False, "docs/(./x]a/3h", id="dot-slash-after-the-opener"),
+    pytest.param("docs/(./x]a/x/3h", False, "docs/(./x]a/x/3h", id="duration-two-components-on"),
+    pytest.param("/(/]/3h", True, " (/]/3h", id="rooted-paren-bracket-before-a-line-number"),
+    pytest.param(
+        "docs/(./x]a/3h", True, "docs/(./x]a/3h", id="dot-slash-after-the-opener-before-a-line"
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("piece", "line_number", "shield"), SHIELD_KEEPS_A_DURATION_AFTER_A_MISMATCHED_CLOSER
+)
+def test_shield_reads_the_next_path_from_a_mismatched_closer_not_the_opener(
+    piece: str, line_number: bool, shield: str
+):
+    assert review_phase._shield_later_components(piece, line_number) == shield
+
+
+# Level two, through the review text: each pair is a mismatched-closer piece
+# with a trailing duration that refuses, and the same text without the
+# duration, which approves. The duration follows the first component of the
+# path that starts at the closer (`a/3h`), so it is a claim; the text in front
+# of the closer starts like a path (`(./`, `(/`, `(~/`), which is the only
+# thing that could hide it.
+MISMATCHED_CLOSER_DURATION_PAIRS = [
+    pytest.param(
+        "It read docs/(./x]a/3h here.", "It read docs/(./x]a here.", id="dot-slash-paren-bracket"
+    ),
+    pytest.param(
+        "It read docs/(/x]a/3h here.", "It read docs/(/x]a here.", id="slash-paren-bracket"
+    ),
+    pytest.param(
+        "It read docs/(~/x]a/3h here.", "It read docs/(~/x]a here.", id="tilde-paren-bracket"
+    ),
+    pytest.param(
+        "It read docs/(https://x]a/3h here.",
+        "It read docs/(https://x]a here.",
+        id="uri-paren-bracket",
+    ),
+    pytest.param(
+        "It read docs/[./x)a/3h here.", "It read docs/[./x)a here.", id="dot-slash-bracket-paren"
+    ),
+    pytest.param(
+        "It read x/(/a]a/3h here.", "It read x/(/a]a here.", id="rooted-after-a-component"
+    ),
+    pytest.param(
+        "It read docs/(./x]a/3h:12 here.",
+        "It read docs/(./x]a:12 here.",
+        id="before-a-line-number",
+    ),
+]
+
+
+@pytest.mark.parametrize(("with_duration", "without_duration"), MISMATCHED_CLOSER_DURATION_PAIRS)
+def test_from_text_refuses_a_duration_after_a_mismatched_closer_and_approves_without_it(
+    tmp_path: Path, with_duration: str, without_duration: str
+):
+    proc, result = _run_body_from_text(tmp_path, with_duration)
+    assert result["status"] == "failure", (
+        f"a duration after a closer that pairs with no opener is a claim: {result['reason']}"
+    )
+    assert "review_interval_endpoints_missing" in result["reason"]
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+    proc, result = _run_body_from_text(tmp_path, without_duration)
+    assert result["status"] == "success", (
+        f"the same text without the duration approves: {result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
+# The closer can also be followed by `/` at once (`]/3h/run.md`). That text is
+# itself a rooted path whose later components are `3h` and `run.md`, so the
+# duration is a later component of a recognised path and approves, with or
+# without the opener's text in front of it.
+SHIELD_BLANKS_A_ROOTED_PATH_AFTER_A_MISMATCHED_CLOSER = [
+    pytest.param("see docs/(a]/3h/run.md", id="rooted-path-after-the-closer"),
+    pytest.param("It reads docs/(x]/3h/b.md first.", id="token-glued-rooted-path-after-the-closer"),
+]
+
+
+@pytest.mark.parametrize("body", SHIELD_BLANKS_A_ROOTED_PATH_AFTER_A_MISMATCHED_CLOSER)
+def test_from_text_accepts_a_duration_in_a_rooted_path_after_a_mismatched_closer(
+    tmp_path: Path, body: str
+):
+    proc, result = _run_body_from_text(tmp_path, body)
+    assert result["status"] == "success", (
+        f"a later component of the path that starts at the closer is not a claim: "
+        f"{result['reason']}"
+    )
+    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
+
+
 # --- prose after a bulleted clean marker refuses ----------------------------
 
 CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."
