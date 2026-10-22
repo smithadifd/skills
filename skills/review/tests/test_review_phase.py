@@ -720,7 +720,8 @@ def test_duration_without_interval_is_refused():
     )
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
-    assert "no INTERVAL record" in result["reason"]
+    assert "line 5:" in result["reason"]
+    assert "the caller waited for 41 minutes." in result["reason"]
     assert result["artifacts"]["review.md"] == DURATION_WITHOUT_INTERVAL
     assert result["artifacts"]["findings.json"] is None
     assert result["resume_token"] is None
@@ -755,7 +756,7 @@ def test_interval_missing_start_event_is_refused():
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
-    assert "start_event" in result["reason"]
+    assert "line 7:" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
 
 
@@ -767,7 +768,7 @@ def test_interval_missing_start_source_is_refused():
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
-    assert "start_source" in result["reason"]
+    assert "line 7:" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
 
 
@@ -779,7 +780,7 @@ def test_interval_missing_end_event_is_refused():
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
-    assert "end_event" in result["reason"]
+    assert "line 7:" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
 
 
@@ -790,7 +791,7 @@ def test_interval_missing_end_source_is_refused():
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
-    assert "end_source" in result["reason"]
+    assert "line 7:" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
 
 
@@ -802,7 +803,7 @@ def test_interval_missing_duration_is_refused():
     result = review_phase.run_phase(_envelope("grok-notools", text))
     assert result["status"] == "failure"
     assert "review_interval_endpoints_missing" in result["reason"]
-    assert "duration" in result["reason"]
+    assert "line 7:" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
 
 
@@ -2507,3 +2508,105 @@ def test_quoted_input_scan_time_grows_linearly(shape):
         f"the duration scan on {shape}: doubling 4000 to 8000 units took "
         f"{shorter * 1e3:.3f}ms to {longer * 1e3:.3f}ms, more than three times"
     )
+
+
+# --- EOR47: quoted duration examples are not claims; refusals name the line --
+
+
+def _eor47_fixture(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+EOR47_APPROVE_FIXTURES = [
+    "pr-35-claude-empirical-r2.output.md",
+    "pr-36-claude-empirical-r1.attempt1.output.md",
+    "pr-36-claude-empirical-r1.output.md",
+]
+
+
+@pytest.mark.parametrize("name", EOR47_APPROVE_FIXTURES)
+def test_copied_approve_review_quoting_duration_examples_parses(name):
+    result = review_phase.run_phase(_envelope("claude-fresh", _eor47_fixture(name)))
+    assert result["status"] == "success", result["reason"]
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "approved"
+    assert "intervals" not in result
+    assert not any(
+        f["severity"] == "error" or f["rule"] == "issue" for f in findings["findings"]
+    )
+
+
+def test_copied_request_changes_review_quoting_duration_examples_parses():
+    result = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _eor47_fixture("pr-36-claude-empirical-r1.attempt2.output.md"),
+        )
+    )
+    assert result["status"] == "success", result["reason"]
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "changes_requested"
+    assert "intervals" not in result
+    assert any(f["rule"] == "issue" for f in findings["findings"])
+
+
+def test_unquoted_took_41_seconds_is_refused():
+    text = _claude_approve_with("I ran it and it took 41 seconds")
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing: line 4:" in result["reason"]
+    assert "I ran it and it took 41 seconds" in result["reason"]
+
+
+def test_took_quoted_bare_duration_is_still_a_claim():
+    text = _claude_approve_with('The probe took "41 seconds" before returning')
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing: line 4:" in result["reason"]
+    assert 'took "41 seconds"' in result["reason"]
+
+
+def test_quoted_example_phrase_in_summary_parses_without_an_interval():
+    text = _claude_approve_with(
+        'Measured durations such as "ran for 120 seconds" still count as claims.'
+    )
+    _assert_quoted_parses(text)
+
+
+def test_quoted_example_phrase_in_issues_parses_without_an_interval():
+    text = (
+        "## Verdict: REQUEST CHANGES\n\n"
+        '### Issues\n- Probe: "took 41 seconds before the timeout" still claims\n\n'
+        "### Evidence\n- Ran: checks passed\n"
+    )
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+    assert "intervals" not in result
+
+
+def test_interval_refusal_truncates_the_named_line_to_200_characters():
+    body = "I ran it and it took 41 seconds. " + ("x" * 220)
+    result = review_phase.run_phase(_envelope("claude-fresh", _claude_approve_with(body)))
+    assert result["status"] == "failure"
+    _, _, named = result["reason"].partition("line 4: ")
+    assert len(named) == 200
+    assert named == body[:200]
+
+
+def test_quoted_example_scan_finishes_a_100kb_line_within_a_second():
+    line = ('x "ran for 120 seconds" y ' * 4000)[:100_000]
+    text = _claude_approve_with(line)
+    start = time.perf_counter()
+    claimed = review_phase._has_duration_claim(text)
+    elapsed = time.perf_counter() - start
+    assert claimed is False
+    assert elapsed <= REDOS_LIMIT_SECONDS, f"quoted-example scan took {elapsed:.2f}s"
+
+
+def test_quoted_example_scan_finishes_a_100kb_unmatched_quote_within_a_second():
+    line = '"' + ("x" * 99_999)
+    text = _claude_approve_with(line)
+    start = time.perf_counter()
+    review_phase._has_duration_claim(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed <= REDOS_LIMIT_SECONDS, f"unmatched-quote scan took {elapsed:.2f}s"
