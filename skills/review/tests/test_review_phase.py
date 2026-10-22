@@ -1536,3 +1536,240 @@ def test_link_target_beside_a_real_claim_is_a_claim(text):
         "a real claim beside a link target, in its label, or after an "
         "unclosed target stays a claim"
     )
+
+
+# --- the heading pattern stays linear and keeps its grammar ------------------
+#
+# `_HEADING` runs on every line of every review. One line of `# a`, 3,000
+# spaces and `b` used to take over ten seconds. The forms below are the
+# headings the adapter tests already exercise, plus the edge forms, each with
+# the title the earlier pattern gave.
+
+HEADING_LIMIT_SECONDS = 1.0
+THREE_THOUSAND_SPACE_LINE = "# a" + " " * 3000 + "b"
+
+
+def _timed_heading_match(line: str):
+    start = time.perf_counter()
+    matched = review_phase._HEADING.match(line)
+    return matched, time.perf_counter() - start
+
+
+def _best_heading_seconds(line: str, trials: int = 7, calls: int = 50) -> float:
+    """The fastest per-call time over several trials; one slow call ends it."""
+    best = float("inf")
+    for _ in range(trials):
+        start = time.perf_counter()
+        for _ in range(calls):
+            _, call = _timed_heading_match(line)
+            if call > HEADING_LIMIT_SECONDS:
+                return call
+        best = min(best, (time.perf_counter() - start) / calls)
+    return best
+
+
+def test_heading_match_finishes_the_3000_space_line_within_a_second():
+    matched, elapsed = _timed_heading_match(THREE_THOUSAND_SPACE_LINE)
+    assert elapsed <= HEADING_LIMIT_SECONDS, (
+        f"_HEADING took {elapsed:.2f}s on a line of `# a`, 3,000 spaces and `b`"
+    )
+    assert matched is not None
+    assert review_phase._heading_title(matched) == "a" + " " * 3000 + "b"
+
+
+def test_claude_adapter_parses_a_review_holding_the_3000_space_line_within_a_second():
+    text = "\n".join(
+        ["## Verdict: APPROVE", "", "### Issues", "- none", "", "### Evidence",
+         THREE_THOUSAND_SPACE_LINE, ""]
+    )
+    start = time.perf_counter()
+    parsed = review_phase.parse_claude_fresh(text)
+    elapsed = time.perf_counter() - start
+    assert parsed == ("approved", [])
+    assert elapsed <= HEADING_LIMIT_SECONDS, f"parse_claude_fresh took {elapsed:.2f}s"
+
+
+HEADING_GROWTH_SHAPES = {
+    "hash-a-spaces-b": lambda n: "# a" + " " * n + "b",
+    "hash-a-spaces-hash-b": lambda n: "# a" + " " * n + "#" + " " * n + "b",
+    "hash-spaces-then-hashes": lambda n: "#" + " " * n + "###" + " " * n + "x",
+    "alternating-space-hash": lambda n: "# a" + " #" * (n // 2) + "b",
+    "b-spaces-hash-spaces-hash": lambda n: "# b" + " " * n + "#" + " " * n + "#",
+    "seven-hashes-spaces-b": lambda n: "#######" + " " * n + "b",
+    "only-spaces-after-hash": lambda n: "#" + " " * n,
+    "hash-a-spaces-newline-spaces-x": lambda n: "# a" + " " * n + "\n" + " " * n + "x",
+    "label-colon-spaces-newline-spaces-x": (
+        lambda n: "FINDINGS:" + " " * n + "\n" + " " * n + "x"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", list(HEADING_GROWTH_SHAPES))
+def test_heading_match_time_grows_linearly_with_line_length(shape):
+    shorter = _best_heading_seconds(HEADING_GROWTH_SHAPES[shape](3000))
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"_HEADING took {shorter:.2f}s on the 3000-space {shape} line"
+    )
+    longer = _best_heading_seconds(HEADING_GROWTH_SHAPES[shape](6000))
+    assert longer <= 3 * shorter, (
+        f"_HEADING on a {shape} line: doubling 3000 to 6000 spaces took "
+        f"{shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than three times"
+    )
+
+
+HEADING_FORMS = [
+    ('## FINDINGS', 'FINDINGS'),
+    ('## VERDICT', 'VERDICT'),
+    ('FINDINGS:', 'FINDINGS'),
+    ('VERDICT: flagged — the retry logic needs the backoff reset before merge.', 'VERDICT'),
+    ('## Verdict: REQUEST CHANGES', 'Verdict: REQUEST CHANGES'),
+    ('## Verdict: APPROVE', 'Verdict: APPROVE'),
+    ('### Issues', 'Issues'),
+    ('### Minor notes', 'Minor notes'),
+    ('### Evidence', 'Evidence'),
+    ('VERDICT: APPROVE', 'VERDICT'),
+    ('VERDICT: APPROVE_WITH_FINDINGS', 'VERDICT'),
+    ('ANALYSIS:', 'ANALYSIS'),
+    ('#', None),
+    ('  #', None),
+    ('##', '#'),
+    ('#######', '#'),
+    ('# ', ' '),
+    ('#   ', ' '),
+    ('##  ', ' '),
+    ('\t# x', 'x'),
+    ('# Title', 'Title'),
+    ('#Title', 'Title'),
+    ('## Title ##', 'Title'),
+    ('## Title##', 'Title'),
+    ('## a # b', 'a # b'),
+    ('## a #', 'a'),
+    ('## a# ##', 'a#'),
+    ('# # #', '#'),
+    ('###### x', 'x'),
+    ('####### x', '# x'),
+    ('# a\t#\t', 'a'),
+    ('**ISSUES**', 'ISSUES'),
+    ('**ISSUES**:', 'ISSUES'),
+    ('ISSUES: none', 'ISSUES'),
+    ('  minor notes  ', 'minor notes'),
+    ('Findings', 'Findings'),
+    ('#\n', None),
+    ('#\r\n', '\r'),
+    ('##\n', '#'),
+    ('FINDINGS: x\n  ', 'FINDINGS'),
+    ('FINDINGS: x\n  y', None),
+    ('FINDINGS x', None),
+    ('Issue: x', None),
+    ('- ## x', None),
+    ('', None),
+    (' ', None),
+    ('x', None),
+]
+
+
+@pytest.mark.parametrize(
+    ("line", "title"), HEADING_FORMS, ids=[repr(line) for line, _ in HEADING_FORMS]
+)
+def test_heading_forms_keep_main_titles(line, title):
+    matched = review_phase._HEADING.match(line)
+    got = None if matched is None else review_phase._heading_title(matched)
+    assert got == title
+
+
+# --- the verdict lines stay linear on a long whitespace run ------------------
+#
+# The verdict heading and label patterns run on every line of a review. A
+# colon, a long space run, an optional `[` or `*` mark and a second space run
+# used to let two adjacent whitespace sub-patterns split the first run every
+# way, which is quadratic. Each form below keeps the verdict word the earlier
+# patterns gave.
+
+
+def _best_match_seconds(pattern, line: str, trials: int = 7, calls: int = 50) -> float:
+    """The fastest per-call time over several trials; one slow call ends it."""
+    best = float("inf")
+    for _ in range(trials):
+        start = time.perf_counter()
+        for _ in range(calls):
+            call_start = time.perf_counter()
+            pattern.match(line)
+            call = time.perf_counter() - call_start
+            if call > HEADING_LIMIT_SECONDS:
+                return call
+        best = min(best, (time.perf_counter() - start) / calls)
+    return best
+
+
+VERDICT_GROWTH_CASES = [
+    ("_CLAUDE_VERDICT_HEADING", "colon-spaces-x", lambda n: "## Verdict:" + " " * n + "x"),
+    (
+        "_CLAUDE_VERDICT_HEADING",
+        "colon-spaces-bracket-spaces-x",
+        lambda n: "## Verdict:" + " " * n + "[" + " " * n + "x",
+    ),
+    ("_CLAUDE_VERDICT_LABEL", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
+    (
+        "_CLAUDE_VERDICT_LABEL",
+        "colon-spaces-stars-spaces-x",
+        lambda n: "VERDICT:" + " " * n + "**" + " " * n + "x",
+    ),
+    ("_GROK_VERDICT_LABEL", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
+    (
+        "_GROK_VERDICT_LABEL",
+        "colon-spaces-stars-spaces-x",
+        lambda n: "VERDICT:" + " " * n + "**" + " " * n + "x",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "shape", "build"),
+    VERDICT_GROWTH_CASES,
+    ids=[f"{name}-{shape}" for name, shape, _ in VERDICT_GROWTH_CASES],
+)
+def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
+    pattern = getattr(review_phase, name)
+    shorter = _best_match_seconds(pattern, build(3000))
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"{name} took {shorter:.2f}s on the 3000-space {shape} line"
+    )
+    longer = _best_match_seconds(pattern, build(6000))
+    assert longer <= 3 * shorter, (
+        f"{name} on a {shape} line: doubling 3000 to 6000 spaces took "
+        f"{shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than three times"
+    )
+
+
+VERDICT_FORMS = [
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: APPROVE", "APPROVE"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [APPROVE_WITH_FINDINGS]", "APPROVE_WITH_FINDINGS"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [ REQUEST CHANGES ]", "REQUEST CHANGES"),
+    ("_CLAUDE_VERDICT_HEADING", "### **Verdict**:REQUEST-CHANGES", "REQUEST-CHANGES"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict:\t[\tapprove", "approve"),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [[APPROVE", None),
+    ("_CLAUDE_VERDICT_HEADING", "## Verdict: * APPROVE", None),
+    ("_CLAUDE_VERDICT_HEADING", "####### Verdict: APPROVE", None),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: APPROVE", "APPROVE"),
+    ("_CLAUDE_VERDICT_LABEL", "**VERDICT:** REQUEST_CHANGES", "REQUEST_CHANGES"),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: ** APPROVE", "APPROVE"),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT:**APPROVE**", "APPROVE"),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: * * APPROVE", None),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: [APPROVE", None),
+    ("_CLAUDE_VERDICT_LABEL", "VERDICT: APPROVED", None),
+    ("_GROK_VERDICT_LABEL", "VERDICT: flagged — the retry logic needs work.", "flagged"),
+    ("_GROK_VERDICT_LABEL", "**VERDICT**: **cleared**", "cleared"),
+    ("_GROK_VERDICT_LABEL", "VERDICT:\tcleared", "cleared"),
+    ("_GROK_VERDICT_LABEL", "VERDICT: * * cleared", None),
+    ("_GROK_VERDICT_LABEL", "VERDICT: clearedx", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "line", "word"),
+    VERDICT_FORMS,
+    ids=[f"{name}-{line!r}" for name, line, _ in VERDICT_FORMS],
+)
+def test_verdict_forms_keep_main_words(name, line, word):
+    matched = getattr(review_phase, name).match(line)
+    assert (None if matched is None else matched.group(1)) == word
