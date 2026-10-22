@@ -461,15 +461,86 @@ def _check(value: object, schema: dict, path: str, errors: list[str]) -> None:
 # phase result as `intervals`, not inside findings.json.
 INTERVAL_ENDPOINTS_MISSING = "review_interval_endpoints_missing"
 _INTERVAL_FIELDS = ("start_event", "start_source", "end_event", "end_source", "duration")
-_INTERVAL_LINE = re.compile(r"^[ \t]*INTERVAL[ \t]*:[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
-_INTERVAL_PARTS = re.compile(
-    r"^from\s+(?P<start_event>.*?),\s*"
-    r"(?P<start_source>.*?)\s*to\s+"
-    r"(?P<end_event>.*?),\s*"
-    r"(?P<end_source>.*?)\s*=\s*"
-    r"(?P<duration>.*)$",
-    re.IGNORECASE,
+# `_INTERVAL_LINE` runs on every line of every successfully parsed review;
+# `_INTERVAL_PARTS` runs on each body it accepted. The line body ends on a
+# non-space/tab (or is empty), so the trailing `[ \t]*` never shares a
+# whitespace run with a lazy group (the `(.*?)[ \t]*$` form it replaces was
+# quadratic on `INTERVAL: a` + n spaces + `b`). The body form walks separators
+# left to right — first comma, first `to\s+`, first comma, first `=` — so five
+# lazy `(.*?)` groups never split the same whitespace (that form was cubic on
+# `from a,` + n spaces + `b`). The lines and groups they accept are exactly
+# those of the patterns they replace.
+_INTERVAL_LINE = re.compile(
+    r"^[ \t]*INTERVAL[ \t]*:[ \t]*((?:[^\n]*[^ \t\n])?)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
 )
+_INTERVAL_FROM = re.compile(r"^from\s+", re.IGNORECASE)
+_INTERVAL_TO = re.compile(r"to\s+", re.IGNORECASE)
+_INTERVAL_WS = re.compile(r"\s*")
+_INTERVAL_TRAILING_WS = re.compile(r"\s+$")
+
+
+class _IntervalPartsMatch:
+    def __init__(self, groups: dict[str, str]) -> None:
+        self._groups = groups
+
+    def group(self, name: str) -> str:
+        return self._groups[name]
+
+
+class _IntervalParts:
+    """INTERVAL body grammar: from <e>, <s> to <e>, <s> = <d>, one left-to-right pass."""
+
+    def match(self, text: str) -> _IntervalPartsMatch | None:
+        headed = _INTERVAL_FROM.match(text)
+        if headed is None:
+            return None
+        i = headed.end()
+        comma = text.find(",", i)
+        if comma < 0:
+            return None
+        start_event = text[i:comma]
+        if "\n" in start_event:
+            return None
+        i = _INTERVAL_WS.match(text, comma + 1).end()
+        to = _INTERVAL_TO.search(text, i)
+        if to is None:
+            return None
+        start_source = _INTERVAL_TRAILING_WS.sub("", text[i : to.start()])
+        if "\n" in start_source:
+            return None
+        i = to.end()
+        comma = text.find(",", i)
+        if comma < 0:
+            return None
+        end_event = text[i:comma]
+        if "\n" in end_event:
+            return None
+        i = _INTERVAL_WS.match(text, comma + 1).end()
+        eq = text.find("=", i)
+        if eq < 0:
+            return None
+        end_source = _INTERVAL_TRAILING_WS.sub("", text[i:eq])
+        if "\n" in end_source:
+            return None
+        i = _INTERVAL_WS.match(text, eq + 1).end()
+        duration = text[i:]
+        if duration.endswith("\n"):
+            duration = duration[:-1]
+        if "\n" in duration:
+            return None
+        return _IntervalPartsMatch(
+            {
+                "start_event": start_event,
+                "start_source": start_source,
+                "end_event": end_event,
+                "end_source": end_source,
+                "duration": duration,
+            }
+        )
+
+
+_INTERVAL_PARTS = _IntervalParts()
 # Conservative detector: a number followed by a time unit, word-bounded.
 # Compact attached units omit `s` so a code timeout like `900s` is not a
 # measured-interval claim; `41m` / `2h` / `3d` / `500ms` still are. Spaced
