@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace as dataclasses_replace
 from pathlib import Path
@@ -1617,3 +1618,189 @@ def test_record_outward_stop_is_refused_outside_the_outward_stop_state():
     session = to_build(MemoryStore())
     with pytest.raises(ticket.TicketError, match="expected phase outward_stop"):
         session.record_outward_stop()
+
+
+def test_an_old_plans_passing_round_does_not_finish_a_new_plan(tmp_path):
+    # Round 1 passes on plan revision 1 and its outward stop stamp is lost.
+    store = concrete_store(tmp_path, LosesTheOutwardStamp)
+    session = to_build(store)
+    with pytest.raises(RuntimeError, match="before the outward stop stamp"):
+        session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    assert store.read_card()["reviews"][0]["plan_revision"] == 1
+    store.lose = False
+
+    # The ticket's criteria change, so the next pass plans again and gets a plan go.
+    changed = dataclasses_replace(
+        fixture_ticket(), acceptance_criteria=(*fixture_ticket().acceptance_criteria[:1], "Retries are logged.")
+    )
+    replanned = resume(store, changed)
+    assert replanned.phase == "plan"
+    replanned.present_plan(ticket.PlanCard(replanned.ticket))
+    replanned.record_go("plan", evidence="conversation:plan-go-2", verbatim="Go with plan two.")
+
+    # A later process of that pass resumes at build: round 1 reviewed plan revision 1, not 2.
+    later = resume(store, changed, pass_id=replanned.pass_id)
+    assert (later.plan_revision, later.phase) == (2, "build")
+    with pytest.raises(ticket.TicketError, match="expected phase outward_stop"):
+        later.record_outward_stop()
+    assert [item.passes for item in later.plan.acceptance_criteria] == [False, False]
+    later.record_review("pass", evidence="reviews/2", passed_criteria=(0, 1))
+    assert later.phase == "outward_go"
+    assert store.read_card()["reviews"][-1]["plan_revision"] == 2
+
+
+def test_record_outward_stop_refuses_a_stored_round_whose_evidence_changed(tmp_path):
+    store = concrete_store(tmp_path, LosesThePlanSnapshotAfterAPassingReview)
+    session = to_build(store)
+    store.lose = True
+    with pytest.raises(RuntimeError, match="before the plan snapshot"):
+        session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    store.lose = False
+    resumed = resume(store)
+    assert resumed.phase == "outward_stop"
+    # The stored round no longer carries the evidence the resume read.
+    edit_card(store, lambda card: card["reviews"][-1].update(evidence="reviews/other"))
+    with pytest.raises(ticket.StoreUnavailable, match="does not carry this evidence"):
+        resumed.record_outward_stop()
+    card = store.read_card()
+    assert not any(stamp["point"].startswith("Waiting at outward go") for stamp in card["stamps"])
+    assert [item["passes"] for item in card["plan"]["acceptance_criteria"]] == [False, False]
+
+
+def drop_outward_stamp(card):
+    card["stamps"] = [stamp for stamp in card["stamps"] if not stamp["point"].startswith("Waiting at outward go")]
+
+
+def test_a_card_without_its_outward_stop_stamp_neither_closes_nor_resumes_closed(tmp_path):
+    # Close refuses, writing no close stamp.
+    store = concrete_store(tmp_path)
+    session = approved_for_close(store)
+    edit_card(store, drop_outward_stamp)
+    with pytest.raises(ticket.StoreUnavailable, match=NOT_PASSED):
+        session.close("Done.", refs=("example/repo#14",))
+    assert [stamp["phase"] for stamp in store.read_card()["stamps"]] == ["plan"]
+
+    # A closed card whose outward stop stamp was edited out does not resume as closed.
+    (tmp_path / "closed").mkdir()
+    closed = closed_markdown_store(tmp_path / "closed")
+    edit_card(closed, drop_outward_stamp)
+    resumed = resume(closed)
+    assert resumed.phase != "closed"
+    assert any(NOT_PASSED in line for line in resumed.reconciliation)
+
+
+def unreasoned_skip(plan):
+    plan.steps[1].status = "skipped"
+
+
+def plan_skip_without_diff(plan):
+    plan.steps[2].status, plan.steps[2].skip = "skipped", "one line"
+
+
+def plan_skip_with_two_sentence_diff(plan):
+    plan.steps[2].status, plan.steps[2].skip = "skipped", "one line"
+    plan.diff_statement = "Change one line. Then another."
+
+
+def unknown_status(plan):
+    plan.steps[0].status = "done"
+
+
+def missing_step(plan):
+    plan.steps.pop()
+
+
+def reordered_steps(plan):
+    plan.steps.reverse()
+
+
+def reason_on_a_step_not_skipped(plan):
+    plan.steps[3].skip = "not skipped"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        unreasoned_skip,
+        plan_skip_without_diff,
+        plan_skip_with_two_sentence_diff,
+        unknown_status,
+        missing_step,
+        reordered_steps,
+        reason_on_a_step_not_skipped,
+    ),
+)
+def test_a_plan_card_that_breaks_the_step_rules_is_not_persisted(fault):
+    store = MemoryStore()
+    session = ticket.TicketPass.open(KEY, source(), store)
+    session.finish_orient()
+    session.finish_research()
+    plan = ticket.PlanCard(session.ticket)
+    fault(plan)
+    with pytest.raises(ticket.TicketError):
+        session.present_plan(plan)
+    assert (store.card["plan"], store.card["stamps"], session.phase, session.live) == (None, [], "plan", True)
+
+
+def test_the_store_refuses_a_plan_snapshot_step_with_an_unknown_field():
+    store = MemoryStore()
+    plan = ticket.PlanCard(fixture_ticket()).as_dict()
+    plan["revision"] = 1
+    plan["steps"][0]["owner"] = "someone"
+    with pytest.raises(ticket.TicketError, match="unknown fields"):
+        store.record_plan(plan)
+    assert store.card is None
+
+
+def test_a_plan_card_that_keeps_the_step_rules_is_persisted():
+    store = MemoryStore()
+    session = ticket.TicketPass.open(KEY, source(), store)
+    session.finish_orient()
+    session.finish_research()
+    plan = ticket.PlanCard(session.ticket)
+    plan.skip_step("research", "the ticket names the file")
+    plan.skip_step("plan", "a one-line change", diff_statement="Rename the retry flag.")
+    session.present_plan(plan)
+    stored = {step["name"]: step for step in store.card["plan"]["steps"]}
+    assert stored["plan"] == {"name": "plan", "status": "skipped", "skip": "a one-line change"}
+    assert store.card["plan"]["diff_statement"] == "Rename the retry flag."
+
+
+class PausesInsideTheFirstSave:
+    """The first save on this handle waits, holding the write, while another thread writes."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inside = threading.Event()
+        self.paused = False
+
+    def _save(self, card):
+        if not self.paused:
+            self.paused = True
+            self.inside.set()
+            time.sleep(0.5)
+        super()._save(card)
+
+
+def test_two_threads_on_one_store_handle_lose_no_write(tmp_path):
+    store = concrete_store(tmp_path, PausesInsideTheFirstSave)
+    errors = []
+
+    def write(point):
+        try:
+            store.write_stamp(point, "build")
+        except Exception as exc:  # reported below
+            errors.append(exc)
+
+    first = threading.Thread(target=write, args=("Written by thread one.",))
+    first.start()
+    assert store.inside.wait(10)
+    second = threading.Thread(target=write, args=("Written by thread two.",))
+    second.start()
+    first.join(10)
+    second.join(10)
+    assert errors == []
+    assert sorted(stamp["point"] for stamp in store.read_card()["stamps"]) == [
+        "Written by thread one.",
+        "Written by thread two.",
+    ]

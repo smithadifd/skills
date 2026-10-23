@@ -192,7 +192,8 @@ Create `PlanCard(ticket)` from `ticket.py`. It must contain:
 A skipped step without a reason is invalid. The plan step may be skipped only
 when the entire proposed diff fits in one sentence; put that sentence in
 `diff_statement` and still present the card. Skipping the plan step never skips
-the plan go.
+the plan go. The store refuses a plan snapshot that breaks these rules, or
+whose steps are not the six above, once each and in order.
 
 ## 4. Plan go — hard stop
 
@@ -224,9 +225,11 @@ After plan go:
 3. When the target repository has `scripts/verify.sh`, the reviewer runs it in
    addition to the repository's required checks.
 4. Record each round with `record_review(verdict, evidence=…,
-   passed_criteria=…)`. It is the only way `passes` flips: the store records
-   the round first, and each listed criterion then cites that recorded round
-   and its evidence path or id. A passing verdict must list every criterion;
+   passed_criteria=…)`. Each round records the plan revision it reviewed.
+   `passes` flips only through a recorded round: `record_review` stores the
+   round first, and each listed criterion then cites that round and its
+   evidence path or id. The one other path is `record_outward_stop()` below,
+   which completes a stored passing round of the current plan revision. A passing verdict must list every criterion;
    an invalid one is refused before anything is written and spends no round.
 5. Send findings back to `builder-core`, then use a fresh-context review of
    the delta. Continue without asking the person.
@@ -242,7 +245,9 @@ After plan go:
    stored but before that stamp (or before the plan snapshot that marks the
    round), a resume reports `outward stop not recorded`, and the one allowed
    step is `record_outward_stop()`. It brings the plan snapshot up to that
-   round, writes the stamp, and waits at outward go.
+   round, writes the stamp, and waits at outward go. This applies only when
+   that round reviewed the current plan revision; a passing round of an
+   earlier plan covers nothing in a new one, so the pass resumes at build.
 
 ## 6. Outward go — hard stop
 

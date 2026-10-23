@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -365,6 +366,8 @@ class ReviewRecord:
     findings: tuple[str, ...] = ()
     reviewer: str | None = None
     evidence: str | None = None
+    # The plan revision this round reviewed; a later plan is not covered by it.
+    plan_revision: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -492,6 +495,8 @@ def _validate_review(review: ReviewRecord) -> None:
         _text(review.reviewer, "reviewer")
     if review.evidence is not None:
         _ref(review.evidence, "review evidence")
+    if review.plan_revision is not None and (type(review.plan_revision) is not int or review.plan_revision < 1):
+        raise TicketError("a review's plan revision must be at least 1")
 
 
 def _validate_plan(plan: Mapping[str, Any], key: str) -> None:
@@ -505,6 +510,33 @@ def _validate_plan(plan: Mapping[str, Any], key: str) -> None:
     criteria = plan.get("acceptance_criteria")
     if not isinstance(criteria, list) or not criteria:
         raise TicketError("a plan snapshot requires its acceptance criteria")
+    _validate_steps(plan)
+
+
+def _validate_steps(plan: Mapping[str, Any]) -> None:
+    """The plan card's step rules: every step once, in order; a skip carries its reason.
+
+    A skipped plan step also needs the one-sentence diff it stands for.
+    """
+
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(step, Mapping) for step in steps):
+        raise TicketError("a plan snapshot requires its steps")
+    if [step.get("name") for step in steps] != list(STEPS):
+        raise TicketError(f"a plan snapshot lists the steps {', '.join(STEPS)}, each once and in order")
+    for step in steps:
+        if set(step) - {"name", "status", "skip"}:
+            raise TicketError(f"plan step {step['name']} has unknown fields")
+        if step.get("status") not in ("pending", "complete", "skipped"):
+            raise TicketError(f"plan step {step['name']} has an unknown status")
+        skipped = step["status"] == "skipped"
+        reason = step.get("skip")
+        if skipped and not (isinstance(reason, str) and reason.strip()):
+            raise TicketError(f"skipped plan step {step['name']} requires skip: <reason>")
+        if not skipped and "skip" in step:
+            raise TicketError(f"plan step {step['name']} is not skipped, so it carries no skip reason")
+        if skipped and step["name"] == "plan" and not _one_sentence(str(plan.get("diff_statement") or "").strip()):
+            raise TicketError("the plan may be skipped only for a one-sentence diff")
 
 
 def _validate_tried(tried: TriedRecord) -> None:
@@ -570,6 +602,8 @@ class MarkdownStore:
         self.path = self.repo / self.relative_path
         self.lock_path = self.path.with_name(f"{key}.lock")
         self._depth = 0
+        # Threads sharing this handle take turns; the file lock is per process.
+        self._threads = threading.RLock()
         # The pass this handle writes for, and the pass it ended, if any.
         self._pass: str | None = None
         self._ended: str | None = None
@@ -578,11 +612,18 @@ class MarkdownStore:
     def _writing(self) -> Iterator[None]:
         """Hold this ticket's exclusive lock for one write, then drop it.
 
-        The lock is an advisory ``flock`` on ``.ticket/<key>.lock``. A second
-        writer waits for it; the operating system drops it if its holder dies,
-        so nothing is left to clean up.
+        A thread first takes this handle's thread lock, so the reentrancy count
+        below is only ever this thread's. The file lock is an advisory
+        ``flock`` on ``.ticket/<key>.lock``. A second writer waits for it; the
+        operating system drops it if its holder dies, so nothing is left to
+        clean up.
         """
 
+        with self._threads, self._file_lock():
+            yield
+
+    @contextlib.contextmanager
+    def _file_lock(self) -> Iterator[None]:
         if self._depth:
             self._depth += 1
             try:
@@ -1268,9 +1309,13 @@ class TicketPass:
             and all(item.passes and item.review_round == last.get("round") for item in plan.acceptance_criteria)
         )
         stamped = last is not None and _has_stamp(card, _outward_go_point(last.get("round")), "review")
+        # A passing round covers only the plan revision it reviewed.
+        passed_this_plan = (
+            last is not None and last.get("verdict") == "pass" and last.get("plan_revision") == self._revision
+        )
         if passed and stamped:
             self._phase = "outward_go"
-        elif last is not None and last.get("verdict") == "pass" and not stamped:
+        elif passed_this_plan and not stamped:
             # A passing round reaches outward go only once its stop stamp is
             # stored. A process that died after storing the round, before the
             # plan snapshot or the stamp, leaves the pass able to finish that
@@ -1286,9 +1331,10 @@ class TicketPass:
             # that stamp leaves the pass able to write it, and nothing else.
             if _has_stamp(card, _CAP_POINT, "review"):
                 self._phase = "stopped"
-            elif last is not None and last.get("verdict") == "pass":
-                # Only an edited card holds a stamped passing round whose plan
-                # card does not carry it; it is not a non-converged review.
+            elif passed_this_plan:
+                # Only an edited card holds a stamped passing round of this
+                # plan that the plan card does not carry; it is not a
+                # non-converged review.
                 self.reconciliation += (
                     f"review round {last.get('round')} passed with its outward go stop stamp, but the plan "
                     "card does not carry that round; a person reconciles the card",
@@ -1446,6 +1492,7 @@ class TicketPass:
             findings=tuple(findings),
             reviewer=reviewer,
             evidence=evidence,
+            plan_revision=self._revision,
         )
         _validate_review(review)
         before = self.store.read_card().get("reviews") or []
@@ -1491,9 +1538,9 @@ class TicketPass:
 
         self._require_phase("outward_stop")
         last = self._last_review or {}
-        review_round, evidence = last.get("round"), last.get("evidence")
-        if self._plan is None or last.get("verdict") != "pass" or type(review_round) is not int:
-            raise TicketError("no passing review round is stored to finish")
+        # Resume enters this phase only for a stored passing round of the
+        # current plan revision, so the plan and the round are both present.
+        review_round, evidence = last["round"], last.get("evidence")
         rounds = _recorded_rounds(self.store.read_card().get("reviews") or [])
         criteria = tuple(Criterion(item.text, True, evidence, review_round) for item in self._plan.acceptance_criteria)
         if not all(_verified(item, rounds) for item in criteria):
