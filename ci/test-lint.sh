@@ -21,7 +21,7 @@ note_fail() {
 # new_dir: print a fresh temporary directory, or stop the whole run.
 new_dir() {
   local d
-  d=$(mktemp -d) || exit 1
+  d=$(mktemp -d "${TMPDIR:-/tmp}/lint-test.XXXXXX") || exit 1
   [ -n "$d" ] && [ -d "$d" ] || exit 1
   printf '%s\n' "$d"
 }
