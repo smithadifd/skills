@@ -124,13 +124,35 @@ def triage(path):
     return {"trivial": trivial, "tool_calls": tool_calls, "edits": edits}
 
 
+def _python_module_at(words, i):
+    """Index of the module word of `python <options> -m <module>`, else None.
+
+    Interpreter options are skipped first: no-operand flags (`-I`, `-B`, combined
+    like `-IB`), `-W`/`-X`/`--check-hash-based-pycs` with an operand, and their
+    attached forms (`-Wdefault`, `-Xdev`). `-c` or a script path gives None.
+    """
+    while i < len(words):
+        word = words[i]
+        if word == "-m":
+            return i + 1 if i + 1 < len(words) else None
+        if word in ("-W", "-X", "--check-hash-based-pycs"):
+            i += 2
+        elif re.fullmatch(r"-[WX].+|--check-hash-based-pycs=.+", word):
+            i += 1
+        elif re.fullmatch(r"-[IBEsSuOqvbdiPR]+", word):
+            i += 1
+        else:
+            return None
+    return None
+
+
 def _tool(command):
     """The command word a shell line runs.
 
     Grammar: take the last command of a simple `&&` / `;` chain (so `cd d && pytest`
     is `pytest`); skip leading variable assignments; skip a wrapper (env, npx,
     command, time, sudo) with its options, and the operand of each option that
-    takes one (`env -u NAME`); skip `python -m`. Quoting is not parsed.
+    takes one (`env -u NAME`); skip `python <options> -m`. Quoting is not parsed.
     """
     parts = [p for p in re.split(r"&&|;", command) if p.strip()]
     words = parts[-1].split() if parts else []
@@ -147,8 +169,8 @@ def _tool(command):
             i += 2 if word in WRAPPERS[wrapper] else 1
         elif word.startswith("-"):
             i += 1
-        elif re.match(r"^python[\d.]*$", word) and words[i + 1 : i + 2] == ["-m"]:
-            i += 2
+        elif re.match(r"^python[\d.]*$", word) and _python_module_at(words, i + 1) is not None:
+            i = _python_module_at(words, i + 1)
         else:
             return word.rsplit("/", 1)[-1]
     return ""

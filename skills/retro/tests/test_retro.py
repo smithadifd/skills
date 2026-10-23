@@ -537,3 +537,15 @@ def test_binary_inputs_are_refused_with_rc_2(tmp_path):
                  ("build", blob, "--out", tmp_path / "o.json")):
         result = run(*args)
         assert result.returncode == 2 and "Traceback" not in result.stderr, args
+
+
+# ---- fix round 3
+
+
+def test_python_interpreter_options_before_dash_m_group_with_the_plain_tool():
+    for command in ("python -I -m pytest", "python3 -X dev -W error -m pytest",
+                    "python3.12 -IB -m pytest", "python -Wdefault -Xdev -m pytest -q"):
+        assert retro._tool(command) == "pytest", command
+    assert retro._tool("python script.py") == "python"
+    assert retro._tool("python -c 'import x'") == "python"
+    assert retro._tool("python -m pytest") == "pytest"
