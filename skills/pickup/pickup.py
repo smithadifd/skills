@@ -117,15 +117,20 @@ def _bullets(body):
 
 
 def digest(text):
-    """Short digest (first 12 hex of sha256) of exact text."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    """Short digest (first 12 hex of sha256) of exact text, for display."""
+    return note_digest_of(text)[:12]
+
+
+def note_digest_of(text):
+    """Full sha256 hex digest of exact text; authorizes a rerun."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def pickup(text, cwd=None, rerun_indices=(), note_digest=None):
     """Parse a note. Runs only the Verified commands whose 1-based number is in
     rerun_indices (none by default). Returns a dict: stale, commands, verified,
     demoted, not_rerun, claimed, open_questions, skills, decisions."""
-    if rerun_indices and note_digest != digest(text):
+    if rerun_indices and note_digest != note_digest_of(text):
         raise ValueError("note digest does not match the listing; the note changed "
                          "or no digest was given. Nothing was run. List it again.")
     sections = parse_sections(text)
@@ -149,7 +154,7 @@ def pickup(text, cwd=None, rerun_indices=(), note_digest=None):
     wrote, head = written_at(text), latest_commit_time(cwd)
     return {
         "stale": bool(wrote and head and head > wrote),
-        "digest": digest(text),
+        "digest": note_digest_of(text),
         "written": wrote,
         "head_commit": head,
         "commands": commands,
