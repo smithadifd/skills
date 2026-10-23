@@ -930,28 +930,19 @@ def _strip_references(line: str) -> str:
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
 
-# --- quoted inputs in the Evidence and Minor notes sections ------------------
+# --- quoted inputs: code spans and fenced blocks ----------------------------
 #
-# Evidence and Minor notes record what the reviewer ran and fed to it, so a
-# duration-shaped token there may be a quoted probe input, not the reviewer's
-# own timing claim. Only the inside of a well-formed backtick code span, or of
-# a fenced block that closes inside the section, counts as quoted, and only in
-# those two sections. Everything else stays in scope: prose in every section,
-# every heading line (so every verdict line), the Issues section quoted or not,
-# and any markup that does not close where it opens.
+# A review of duration-handling code has to quote its probe inputs, in the
+# summary under the verdict, in a finding, or in the Evidence. A duration-shaped
+# token inside a well-formed backtick code span, or inside a fenced block that
+# closes, is a quoted input, not the reviewer's own timing claim, wherever in
+# the review it sits. Everything else stays in scope: bare prose, emphasis,
+# double quotes, every heading line and verdict line (so a verdict never hides
+# a claim in a span), and any markup that does not close where it opens (an
+# unterminated backtick run or fence is read as prose).
 #
-# A section is one of the two only under the documented level-three heading:
-# `### Evidence` or `### Minor notes` (bold allowed, as in `### **Evidence**`).
-# Other levels, `###Evidence` with no space, a `#` run glued to the title, and
-# the bare `MINOR NOTES:` label all stay in scope.
-#
-# Sections are found with `_HEADING`, the pattern the adapters split sections
-# with, so the scan and the parser never disagree on where a section ends. That
-# pattern does not know about fences: a `# comment` inside a fenced block is a
-# heading to the parser, so it ends the section here too.
-_QUOTED_INPUT_SECTIONS = frozenset({"EVIDENCE", "MINOR NOTES"})
-# Exactly three `#` (up to three spaces before them), then at least one space.
-_QUOTED_INPUT_HEADING = re.compile(r"^ {0,3}### +")
+# The walk reads each line once, left to right, and a fence is closed by one
+# forward search that is never repeated, so the scan stays linear.
 # A fence line: up to three spaces, three or more backticks or tildes, then the
 # rest of the line (an opener's info string; a closer allows only whitespace).
 _FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -959,23 +950,6 @@ _BACKTICK_RUN = re.compile(r"`+")
 # A number at the end of a fence opener, bounded the way `_DURATION_CLAIM`
 # bounds one, so `\s+` across the newline would join it to a unit below.
 _NUMBER_AT_END = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*$")
-
-
-def _is_quoted_input_section(line: str, heading: re.Match[str]) -> bool:
-    if _QUOTED_INPUT_HEADING.match(line) is None:
-        return False
-    if _strip_marks(_heading_title(heading)).upper() not in _QUOTED_INPUT_SECTIONS:
-        return False
-    # A closing `#` run counts only when a space or tab sets it apart from the
-    # title (`### Evidence ###`); `### Evidence#` is not the documented heading.
-    line = line.rstrip()
-    title_end = line.rstrip("#")
-    return title_end == line or title_end.endswith((" ", "\t"))
-
-
-def _is_tagged_bullet(line: str) -> bool:
-    bullet = _BULLET.match(line)
-    return bool(bullet and _TAG.match(bullet.group(1)))
 
 
 def _fence_opener(line: str) -> str | None:
@@ -1035,10 +1009,18 @@ def _blank_code_spans(line: str) -> str:
     return "".join(pieces)
 
 
-def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: int) -> None:
-    """Blank the quoted inputs of `lines[start:stop]` into `out`."""
-    i = start
+def _blank_quoted_inputs(lines: list[str]) -> list[str]:
+    """`lines` with the inside of each code span and closed fence blanked.
+
+    Heading lines and verdict lines are never blanked, inside a fence or out.
+    """
+    out = list(lines)
+    stop = len(lines)
+    i = 0
     while i < stop:
+        if _is_verdict_or_heading_line(lines[i]):
+            i += 1
+            continue
         marker = _fence_opener(lines[i])
         if marker is None:
             out[i] = _blank_code_spans(lines[i])
@@ -1049,8 +1031,8 @@ def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: in
             close += 1
         if close == stop:
             # Fail closed: an unclosed fence leaves its own line and every
-            # later line of the section in scope, as written.
-            return
+            # later line in scope, as written.
+            return out
         if _NUMBER_AT_END.search(lines[i]):
             # The opener ends in a number that the scan reads as a claim
             # together with the block's first line ("3", then "hours"), so the
@@ -1059,31 +1041,9 @@ def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: in
             continue
         # The fence lines stay as written; only the lines between are quoted.
         for inner in range(i + 1, close):
-            out[inner] = ""
+            if not _is_verdict_or_heading_line(lines[inner]):
+                out[inner] = ""
         i = close + 1
-
-
-def _blank_quoted_inputs(lines: list[str]) -> list[str]:
-    """`lines` with the quoted inputs of Evidence and Minor notes blanked."""
-    out = list(lines)
-    i = 0
-    while i < len(lines):
-        heading = _HEADING.match(lines[i])
-        line = lines[i]
-        i += 1
-        if heading is None or not _is_quoted_input_section(line, heading):
-            continue
-        end = i
-        while end < len(lines) and not _HEADING.match(lines[end]):
-            end += 1
-        # A `[BUG]` / `[SECURITY]` bullet is a finding wherever it sits (the
-        # adapter collects it, and in Evidence every bullet after it), so the
-        # section's quoting ends at the first one.
-        stop = i
-        while stop < end and not _is_tagged_bullet(lines[stop]):
-            stop += 1
-        _blank_quoted_section(lines, out, i, stop)
-        i = end
     return out
 
 
