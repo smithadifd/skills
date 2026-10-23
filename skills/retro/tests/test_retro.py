@@ -416,3 +416,44 @@ def test_approve_needs_exactly_one_match(tmp_path):
     out.write_text(json.dumps(data))
     assert run("approve", out, "deps").returncode == 2
     assert run("approve", out, "nope").returncode == 2
+
+
+# ---- round 3
+
+
+def test_missing_or_empty_ids_never_match_a_command(tmp_path):
+    text = "Exit code 1\nsrc/a.py:1:1: E501 long"
+    recs = []
+    for _ in range(2):
+        recs.append({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "ruff check"}}]}})
+        recs.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "is_error": True, "content": text}]}})
+        recs.append({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "", "name": "Bash", "input": {"command": "ruff check"}}]}})
+        recs.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "", "is_error": True, "content": text}]}})
+    src = tmp_path / "t.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    out = scan_file(src)
+    assert out["mechanical_candidates"] == [] and out["unclassified"] == []
+
+
+def test_conflicting_type_markers_are_rejected(tmp_path):
+    base = {"id": "x", "severity": "low", "evidence": ["e"], "path": "docs/a.md",
+            "instances": [{"ref": "line 1", "excerpt": "a"}, {"ref": "line 2", "excerpt": "b"}]}
+    for extra in ({"obsolete_rule": True, "learning": "note"},
+                  {"mechanical": True, "learning": "note", "structure": "hook", "proposal": "p"}):
+        src = tmp_path / "d.json"
+        src.write_text(json.dumps({"findings": [{**base, **extra}]}))
+        result = run("build", src, "--out", tmp_path / "f.json")
+        assert result.returncode == 2 and "conflicting type markers" in result.stderr
+        assert not (tmp_path / "f.json").exists()
+
+
+def test_obsolete_rule_still_requires_its_removal_diff(tmp_path):
+    item = {"id": "old", "severity": "low", "obsolete_rule": True, "evidence": ["e"]}
+    src = tmp_path / "d.json"
+    src.write_text(json.dumps({"findings": [item]}))
+    result = run("build", src, "--out", tmp_path / "f.json")
+    assert result.returncode == 1 and "needs a diff" in result.stderr

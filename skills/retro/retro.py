@@ -157,13 +157,14 @@ def scan(path):
     flagged = 0
     for event in events(path):
         if event["kind"] == "tool_use":
-            commands[event["id"]] = str(event["input"].get("command", ""))
+            if isinstance(event["id"], str) and event["id"]:
+                commands[event["id"]] = str(event["input"].get("command", ""))
         elif event["kind"] == "tool_result":
             results += 1
             flagged += event["has_flag"]
             if not failed_run(event):
                 continue
-            if event["id"] not in commands:
+            if not isinstance(event["id"], str) or event["id"] not in commands:
                 continue
             tool = _tool(commands[event["id"]])
             if not tool:
@@ -213,6 +214,13 @@ def _instances(item):
 def classify(item):
     """Type one drafted finding. Mechanical mistake classes become structure."""
     seen = len({i["ref"] for i in _instances(item)})
+    markers = [
+        name for name in ("mechanical", "obsolete_rule", "learning") if item.get(name)
+    ]
+    if len(markers) > 1:
+        raise RetroError(
+            f"finding {item.get('id', '?')}: conflicting type markers ({', '.join(markers)})"
+        )
     if item.get("mechanical") and seen >= MIN_INSTANCES:
         return "encode-in-structure"
     wants_learning = (
