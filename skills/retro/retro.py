@@ -32,8 +32,8 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 CHECK_COMMAND = re.compile(
     r"\b(lint|ruff|eslint|flake8|mypy|tsc|pytest|prettier|black|shellcheck|clippy)\b", re.I
 )
-FAILURE_TEXT = re.compile(r"\b(error|errors|failed|failure)\b", re.I)
 _WORD = r"(?:errors?|failed|failures?)"
+FAILURE_TEXT = re.compile(rf"\b{_WORD}\b", re.I)
 ZERO_COUNT = re.compile(
     rf"\b(?:0|no)\s+{_WORD}\b|\b{_WORD}\s*[:=]?\s*0\b(?!\.?\d)", re.I
 )

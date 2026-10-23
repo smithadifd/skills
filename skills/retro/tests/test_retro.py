@@ -280,3 +280,16 @@ def test_malformed_instance_ref_is_reported_cleanly(tmp_path):
     assert any("non-empty string ref" in p for p in retro.validate(data))
     by_id(data, "deps")["instances"][0]["ref"] = ""
     assert any("non-empty string ref" in p for p in retro.validate(data))
+
+
+# ---- round 4
+
+
+def test_mixed_zero_and_nonzero_summary_is_a_failure_class():
+    out = json.loads(run("scan", FIX / "mixed-failing.jsonl").stdout)
+    assert [c["count"] for c in out["mechanical_candidates"]] == [2]
+
+
+def test_all_zero_summary_is_not_a_failure():
+    out = json.loads(run("scan", FIX / "mixed-passing.jsonl").stdout)
+    assert out["mechanical_candidates"] == []

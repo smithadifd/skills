@@ -1,0 +1,4 @@
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "m1", "name": "Bash", "input": {"command": "pytest -q"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "m1", "is_error": false, "content": "Errors: 0, Failures: 0"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "m2", "name": "Bash", "input": {"command": "pytest -q"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "m2", "is_error": false, "content": "Errors: 0, Failures: 0"}]}}
