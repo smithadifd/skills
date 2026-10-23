@@ -1,0 +1,1 @@
+LINT FAIL [skill-path]: skills/demo/references/sub/x.md hard-codes

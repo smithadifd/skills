@@ -17,6 +17,7 @@ cd skills
 
 | Skill | What it does |
 | --- | --- |
+| `debug` | Finds the cause of a bug by reproducing it, testing a hypothesis and isolating the fault, then fixes it behind a test that fails first and passes after. |
 | `handoff` | Writes one redacted, size-capped resume note so a fresh session can continue the work. |
 | `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. |
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. |
@@ -28,6 +29,7 @@ cd skills
 | `review` | Checks code changes for bugs and security problems. |
 | `shape` | Tests a proposed design for risks and missing considerations before implementation. |
 | `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. |
+| `tdd` | Applies a test-first loop when you change behavior yourself: a failing test, the smallest passing change, then a refactor, with the red-then-green evidence handed to the reviewer. |
 | `teach` | Explains how a codebase works with a system overview, component tour, and traced example. |
 | `topic` | Keeps the notes for an ongoing, focused discussion in one file. |
 
@@ -41,9 +43,16 @@ cd skills
 | `doc-researcher` | Gathers code facts and examples for a documentation draft. |
 | `doc-verifier` | Checks specific documentation claims against the code. |
 | `doc-writer` | Writes a documentation page from a research brief. |
-| `planner` | Investigates a codebase and outlines the steps for a change. |
 | `researcher` | Answers a focused question about code or an external API. |
 | `reviewer` | Independently reviews a change and checks that its tests would fail without it. |
+
+### Agents or the built-in Explore and Plan agents
+
+Use the built-in Explore agent for open-ended reading of a codebase, and the built-in Plan agent (or Plan mode) to outline the steps for a change. Reach for these agents when the job has a fixed contract the built-ins do not give you:
+
+- `builder-core` builds one ticket in its own worktree under a floor of safety rules (draft PR only, never merges) and a turn cap.
+- `reviewer` reviews with no prior context and backs its verdict with what it ran; raise its effort per spawn for an adversarial review.
+- `researcher`, `doc-researcher`, `doc-verifier` and `api-contract-tracer` return a structured answer to a narrow question, where Explore returns free-form notes.
 
 ## Install
 

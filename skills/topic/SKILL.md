@@ -1,7 +1,7 @@
 ---
 name: topic
-kind: personal
-version: 1.2.0
+kind: portable
+version: 1.2.1
 description: >
   Open, resume, or close a session note for a one-off, attended piece of work
   that will outlive the sitting. Resolves the thread's note file (project repo
@@ -50,7 +50,7 @@ Do not invent a second directory when the resolved path is absent.
    entry); an existing one wins over creating a parallel one.
 2. Otherwise → `<topics_dir>/<slug>.md`, where `<topics_dir>` is this skill's
    configured notes directory (`topics_dir` in `config.json`; run
-   `python3 ~/.claude/skills/topic/topics_dir.py` to print the
+   `python3 ${CLAUDE_SKILL_DIR}/topics_dir.py` to print the
    resolved path — never hardcode it). When the key is unset, that command
    prints `~/.claude/topics`.
    Path precedence is explicit `--config`, then
@@ -60,7 +60,7 @@ Do not invent a second directory when the resolved path is absent.
    the one line above and use the built-in skeleton in this file. Run the
    session from the note's cwd (spend attribution follows cwd).
 
-   The same create is `python3 ~/.claude/skills/topic/topics_dir.py --open <slug> --ask <words>`.
+   The same create is `python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --open <slug> --ask <words>`.
    It does not overwrite an existing note file. Absent-read notices are printed
    to stderr; the note path is printed to stdout.
 

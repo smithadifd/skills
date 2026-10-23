@@ -233,6 +233,40 @@ check_agent_unknown() {
   printf 'PASS: unknown agent name was rejected\n'
 }
 
+check_retired_agents() {
+  local home fixture="$repo_dir/ci/fixtures/retired-planner.md" out
+  # Unmodified copy from the last shipped version: an update removes it.
+  home=$(mktemp -d)
+  mkdir -p "$home/.claude/agents"
+  cp "$fixture" "$home/.claude/agents/planner.md"
+  HOME="$home" ./install.sh --all-agents
+  [ ! -e "$home/.claude/agents/planner.md" ] || fail "--all-agents left an unmodified retired agent installed"
+  [ -f "$home/.claude/agents/reviewer.md" ] || fail "--all-agents did not install the shipped agents beside a retired one"
+
+  # User-modified copy: warned about and kept.
+  home=$(mktemp -d)
+  mkdir -p "$home/.claude/agents"
+  cp "$fixture" "$home/.claude/agents/planner.md"
+  printf 'my own change\n' >> "$home/.claude/agents/planner.md"
+  out=$(HOME="$home" ./install.sh --all-agents 2>&1)
+  [ -f "$home/.claude/agents/planner.md" ] || fail "--all-agents removed a user-modified retired agent"
+  case "$out" in *'Warning: retired agent planner'*) ;; *) fail "--all-agents did not warn about a kept retired agent" ;; esac
+
+  # Explicit uninstall of a retired name: removes an unmodified copy, keeps a modified one.
+  home=$(mktemp -d)
+  mkdir -p "$home/.claude/agents"
+  cp "$fixture" "$home/.claude/agents/planner.md"
+  HOME="$home" ./install.sh --uninstall --agent planner
+  [ ! -e "$home/.claude/agents/planner.md" ] || fail "--uninstall --agent did not remove an unmodified retired agent"
+  home=$(mktemp -d)
+  mkdir -p "$home/.claude/agents"
+  cp "$fixture" "$home/.claude/agents/planner.md"
+  printf 'my own change\n' >> "$home/.claude/agents/planner.md"
+  HOME="$home" ./install.sh --uninstall --agent planner 2>/dev/null
+  [ -f "$home/.claude/agents/planner.md" ] || fail "--uninstall --agent removed a user-modified retired agent"
+  printf 'PASS: retired agents are removed only when unmodified\n'
+}
+
 check_reviewer_axes() {
   "$repo_dir/ci/reviewer-axes.sh"
 }
@@ -256,6 +290,7 @@ case ${1-} in
   uninstall-agents) check_uninstall_agents ;;
   agent-traversal) check_agent_traversal ;;
   agent-unknown) check_agent_unknown ;;
+  retired-agents) check_retired_agents ;;
   reviewer-axes) check_reviewer_axes ;;
   lint) check_lint ;;
   lint-fixtures) check_lint_fixtures ;;
@@ -269,6 +304,7 @@ case ${1-} in
     check_uninstall_agents
     check_agent_traversal
     check_agent_unknown
+    check_retired_agents
     check_reviewer_axes
     check_lint
     check_lint_fixtures
