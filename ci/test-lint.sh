@@ -158,6 +158,52 @@ for text in "${url_fail_cases[@]}"; do
   fi
 done
 
+# Record boundaries: a tracked file name with a colon, and a CRLF line end,
+# must not change what the own-URL exemption sees. Each file starts a line
+# with the repository URL (clean case), then the same file also carries a
+# denied word (planted case), which must still fail.
+own='https://github.com/zzowner/zzrepo'
+for kind in colon-name crlf soh-name tab-name dash-name backslash-name; do
+  for variant in clean planted; do
+    tree=$(new_dir)
+    make_tree "$tree"
+    git -C "$tree" remote add origin https://github.com/zzowner/zzrepo.git
+    eol='\n'
+    case "$kind" in
+      colon-name) target="$tree/notes:2.md" ;;
+      soh-name) target="$tree/odd$(printf '\001')name.md" ;;
+      tab-name) target="$tree/odd$(printf '\t')name.md" ;;
+      dash-name) target="$tree/-odd.md" ;;
+      backslash-name) target="$tree/odd\\name.md" ;;
+      *) target="$tree/notes.md"; eol='\r\n' ;;
+    esac
+    printf "$own is the source$eol$own$eol" > "$target"
+    if [ "$variant" = planted ]; then
+      printf "$own zzother wrote this$eol" >> "$target"
+    fi
+    git -C "$tree" add -A
+    out=$(env -u CI -u GITHUB_ACTIONS -u OWNER -u REPO NO_PERSON_DENY="$url_deny" bash "$lint" "$tree" 2>&1)
+    status=$?
+    if [ "$status" -eq 0 ]; then
+      if [ "$variant" = clean ]; then
+        printf 'PASS: %s file with a leading own-URL passes the deny step\n' "$kind"
+      else
+        note_fail "$kind file with a denied word should fail the deny step"
+      fi
+    else
+      if [ "$variant" = planted ]; then
+        if printf '%s\n' "$out" | grep -qxF "denied term at ${target#"$tree"/}:3"; then
+          printf 'PASS: %s file with a denied word fails and reports path:line\n' "$kind"
+        else
+          note_fail "$kind file: the report should hold the full path:line (${target#"$tree"/}:3): $out"
+        fi
+      else
+        note_fail "$kind file with only a leading own-URL should pass the deny step"
+      fi
+    fi
+  done
+done
+
 # A tree with a planted denied term, for the deny-list configuration checks.
 tree=$(new_dir)
 make_tree "$tree"
