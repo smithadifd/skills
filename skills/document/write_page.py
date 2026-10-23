@@ -42,6 +42,10 @@ class Refusal(Exception):
     """A guard failed; nothing was written."""
 
 
+class Published(Exception):
+    """The page is in place, but syncing the directory afterwards failed."""
+
+
 def _inside(child, parent):
     """True when child equals parent or lies below it (both absolute, normalised)."""
     return os.path.commonpath([child, parent]) == parent
@@ -105,20 +109,24 @@ def _unlink_quietly(name, dir_fd):
         pass
 
 
-def _write_temp(dir_fd, name, text):
+def _write_temp(dir_fd, text, perm):
     """Write text to a new temporary file in the directory and return its name.
 
-    The file is created exclusively, filled completely, and synced. On any
-    failure it is removed before the error propagates.
+    The name is short and independent of the destination, so a long page name
+    cannot make it too long. The file is created exclusively with mode 0600,
+    filled completely, synced, and only then given its final permission bits,
+    so its content is never readable more widely than the page it replaces.
+    On any failure it is removed before the error propagates.
     """
-    tmp = f".{name}.{secrets.token_hex(8)}.tmp"
-    out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, 0o644, dir_fd=dir_fd)
+    tmp = f".wp-{secrets.token_hex(8)}.tmp"
+    out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, 0o600, dir_fd=dir_fd)
     try:
         try:
             view = memoryview(text)
             while view:
                 view = view[os.write(out, view):]
             os.fsync(out)
+            os.fchmod(out, perm)
         finally:
             os.close(out)
     except BaseException:
@@ -150,6 +158,7 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
             fds.append(fd)
 
         name = rel_parts[-1]
+        perm = 0o644
         if mode == "update":
             # lstat does not follow a symlink, so a link reads as not regular.
             try:
@@ -160,11 +169,13 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
                 raise Refusal(f"cannot inspect {name}: {exc.strerror}")
             if not stat.S_ISREG(kind):
                 raise Refusal(f"destination is not a regular file: {name}")
+            perm = stat.S_IMODE(kind) & 0o777
 
         # Never write through the destination's inode: it may be hard-linked
         # to a file elsewhere, and an in-place write could be left half done.
         # Write a temporary file next to it, then publish it by directory entry.
-        tmp = _write_temp(fd, name, text)
+        tmp = _write_temp(fd, text, perm)
+        published = False
         try:
             if mode == "create":
                 try:
@@ -175,11 +186,18 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
                     raise Refusal(f"cannot create {name}: {exc.strerror}")
             else:
                 os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
-                tmp = None
-            os.fsync(fd)
+            published = True
         finally:
-            if tmp is not None:
+            # Before publication the temporary file is removed. After it, the
+            # page is already in place and a failure must not claim otherwise.
+            if not published:
                 _unlink_quietly(tmp, fd)
+        try:
+            if mode == "create":
+                _unlink_quietly(tmp, fd)
+            os.fsync(fd)
+        except OSError as exc:
+            raise Published(exc.strerror)
     finally:
         for opened in fds:
             os.close(opened)
@@ -200,6 +218,9 @@ def main(argv=None):
         write_through(real_repo, rel_parts, root_depth, text, args.mode)
     except Refusal as exc:
         print(f"write_page: refused: {exc}", file=sys.stderr)
+        return 1
+    except Published as exc:
+        print(f"write_page: written, but syncing the directory failed: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
         print(f"write_page: refused: write failed, destination unchanged: {exc.strerror}", file=sys.stderr)
