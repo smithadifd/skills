@@ -1194,6 +1194,14 @@ def test_jev_fallback_accepts_interval_none(monkeypatch):
     assert result["intervals"] == []
 
 
+def test_jev_fallback_success_carries_the_measured_record(monkeypatch):
+    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n\n" + MEASURED + "\n")
+    assert _ApprovingJev.calls == 1
+    assert result["status"] == "success", result["reason"]
+    assert result["verdict_source"] == "jev"
+    assert result["intervals"] == [MEASURED_RECORD]
+
+
 def test_jev_fallback_other_adapter_path_still_requires_the_record(monkeypatch):
     text = "## Verdict: APPROVE\n\n### Issues\n- none\n"
     result = _jev_fallback_run(monkeypatch, text, backend="grok-notools")
