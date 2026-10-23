@@ -31,7 +31,7 @@ Writes go only under one folder, the output root. Settle it before anything else
 3. If there is no docs folder, propose `docs/` and wait for a yes before creating it.
 4. Edit a `README.md` only when the person asked for the README. The README is then the one file allowed outside the output root, and nothing else is.
 
-Every writer is handed an explicit output path under the output root (or the README path when asked), as the page's intended destination. Writers never write: every `doc-writer` prompt, first draft or fix, says "return-only" so it returns the full page text and its claims list and does not call Write or Edit. Only the parent writes, and it does so in the same step as the path check, immediately after it, to a path it just checked. Never write, edit or delete anything else: no source files, no config, no files outside the repository. If a page would belong elsewhere, refuse that path, say so in the report and leave it unwritten.
+Every writer is handed an explicit output path under the output root (or the README path when asked), as the page's intended destination. Writers never write: every `doc-writer` prompt, first draft or fix, says "return-only" so it returns its envelope and does not call Write or Edit. The envelope is the `## Page text` section (the whole page in one fenced `markdown` block), then `## Claims (for verification)`, then `## Summary`; the parent takes the page text from that block. Only the parent writes, and it does so in the same step as the path check, immediately after it, to a path it just checked. Never write, edit or delete anything else: no source files, no config, no files outside the repository. If a page would belong elsewhere, refuse that path, say so in the report and leave it unwritten.
 
 **Path check.** A path that merely starts with `docs/` is not enough, because a symlink can redirect a write elsewhere. Before each write (and before spawning each writer, to fail early), run this check and refuse on any failure. Check again right before every write, including fix passes, because a path can change after an earlier check:
 
@@ -39,6 +39,7 @@ Every writer is handed an explicit output path under the output root (or the REA
 2. The canonical path (for example from `realpath`) of the output root is inside the canonical repository root.
 3. The canonical destination is inside the canonical output root. Check the nearest existing parent when the file does not exist yet.
 4. The root `README.md`, when the person asked for it, gets the same checks against the canonical repository root.
+5. In create mode, the destination does not already exist. If it does, stop and ask the person; never overwrite silently. The writer cannot see this, so the parent does it, immediately before the write.
 
 ## 2. Read the request
 
