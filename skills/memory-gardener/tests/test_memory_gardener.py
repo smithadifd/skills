@@ -760,6 +760,16 @@ def test_default_taxonomy_classifies_generic_note_stems():
     assert mg.classify_shard("broker-trade-digest", tax) == "automation"
 
 
+def test_default_taxonomy_keywords_do_not_match_inside_longer_words():
+    tax = mg.DEFAULT_SHARD_TAXONOMY
+    # `feed` and `server` as raw substrings would capture these unrelated stems.
+    assert mg.classify_shard("feedback-self-review", tax) is None
+    assert mg.classify_shard("observer-cache", tax) is None
+    # The delimited forms still classify.
+    assert mg.classify_shard("feed-refresh-schedule", tax) == "automation"
+    assert mg.classify_shard("home-server-setup", tax) == "infra"
+
+
 def test_default_taxonomy_has_zero_no_person_deny_hits():
     # Same grep flags as skills/topic/tests/test_public_vocabulary.py:_grep.
     blob = "\n".join(
