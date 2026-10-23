@@ -1,7 +1,7 @@
 ---
 name: sharpen
-kind: personal
-version: 2.0.0
+kind: portable
+version: 2.0.1
 description: >
   Run a conversational requirements interview — the step between a settled direction and
   a buildable plan. Interviews the user ONE probing question at a time (never a batch,
@@ -236,7 +236,7 @@ Section rules that make the brief usable as planning material:
   (`[assistant's phrasing, ratified]`) rather than dressing it as the user's.
 - **Non-goals are mandatory and explicit.** A brief with no non-goals did not
   sharpen anything; scope is defined by what it excludes. Each one carries the
-  reason it was ruled out, so a later planner doesn't re-propose it.
+  reason it was ruled out, so a later plan doesn't re-propose it.
 - **Open questions stay open.** Never resolve one by inference to make the brief
   look finished. Each names the cheapest way to answer it and what it blocks —
   an ungrillable question belongs here, not in the must-dos.
@@ -367,7 +367,7 @@ reorder its fields.
 - **Don't sharpen a bounded call because it feels careful.** Refusing is the
   respectful answer when a one-minute choice would do.
 - **The brief is not a plan.** No file lists, no task breakdown, no estimates.
-  Requirements, criteria, non-goals, open questions — the next planner turns
+  Requirements, criteria, non-goals, open questions — the next person planning turns
   those into work, and a brief that pre-empts it is guessing at the same altitude
   the session just refused to guess at.
 - **A brief written and never ratified is decision debt.** Do not let it sit as a
@@ -387,7 +387,7 @@ on an existing plan.
 | `grill-me` | Here | Why |
 |---|---|---|
 | Asks the whole **frontier** per round (dozens of questions across a few rounds) | **One question at a time** | The user's attention is the scarce resource; upstream this is an opt-in override, here it is the contract |
-| **Stateless** — writes no files, leaves only a sharper idea in your head | Writes **one mini-brief**, ratified and dated | The output has to be *citable* by a later planner; a sharper idea in someone's head cannot carry authority |
+| **Stateless** — writes no files, leaves only a sharper idea in your head | Writes **one mini-brief**, ratified and dated | The output has to be *citable* when someone plans later; a sharper idea in someone's head cannot carry authority |
 | Ends when the frontier is empty (every branch visited) | Ends on **convergence** (two questions changing nothing) | Exhaustive tree-walking is the ballooning failure its own docs warn about, and this session is budgeted in minutes of the user's attention |
 | Every question carries a recommended answer | **One stated view**, explicitly not an option list | Reconciles "give a recommendation" with the ban on invented alternatives |
 | Runs on anything, any time | **Refuses** choice-class topics; one topic per session | The both-directions guard — over-routing spends the same scarce channel as under-routing |

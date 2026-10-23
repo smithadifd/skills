@@ -40,9 +40,16 @@ cd skills
 | `doc-researcher` | Gathers code facts and examples for a documentation draft. |
 | `doc-verifier` | Checks specific documentation claims against the code. |
 | `doc-writer` | Writes a documentation page from a research brief. |
-| `planner` | Investigates a codebase and outlines the steps for a change. |
 | `researcher` | Answers a focused question about code or an external API. |
 | `reviewer` | Independently reviews a change and checks that its tests would fail without it. |
+
+### Agents or the built-in Explore and Plan agents
+
+Use the built-in Explore agent for open-ended reading of a codebase, and the built-in Plan agent (or Plan mode) to outline the steps for a change. Reach for these agents when the job has a fixed contract the built-ins do not give you:
+
+- `builder-core` builds one ticket in its own worktree under a floor of safety rules (draft PR only, never merges) and a turn cap.
+- `reviewer` reviews with no prior context and backs its verdict with what it ran; raise its effort per spawn for an adversarial review.
+- `researcher`, `doc-researcher`, `doc-verifier` and `api-contract-tracer` return a structured answer to a narrow question, where Explore returns free-form notes.
 
 ## Install
 

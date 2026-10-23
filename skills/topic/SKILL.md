@@ -1,7 +1,7 @@
 ---
 name: topic
-kind: personal
-version: 1.2.0
+kind: portable
+version: 1.2.1
 description: >
   Open, resume, or close a session note for a one-off, attended piece of work
   that will outlive the sitting. Resolves the thread's note file (project repo
