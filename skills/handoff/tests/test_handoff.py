@@ -42,6 +42,33 @@ def test_redact_covers_each_secret_shape():
             assert needle not in out, (secret, out)
 
 
+def test_quoted_authorization_values_are_redacted_for_every_scheme():
+    secret = "c2VjcmV0LXZhbHVl"
+    for scheme in ("Basic", "Bearer", "Token", "Digest"):
+        value = "%s %s" % (scheme, secret)
+        for text in (
+            '{"Authorization": "%s"}' % value,
+            "{'Authorization': '%s'}" % value,
+            '{"authorization":"%s","n": 1}' % value,
+            'headers = ["Authorization: %s"]' % value,
+            'Authorization = "%s"' % value,
+        ):
+            out = handoff.redact(text)
+            assert secret not in out, (text, out)
+            assert handoff.REDACTED in out, (text, out)
+
+
+def test_quoted_authorization_keeps_the_rest_of_the_json():
+    out = handoff.redact('{"Authorization": "Basic dXNlcjpwYXNz", "n": 1}')
+    assert out == '{"Authorization": "[REDACTED]", "n": 1}'
+
+
+def test_quoted_digest_value_with_escaped_quotes_leaves_no_tail():
+    text = '{"Authorization": "Digest username=\\"u\\", response=\\"tailvalue\\"", "n": 1}'
+    out = handoff.redact(text)
+    assert "tailvalue" not in out and '"n": 1' in out, out
+
+
 def test_flag_redaction_keeps_the_next_flag():
     out = handoff.redact("tool --api-key fakevalue --verbose")
     assert "--verbose" in out

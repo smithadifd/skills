@@ -59,8 +59,17 @@ _PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
 ]
+_SCHEME = r"(?:Basic|Bearer|Token|Digest)\s+"
 _AUTH = re.compile(
-    r"(\bAuthorization\s*[:=]\s*)(?:Basic|Bearer|Token|Digest)\s+[^\s\"']+",
+    r"(\bAuthorization[\"']?\s*[:=]\s*)" + _SCHEME + r"[^\s\"']+",
+    re.IGNORECASE,
+)
+# A quoted value after an Authorization key, in JSON, a dict literal or a
+# header assignment. Escape-aware, so a Digest value with escaped quotes ends
+# only at the closing quote.
+_AUTH_QUOTED = re.compile(
+    r"(\bAuthorization[\"']?\s*[:=]\s*)(?:\"" + _SCHEME + r"(?:[^\"\\\n]|\\.)*\""
+    r"|'" + _SCHEME + r"(?:[^'\\\n]|\\.)*')",
     re.IGNORECASE,
 )
 _FLAG = re.compile(
@@ -80,6 +89,10 @@ def redact(text):
     """Replace secret-shaped strings with [REDACTED]."""
     for pattern in _PATTERNS:
         text = pattern.sub(REDACTED, text)
+    text = _AUTH_QUOTED.sub(
+        lambda m: m.group(1) + m.group(0)[len(m.group(1))] + REDACTED + m.group(0)[len(m.group(1))],
+        text,
+    )
     text = _AUTH.sub(lambda m: m.group(1) + REDACTED, text)
     text = _FLAG.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     text = _ASSIGN.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
