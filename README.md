@@ -4,7 +4,7 @@ This repository contains reusable Claude Code skills for common tasks and agents
 
 ## Before you start
 
-You need Claude Code, `git`, and `bash`. Python 3 is required for `handoff`, `kickoff`, `memory-gardener`, `pickup`, `retro`, `sharpen`, `topic`, and `document`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
+You need Claude Code, `git`, and `bash`. Python 3 is required for `handoff`, `kickoff`, `memory-gardener`, `pickup`, `retro`, `sharpen`, `ticket`, `topic`, and `document`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
 
 This is a private repository. If you've been invited as a collaborator, clone it using the URL provided with your access, then run the commands below from the clone:
 
@@ -32,6 +32,7 @@ cd skills
 | `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. |
 | `tdd` | Applies a test-first loop when you change behavior yourself: a failing test, the smallest passing change, then a refactor, with the red-then-green evidence handed to the reviewer. |
 | `teach` | Explains how a codebase works with a system overview, component tour, and traced example. |
+| `ticket` | Takes one ticket from intake through a plan, review rounds and an approved outward step to close, stopping for your approval before building and before anything leaves the machine, and keeps a resume card in the repository's ignored scratch. |
 | `topic` | Keeps the notes for an ongoing, focused discussion in one file. |
 
 ## Agents
@@ -62,7 +63,7 @@ Which skill or agent to reach for at each step of delivering a change:
 - Discover: `kickoff` turns an early idea into a researched plan. `sharpen` asks questions until the requirements are clear. `shape` tests a design for risks before you build it.
 - Understand: `teach` explains how a codebase works. `researcher` answers a focused question about code or an API. `api-contract-tracer` follows an endpoint to its callers. `dependency-auditor` compares dependency versions across projects. `doc-researcher`, `doc-writer` and `doc-verifier` gather facts for, write and check a documentation page. `document` runs all three to write a page into your docs folder.
 - Plan: use Claude Code's Plan mode to outline the steps.
-- Build: `builder-core` builds one ticket on its own branch and opens a draft pull request. `tdd` is the test-first loop for when you change behavior directly yourself rather than delegating the build.
+- Build: `ticket` drives one ticket through plan, build, review and close with two approval stops. `builder-core` builds one ticket on its own branch and opens a draft pull request. `tdd` is the test-first loop for when you change behavior directly yourself rather than delegating the build.
 - Debug: `debug` reproduces a bug, isolates the cause and fixes it behind its own failing test. Like `tdd`, it never calls a fix done without a test that failed first.
 - Review: `review` checks your changes for bugs and security problems. `reviewer` is an independent second pair of eyes that shows what it ran.
 - Ship: `pr` prepares the pull request with the project's conventions.
