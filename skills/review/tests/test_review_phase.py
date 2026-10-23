@@ -973,6 +973,45 @@ def test_real_duration_claims_still_require_an_interval(body):
     assert "review_interval_endpoints_missing" in result["reason"]
 
 
+# --- a short commit id is not a duration --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("Evidence: commit 919960d is the base.", id="sha-ending-d"),
+        pytest.param("Evidence: commit 1234567h is cited.", id="seven-digits-h"),
+        pytest.param("Evidence: commit 7654321m is cited.", id="seven-digits-m"),
+        pytest.param("Evidence: see 919960d.", id="sha-then-period"),
+        pytest.param("Evidence: see (919960d), then 1234567h,", id="sha-in-punctuation"),
+        pytest.param("Evidence: see `919960d` here.", id="sha-in-backticks"),
+        pytest.param("Evidence: 0123456789abcdef0123d is a long id.", id="long-hex-id"),
+    ],
+)
+def test_short_commit_id_is_not_a_duration_claim(body):
+    text = _claude_approve_with(body)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "It took 41m.",
+        "It took (2h) in total.",
+        "It took 3d, then stopped.",
+        "It took 500ms.",
+        "It took 1234d.",
+        "The id 919960d is fine but the run took 41m.",
+    ],
+)
+def test_short_duration_beside_the_commit_id_rule_still_requires_an_interval(body):
+    text = _claude_approve_with(body)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"]
+
+
 # --- file:line references and delimiter-glued paths never hide a claim --------
 
 

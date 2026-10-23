@@ -590,7 +590,7 @@ _INTERVAL_PARTS = _IntervalParts()
 # token (the separator is `-`, not whitespace).
 _DURATION_TOKEN = (
     r"(?:"
-    r"\d+(?:\.\d+)?(?:ms|[mhd])"
+    r"(?![0-9a-f]{7,40}\b)(?!\d{7,}[mhd]\b)\d+(?:\.\d+)?(?:ms|[mhd])"
     r"|"
     r"\d+(?:\.\d+)?\s+(?:milliseconds|seconds|second|minutes|minute|"
     r"hours|hour|days|day|ms|secs|sec|mins|hrs|hr|[smhd])"
