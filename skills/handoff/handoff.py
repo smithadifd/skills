@@ -70,6 +70,14 @@ _AUTH_QUOTED = re.compile(
     _AUTH_KEY + r"(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*')",
     re.IGNORECASE,
 )
+# A header written inside a quoted string ("Authorization: Digest a=\"b\"",
+# single or double quotes): redact up to the matching unescaped closing quote
+# and keep that quote and whatever follows it.
+_AUTH_IN_STRING = re.compile(
+    r"(\"\bAuthorization\s*:\s*)" + _SCHEME + r"(?:[^\"\\\n]|\\.)*"
+    r"|('\bAuthorization\s*:\s*)" + _SCHEME + r"(?:[^'\\\n]|\\.)*",
+    re.IGNORECASE,
+)
 # An unquoted header: a scheme and then the rest of the line, so a multi-part
 # Digest value or a quoted token leaves no tail.
 _AUTH = re.compile(_AUTH_KEY + _SCHEME + r"[^\n]*", re.IGNORECASE)
@@ -94,6 +102,7 @@ def redact(text):
         lambda m: m.group(1) + m.group(0)[len(m.group(1))] + REDACTED + m.group(0)[len(m.group(1))],
         text,
     )
+    text = _AUTH_IN_STRING.sub(lambda m: (m.group(1) or m.group(2)) + REDACTED, text)
     text = _AUTH.sub(lambda m: m.group(1) + REDACTED, text)
     text = _FLAG.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     text = _ASSIGN.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)

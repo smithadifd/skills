@@ -86,6 +86,22 @@ def test_authorization_with_a_quoted_token_or_no_scheme_is_redacted():
         assert "abcdef" not in out and handoff.REDACTED in out, (text, out)
 
 
+def test_header_inside_a_quoted_string_keeps_the_closing_quote_and_suffix():
+    out = handoff.redact('headers = ["Authorization: Digest username=u, response=tailsecret"], retries = 3')
+    assert out == 'headers = ["Authorization: [REDACTED]"], retries = 3'
+    out = handoff.redact("headers = ['Authorization: Token tailsecret'], retries = 3")
+    assert out == "headers = ['Authorization: [REDACTED]'], retries = 3"
+    out = handoff.redact('curl -H "Authorization: Basic dGFpbHNlY3JldA==" https://example.com/x')
+    assert "dGFpbHNlY3JldA" not in out and out.endswith('" https://example.com/x'), out
+
+
+def test_quoted_header_with_an_escaped_quote_in_the_digest_value():
+    text = 'run("Authorization: Digest username=\\"u\\", response=\\"tailsecret\\"", retries=3)'
+    out = handoff.redact(text)
+    assert "tailsecret" not in out and "username" not in out, out
+    assert out.endswith('", retries=3)'), out
+
+
 def test_unquoted_digest_header_leaves_no_tail():
     text = 'Authorization: Digest username="u", realm="r", response="tail-secret-value"'
     out = handoff.redact(text)
