@@ -8,7 +8,10 @@ Usage:
 The page text is read from standard input. The check and the write are one
 call: the destination is opened relative to a directory handle, one component
 at a time, with O_NOFOLLOW, so a path that changes after the check cannot
-redirect the write.
+redirect the write. The text goes to a temporary file in that directory and
+is published by directory entry (a rename for update, an exclusive link for
+create), never written through the destination's own file, so a hard link to
+another file is untouched and a failed write leaves the page as it was.
 
 Refusals exit 1, print one line on stderr and write nothing:
   - --root or --dest contains a ".." component;
@@ -26,6 +29,7 @@ Any other destination directly under the repository root is refused.
 
 import argparse
 import os
+import secrets
 import stat
 import sys
 
@@ -94,6 +98,35 @@ def check_paths(repo, root, dest):
     return real_repo, rel_parts, root_depth
 
 
+def _unlink_quietly(name, dir_fd):
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+
+
+def _write_temp(dir_fd, name, text):
+    """Write text to a new temporary file in the directory and return its name.
+
+    The file is created exclusively, filled completely, and synced. On any
+    failure it is removed before the error propagates.
+    """
+    tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+    out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, 0o644, dir_fd=dir_fd)
+    try:
+        try:
+            view = memoryview(text)
+            while view:
+                view = view[os.write(out, view):]
+            os.fsync(out)
+        finally:
+            os.close(out)
+    except BaseException:
+        _unlink_quietly(tmp, dir_fd)
+        raise
+    return tmp
+
+
 def write_through(real_repo, rel_parts, root_depth, text, mode):
     """Open the destination relative to directory handles and write text.
 
@@ -117,33 +150,36 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
             fds.append(fd)
 
         name = rel_parts[-1]
-        if mode == "create":
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW
+        if mode == "update":
+            # lstat does not follow a symlink, so a link reads as not regular.
             try:
-                out = os.open(name, flags, 0o644, dir_fd=fd)
-            except FileExistsError:
-                raise Refusal(f"destination exists (create mode): {name}")
-            except OSError as exc:
-                raise Refusal(f"cannot create {name}: {exc.strerror}")
-        else:
-            # O_NONBLOCK keeps a FIFO from blocking the open; the type check
-            # below refuses it before anything is truncated.
-            try:
-                out = os.open(name, os.O_WRONLY | NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                kind = os.lstat(name, dir_fd=fd).st_mode
             except FileNotFoundError:
                 raise Refusal(f"destination is missing (update mode): {name}")
             except OSError as exc:
-                raise Refusal(f"cannot open {name} without following links: {exc.strerror}")
-            if not stat.S_ISREG(os.fstat(out).st_mode):
-                os.close(out)
+                raise Refusal(f"cannot inspect {name}: {exc.strerror}")
+            if not stat.S_ISREG(kind):
                 raise Refusal(f"destination is not a regular file: {name}")
-            os.ftruncate(out, 0)
+
+        # Never write through the destination's inode: it may be hard-linked
+        # to a file elsewhere, and an in-place write could be left half done.
+        # Write a temporary file next to it, then publish it by directory entry.
+        tmp = _write_temp(fd, name, text)
         try:
-            view = memoryview(text)
-            while view:
-                view = view[os.write(out, view):]
+            if mode == "create":
+                try:
+                    os.link(tmp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+                except FileExistsError:
+                    raise Refusal(f"destination exists (create mode): {name}")
+                except OSError as exc:
+                    raise Refusal(f"cannot create {name}: {exc.strerror}")
+            else:
+                os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+                tmp = None
+            os.fsync(fd)
         finally:
-            os.close(out)
+            if tmp is not None:
+                _unlink_quietly(tmp, fd)
     finally:
         for opened in fds:
             os.close(opened)
@@ -164,6 +200,9 @@ def main(argv=None):
         write_through(real_repo, rel_parts, root_depth, text, args.mode)
     except Refusal as exc:
         print(f"write_page: refused: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"write_page: refused: write failed, destination unchanged: {exc.strerror}", file=sys.stderr)
         return 1
     print(f"wrote {args.dest}")
     return 0
