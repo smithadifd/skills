@@ -181,6 +181,28 @@ def test_S06_key_past_the_header_field_limit_redacts_the_header_whole():
         assert gone not in note
 
 
+def test_S07_key_made_by_the_cut_redacts_the_header_whole():
+    # "Authorizationxyzw" is not a key, but the cut leaves "Authorization..."
+    # which is, so the assembled header must still be judged.
+    slug = "a" * (handoff.HEADER_FIELD_MAX - 17) + " Authorizationxyzw"
+    assert not handoff._AUTH_KEY.search(slug)
+    note, _ = handoff.build_note({"Goal": "kept goal text"}, "r", slug)
+    assert note.startswith(R + "\n\n## Goal\n\n")
+    assert _body(note, "Goal") == "kept goal text"
+    assert "Authorization" not in note and "Written:" not in note
+
+
+def test_S08_token_shape_made_by_the_cut_is_redacted_in_the_header():
+    # Too long to be an AWS key id whole; the cut leaves exactly that shape.
+    token = "AKIA" + "ABCDEFGHIJKLMNOPQRSTU"
+    slug = "a" * (handoff.HEADER_FIELD_MAX - 24) + " " + token
+    assert handoff.redact(slug) == slug
+    note, _ = handoff.build_note({"Goal": "g"}, "r", slug)
+    first = note.split("\n", 1)[0]
+    assert first.startswith("# Handoff: r / ") and R in first
+    assert "AKIA" not in note and "ABCDEFGH" not in note
+
+
 # Case T01. Inputs that make a scan do the most work per character:
 # candidates that almost form a key, and a key only at the very end.
 LONG_SECTIONS = {
