@@ -10,9 +10,18 @@ jobs:
   clean-account:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
+    env:
+      # The deny list lives in a repository variable, never in a tracked file.
+      # The lint and the public-vocabulary tests both read it.
+      NO_PERSON_DENY: ${{ vars.NO_PERSON_DENY }}
+      OWNER: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
     steps:
       - uses: actions/checkout@v4
-      - name: Verify standalone installation
+      # `claude plugin validate .` is not run here: the Claude Code CLI is not
+      # part of the hosted runner image, and it runs in the release
+      # verification step instead.
+      - name: Verify standalone installation and lint
         shell: bash
         run: |
           set -euo pipefail

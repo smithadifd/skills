@@ -1,9 +1,12 @@
 ---
 name: pr
 kind: portable
+version: 1.0.0
 description: >
   Create a pull request for the current branch following the project's
-  conventional style.
+  conventional style. Use when the user says "open a PR", "create a pull
+  request", "write the PR description", or "push this and open a PR". NOT for
+  reviewing a pull request (that is `review`), and NOT for merging one.
 ---
 
 Create a pull request for the current branch following the project's conventional style.
