@@ -28,12 +28,18 @@ lint_warn() {
   printf 'LINT WARN [%s]: %s\n' "$1" "$2"
 }
 
+# The tracked-file rules need a git work tree; without one they would pass on nothing.
+if ! git ls-files -z > /dev/null 2>&1; then
+  lint_fail git "$root is not a git work tree; the tracked-file rules cannot run"
+  exit 1
+fi
+
 # field <file> <key>: the frontmatter value of a top-level key, with folded
 # continuation lines joined by single spaces. Empty when the key is absent.
 field() {
   awk -v key="$2" '
     NR == 1 { if ($0 != "---") exit; next }
-    $0 == "---" { exit }
+    $0 == "---" { closed = 1; exit }
     {
       if (match($0, /^[A-Za-z_-]+:/)) {
         current = substr($0, 1, RLENGTH - 1)
@@ -51,8 +57,13 @@ field() {
         out = (out == "" ? line : out " " line)
       }
     }
-    END { print out }
+    END { if (closed) print out }
   ' "$1"
+}
+
+# closed_frontmatter <file>: succeeds when line 1 and a later line are both ---.
+closed_frontmatter() {
+  awk 'NR == 1 { if ($0 != "---") exit 1; next } $0 == "---" { found = 1; exit 0 } END { exit found ? 0 : 1 }' "$1"
 }
 
 # body_bytes <file>: bytes after the closing frontmatter marker.
@@ -74,6 +85,9 @@ for file in "${skill_files[@]}"; do
   dir=${file%/SKILL.md}
   skill=${dir##*/}
 
+  closed_frontmatter "$file" ||
+    lint_fail frontmatter "$file has no closed frontmatter (a --- line first, and a --- line closing it)"
+
   missing=
   for key in name kind version description; do
     [ -n "$(field "$file" "$key")" ] || missing="$missing $key"
@@ -90,7 +104,7 @@ for file in "${skill_files[@]}"; do
   if [ -n "$description" ]; then
     printf '%s' "$description $when_to_use" | grep -qE '"[^"]+"|Use when|Use this|Trigger on|Trigger phrases' ||
       lint_fail triggers "$file description names no trigger phrase (a quoted phrase, or 'Use when ...')"
-    printf '%s' "$description $when_to_use" | grep -qE '\bNOT\b|[Nn]ot for' ||
+    printf '%s' "$description $when_to_use" | grep -qiE '\bnot for\b' ||
       lint_fail triggers "$file description names no NOT-for case ('NOT for ...')"
   fi
 
@@ -137,10 +151,23 @@ if [ -z "${OWNER:-}" ] || [ -z "${REPO:-}" ]; then
   REPO=${REPO:-${slug#* }}
   REPO=${REPO%.git}
 fi
+in_ci=0
+if [ "${CI:-}" = true ] || [ "${GITHUB_ACTIONS:-}" = true ]; then in_ci=1; fi
+deny_status=0
+if [ -n "${NO_PERSON_DENY:-}" ]; then
+  printf '' | grep -iE -e "$NO_PERSON_DENY" > /dev/null 2>&1
+  deny_status=$?
+fi
 if [ -z "${NO_PERSON_DENY:-}" ]; then
-  printf 'LINT NOTE [no-person-deny]: NO_PERSON_DENY is unset; the deny-list step was skipped\n'
+  if [ "$in_ci" -eq 1 ]; then
+    lint_fail no-person-deny-config 'NO_PERSON_DENY is empty or unset in CI; the deny-list step cannot be skipped there'
+  else
+    printf 'LINT NOTE [no-person-deny]: NO_PERSON_DENY is unset; the deny-list step was skipped\n'
+  fi
+elif [ "$deny_status" -eq 2 ]; then
+  lint_fail no-person-deny-config 'NO_PERSON_DENY is not a valid extended regular expression'
 else
-  own_url='github\.com/[^[:space:]]*'
+  own_url='^$'
   if [ -n "$OWNER" ] && [ -n "$REPO" ]; then
     own_url="github\\.com/$OWNER/$REPO"
   fi
