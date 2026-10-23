@@ -222,10 +222,27 @@ def test_standalone_install_paths_are_documented():
         assert re.findall(r"~/(?!\.claude)\S+", text) == [], (
             "only ~/.claude paths may appear"
         )
-        assert installed_path in text
+        if filename == "topics_dir.py":
+            # argparse help does not substitute the variable; the script
+            # documents plain invocations and prints its own resolved path.
+            assert "${CLAUDE_SKILL_DIR}" not in text
+        else:
+            assert installed_path in text
     resolver_text = (SKILL_DIR / "topics_dir.py").read_text(encoding="utf-8")
     assert "This standalone config leaves the key unset" in resolver_text
     assert "This checkout's config sets the key" not in resolver_text
+
+
+def test_cli_help_shows_the_resolved_script_path_not_a_variable():
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, str(SKILL_DIR / "topics_dir.py"), "--help"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "${CLAUDE_SKILL_DIR}" not in out
+    assert str((SKILL_DIR / "topics_dir.py").resolve()) in out
 
 
 def test_absent_normative_read_degrades_with_one_line_notice(tmp_path):

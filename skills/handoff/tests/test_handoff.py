@@ -58,6 +58,41 @@ def test_quoted_authorization_values_are_redacted_for_every_scheme():
             assert handoff.REDACTED in out, (text, out)
 
 
+def test_bracketed_header_map_assignments_are_redacted():
+    secret = "c2VjcmV0LXZhbHVl"
+    for scheme in ("Basic", "Bearer", "Token", "Digest"):
+        value = "%s %s" % (scheme, secret)
+        for text in (
+            'headers["Authorization"] = "%s"' % value,
+            "headers['Authorization'] = '%s'" % value,
+            'h["authorization"]="%s"; run()' % value,
+            'headers["Authorization"] = %s' % value,
+        ):
+            out = handoff.redact(text)
+            assert secret not in out, (text, out)
+    assert handoff.redact('h["Authorization"] = "Basic x"; run()') == (
+        'h["Authorization"] = "[REDACTED]"; run()'
+    )
+
+
+def test_authorization_with_a_quoted_token_or_no_scheme_is_redacted():
+    for text in (
+        'Authorization: Bearer "tok-abcdef-123"',
+        "Authorization: Bearer 'tok-abcdef-123'",
+        '{"Authorization": "tok-abcdef-123"}',
+        "{'Authorization': 'tok-abcdef-123'}",
+    ):
+        out = handoff.redact(text)
+        assert "abcdef" not in out and handoff.REDACTED in out, (text, out)
+
+
+def test_unquoted_digest_header_leaves_no_tail():
+    text = 'Authorization: Digest username="u", realm="r", response="tail-secret-value"'
+    out = handoff.redact(text)
+    assert "tail-secret" not in out and "username" not in out, out
+    assert out == "Authorization: [REDACTED]"
+
+
 def test_quoted_authorization_keeps_the_rest_of_the_json():
     out = handoff.redact('{"Authorization": "Basic dXNlcjpwYXNz", "n": 1}')
     assert out == '{"Authorization": "[REDACTED]", "n": 1}'

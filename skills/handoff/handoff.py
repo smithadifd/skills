@@ -60,18 +60,19 @@ _PATTERNS = [
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
 ]
 _SCHEME = r"(?:Basic|Bearer|Token|Digest)\s+"
-_AUTH = re.compile(
-    r"(\bAuthorization[\"']?\s*[:=]\s*)" + _SCHEME + r"[^\s\"']+",
-    re.IGNORECASE,
-)
-# A quoted value after an Authorization key, in JSON, a dict literal or a
-# header assignment. Escape-aware, so a Digest value with escaped quotes ends
-# only at the closing quote.
+# The Authorization key in its plain, quoted or bracketed form:
+#   Authorization:   "Authorization":   headers["Authorization"] =
+_AUTH_KEY = r"(\bAuthorization[\"']?\s*(?:\]\s*)?[:=]\s*)"
+# A quoted value after the key, taken whole whatever it holds (a scheme, a bare
+# token, or a multi-part Digest value). Escape-aware, so escaped quotes inside
+# the value do not end it early.
 _AUTH_QUOTED = re.compile(
-    r"(\bAuthorization[\"']?\s*[:=]\s*)(?:\"" + _SCHEME + r"(?:[^\"\\\n]|\\.)*\""
-    r"|'" + _SCHEME + r"(?:[^'\\\n]|\\.)*')",
+    _AUTH_KEY + r"(?:\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*')",
     re.IGNORECASE,
 )
+# An unquoted header: a scheme and then the rest of the line, so a multi-part
+# Digest value or a quoted token leaves no tail.
+_AUTH = re.compile(_AUTH_KEY + _SCHEME + r"[^\n]*", re.IGNORECASE)
 _FLAG = re.compile(
     r"(--[A-Za-z0-9-]*(?:key|token|secret|password|passwd)[A-Za-z0-9-]*)(\s+|=)(?!-)(" + _VALUE + ")",
     re.IGNORECASE,

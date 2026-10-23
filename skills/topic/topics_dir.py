@@ -28,10 +28,10 @@ with no shared library on the path.
 
 CLI
 ---
-    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py
-    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --config <path>
-    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --notices
-    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --open <slug> --ask <text>
+    python3 topics_dir.py
+    python3 topics_dir.py --config <path>
+    python3 topics_dir.py --notices
+    python3 topics_dir.py --open <slug> --ask <text>
 
 `--open` writes `<topics_dir>/<slug>.md` only when that file does not already
 exist. Notices go to stderr. The resolved path goes to stdout.
@@ -310,7 +310,11 @@ def open_topic(
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="This script: %s" % Path(__file__).resolve(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--notices", action="store_true")
     parser.add_argument("--open", dest="slug", default=None)

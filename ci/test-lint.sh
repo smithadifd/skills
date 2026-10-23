@@ -80,7 +80,13 @@ fi
 tree=$(new_dir)
 make_tree "$tree"
 git -C "$tree" remote add origin https://github.com/zzowner/zzrepo.git
-printf 'See https://github.com/zzowner/zzrepo for the source.\n' > "$tree/notes.md"
+{
+  printf 'See https://github.com/zzowner/zzrepo for the source.\n'
+  printf 'Clone https://github.com/zzowner/zzrepo.git now.\n'
+  printf 'Docs: https://github.com/zzowner/zzrepo/issues, (https://github.com/zzowner/zzrepo)\n'
+  printf 'Link "https://github.com/zzowner/zzrepo" and https://github.com/zzowner/zzrepo.\n'
+  printf 'Last: https://github.com/zzowner/zzrepo\n'
+} > "$tree/notes.md"
 git -C "$tree" add -A
 if env -u CI -u GITHUB_ACTIONS -u OWNER -u REPO NO_PERSON_DENY=zzowner bash "$lint" "$tree" > /dev/null 2>&1; then
   printf 'PASS: a line holding only the repository URL passes the deny step\n'
