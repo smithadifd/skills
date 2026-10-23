@@ -4,34 +4,48 @@
 
 The ledger store writes a ticket's stamps, decisions, reviews and close through the ledger CLI, one subprocess per event. Earlier versions checked the ticket's newest event, then appended, then read the events back to see whether anything had landed in between. That check and that append were two calls, so another writer could always slip between them, and every repair (void notes, state restores) opened a new window.
 
-## Rule
+## The CLI guarantee this rests on
 
-The ledger CLI's write verbs take `--expect-revision <event id | none>`: the append lands only if the item's newest event id equals the expected one, checked in the same database transaction as the insert, and otherwise refuses with exit code 5 (`stale_revision`) naming the newest event's writer. The ledger store uses it on every write.
+The ledger CLI's write verbs take `--expect-revision <event id | none>`. The append lands only if the item's newest event id equals the expected one, checked in the same database transaction as the insert; otherwise it exits 5 (`stale_revision`), names the newest event's writer, and writes nothing. A stored idempotency key is checked first: the same key with the same event returns the stored event; the same key with a different event is refused as a conflict.
 
-1. **Revision.** A store handle holds the ticket revision it has accounted for: the newest event id it read (or `none` for a ticket with no events), advanced only by its own successful appends.
-2. **Every write is one conditional append.** `write_stamp`, `record_decision`, `record_review`, `record_plan`, `record_tried`, the pass claim and the close each append with `--expect-revision <held revision>`. On success the held revision becomes the new event's id. On exit 5 the write is refused: the store raises `TicketHeld` naming the writer from the CLI's message, writes nothing else, and the pass must re-read before writing again.
-3. **The claim.** Starting a pass reads the ticket, refuses if a pass is live (printing its session id, host and start time), and otherwise appends the `session.opened` claim conditionally on the revision it read. Two sessions that read the same revision cannot both claim: the second append is refused. A refused claim wrote nothing, so there is nothing to release. Releasing a pass (close, the person's `release` command, or an error exit) appends `session.closed` without a precondition; giving up the ticket is safe whatever landed since.
-4. **The close.** Closing is the pending-close stamp (one conditional append), then one conditional `item.state` append marking the ticket closed, expected at the stamp's event id and carrying the idempotency key `ticket-close/<ticket key>/<stamp event id>` and this pass's writer name. If anything lands between them, the state append is refused and the ticket stays open with an unconfirmed pending close; resume reports it and resumes at the outward go. A `closed` status is trusted only when all three hold: the event immediately before it is a pending-close stamp written by this ticket's store; its idempotency key is exactly `ticket-close/<ticket key>/<that stamp's event id>/<the pass id that wrote the stamp>`; and its writer name matches the stamp's. An outside writer that appends `closed` right after the stamp (winning that revision) fails the key check, so resume reports the close as not this pass's and resumes at the outward go.
-5. **Idempotency key per write.** Every conditional append carries a key unique to that logical write: `ticket-write/<ticket key>/<expected revision>/<kind>/<request token>`, where the request token is a random value the store generates once per logical write and reuses only when retrying that same write (the close's key, rule 4, ends with the pass id as its token: `ticket-close/<ticket key>/<stamp event id>/<pass id>`, and resume checks that exact form). The ledger CLI checks a stored key before the revision precondition: a retry of a request that already committed returns the stored event unchanged instead of `stale_revision`, and the same key with a different event is refused as a conflict. Two independent handles writing from the same revision never share a key, so the second is refused by the revision precondition, not mistaken for a retry.
-6. **Ambiguous outcomes.** An unknown exit status, a crash, or an unparseable response does not prove the append did not commit. The store then reads the ticket's events and looks for the write's exact key (request token included) with the same kind and payload: found means it landed (the held revision becomes that event's id and the write returns normally); absent means it did not, and the write raises `StoreUnavailable` with the CLI's output. The store never retries with a new key.
-7. **What is deleted.** The read-back after every successful append, the close-void note and the state restore: compare-and-set makes them unnecessary. The only read-back left is rule 6's lookup by key after an ambiguous outcome.
-8. **Old CLIs.** A ledger CLI that does not accept `--expect-revision` is refused at store selection with a one-line message naming the missing option; the store never writes without the precondition.
+## Rules
 
-## Inputs and invariants
+1. **Held revision.** A store handle holds the ticket revision it has accounted for: the newest event id it read (or `none` for a ticket with no events). Only its own successful appends advance it.
+2. **Pass ownership on every write.** Before every write, the handle reads the ticket's events and refuses, writing nothing, when a pass is live that is not the handle's own (printing that pass's session id, host and start time), or when the handle holds a pass that is no longer live. A handle outside any pass may write only while no pass is live.
+3. **Conditional writes.** Every write except a pass release (rule 6) is one append with `--expect-revision <held revision>`: `write_stamp`, `record_decision`, `record_review`, `record_plan`, `record_tried`, the pass claim and the closed state. On success the held revision becomes the new event's id. On exit 5 the store raises `TicketHeld` naming the writer and writes nothing else; the pass must re-read before writing again.
+4. **Write keys.** Every conditional append carries a key unique to that logical write, generated once and reused only to retry that same write:
+   - ordinary writes: `ticket-write/<ticket key>/<expected revision>/<kind>/<request token>`, with a random request token;
+   - the closed state: `ticket-close/<ticket key>/<stamp event id>/<pass id>`, where the stamp is this pass's pending-close stamp.
+   Two independent handles writing from the same revision never share a key, so the second is refused by the revision check, not taken for a retry.
+5. **Claim.** Starting a pass reads the ticket, refuses if any pass is live, and appends the `session.opened` claim (session id, host, started-at) with the expected revision it read. Two sessions racing from the same revision cannot both claim: the second append is refused and leaves no claim.
+6. **Release.** Releasing a pass (at close, on the person's `release` command, or on an error exit) appends `session.closed` naming the pass, without a revision precondition: giving up the ticket is safe whatever landed since, and it must succeed after the handle's revision has gone stale. Its key is `ticket-pass/<ticket key>/<pass id>/released`, so a retried release lands once.
+7. **Close.** Closing is this pass's pending-close stamp (a conditional write), then the closed state, appended with `--expect-revision <the stamp's event id>` and the close key from rule 4. If anything lands between them, the closed write is refused and the ticket stays open with an unconfirmed pending close; resume reports it and resumes at the outward go.
+8. **Trusting a closed status on resume.** A `closed` status is trusted only when all of these hold:
+   - the event immediately before the closed-state event is a pending-close stamp written by this ticket's store;
+   - the closed-state event's key is exactly `ticket-close/<ticket key>/<that stamp's event id>/<the pass id that wrote the stamp>`, and its writer name matches the stamp's;
+   - that pending-close stamp is still the latest `item.stopped` event (a later stop invalidates the close), and the only events after the closed state are `session.closed` releases.
+   Otherwise resume reports why and resumes at the outward go, or earlier when an earlier check fails.
+9. **Ambiguous outcomes.** An unknown exit status, a crash, or an unparseable response does not prove the append did not commit. The store reads the ticket's events and looks for the write's exact key with the same kind and payload: found means it landed (the held revision becomes that event's id and the write returns normally); absent means it did not, and the write raises `StoreUnavailable` with the CLI's output. The store never retries a write under a new key.
+10. **Old CLIs.** A ledger CLI that does not accept `--expect-revision` is refused at store selection with a one-line message naming the missing option.
+11. **Deleted.** The read-back after every successful append, the close-void note and the state restore. The only read-back left is rule 9's lookup by key after an ambiguous outcome.
 
-- Inputs: the item's events from the CLI's export; the CLI's exit status and error code on each append.
-- Invariant: every event the store appends was appended at exactly the revision the store last observed, so no write ever lands on top of a change the store did not see.
-- Fail-closed default: a missing `--expect-revision` option is refused before any write; an unknown exit status or unparseable response is resolved only by finding the write's own key in the ticket's events (rule 6), and otherwise is `StoreUnavailable`.
+## Invariants
+
+- Every event the store appends, except a pass release, was appended at exactly the revision the store last observed, by a handle that owned the live pass (or wrote while none was live).
+- A closed status is trusted only under rule 8.
+- Fail-closed: a missing `--expect-revision` option is refused before any write; an ambiguous outcome is resolved only by finding the write's own key (rule 9), and is otherwise `StoreUnavailable`.
 
 ## Tests
 
 - Two handles read revision N; the first stamp lands; the second is refused naming the first writer, and the ticket's event count grows by one.
-- Two sessions race to claim from the same revision: exactly one claim lands; the other is refused and leaves no claim.
+- Two handles at the same revision issue the same kind of write with identical payloads: the first lands; the second is refused with `stale_revision`, never returned the first one's event.
+- A fresh handle (no pass) writes after another pass has claimed the ticket: refused by rule 2, nothing written.
+- Two sessions race to claim from the same revision: exactly one claim lands; the other leaves no claim.
+- Release succeeds after the handle's revision has gone stale, and a retried release lands once.
 - A state event inserted between the pending-close stamp and the closed write: the closed write is refused, the status is unchanged, and resume reports an unconfirmed close.
-- A `closed` status not immediately preceded by this pass's pending-close stamp is not trusted on resume.
-- An outside writer appends `closed` immediately after the pending-close stamp (winning that exact revision, so this pass's closed write is refused): resume does not trust it, because its idempotency key is not `ticket-close/<key>/<stamp id>`.
-- A CLI without `--expect-revision` is refused at selection.
-- Lost response: the CLI commits the append but returns unparseable output; the store finds the key, advances its revision, and the next write lands. A retry of the same request returns the stored event, not `stale_revision`.
-- Two handles at the same revision issue the same kind of write with identical payloads: the first lands; the second is refused with `stale_revision` (distinct request tokens), never returned the first one's event.
+- An outside writer appends `closed` immediately after the pending-close stamp (winning that revision): resume does not trust it, because its key is not `ticket-close/<key>/<stamp id>/<pass id>`.
+- A later `item.stopped` after a trusted close: resume no longer trusts the close.
+- Lost response: the CLI commits but returns unparseable output; the store finds the key, advances its revision, and the next write lands. A retry of the same request returns the stored event, not `stale_revision`.
 - Ambiguous failure with nothing committed: the key is absent, the write raises `StoreUnavailable`, and the revision is unchanged.
-- Mutation targets: omit `--expect-revision` on one write; trust a closed status without the adjacency check; accept exit 5 as success.
+- A CLI without `--expect-revision` is refused at selection.
+- Mutation targets: omit `--expect-revision` on one conditional write; skip the pass-ownership check on one write; trust a closed status without the key check; trust a close after a later stop; accept exit 5 as success.
