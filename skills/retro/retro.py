@@ -33,6 +33,7 @@ CHECK_COMMAND = re.compile(
     r"\b(lint|ruff|eslint|flake8|mypy|tsc|pytest|prettier|black|shellcheck|clippy)\b", re.I
 )
 FAILURE_TEXT = re.compile(r"\b(error|errors|failed|failure)\b", re.I)
+ZERO_COUNT = re.compile(r"\b(0|no)\s+(errors?|failed|failures?)\b", re.I)
 RULE_CODE = re.compile(r"\b[A-Z]{1,4}\d{2,4}\b")
 CORRECTION_CUE = re.compile(
     r"^\s*(no\b|don'?t\b|do not\b|stop\b|again\b|i said\b|that'?s not\b|wrong\b)", re.I
@@ -116,11 +117,16 @@ def triage(path):
     return {"trivial": trivial, "tool_calls": tool_calls, "edits": edits}
 
 
+def _failure_lines(text):
+    """Lines that report a failure; zero-count results such as '0 errors' do not."""
+    return [ln for ln in text.splitlines() if FAILURE_TEXT.search(ZERO_COUNT.sub("", ln))]
+
+
 def _signature(text):
     match = RULE_CODE.search(text)
     if match:
         return match.group(0)
-    first = next((ln for ln in text.splitlines() if FAILURE_TEXT.search(ln)), text.strip()[:80])
+    first = next(iter(_failure_lines(text)), text.strip()[:80])
     first = re.sub(r"\S+\.\w+(:\d+)*:?", "", first)
     first = re.sub(r"(?<![A-Za-z])\d+", "N", first.lower())
     return " ".join(first.split())[:80]
@@ -136,7 +142,7 @@ def scan(path):
             commands[event["id"]] = str(event["input"].get("command", ""))
         elif event["kind"] == "tool_result":
             command = commands.get(event["id"], "")
-            failed = event["error"] or FAILURE_TEXT.search(event["text"])
+            failed = event["error"] or _failure_lines(event["text"])
             if failed and CHECK_COMMAND.search(command):
                 sig = _signature(event["text"])
                 excerpt = next(
@@ -165,9 +171,10 @@ def _instances(item):
 
 def classify(item):
     """Type one drafted finding. Mechanical mistake classes become structure."""
-    if item.get("mechanical"):
+    seen = len({i["ref"] for i in _instances(item)})
+    if item.get("mechanical") and seen >= MIN_INSTANCES:
         return "encode-in-structure"
-    if item.get("obsolete_rule") or len({i["ref"] for i in _instances(item)}) >= MIN_INSTANCES:
+    if not item.get("mechanical") and (item.get("obsolete_rule") or seen >= MIN_INSTANCES):
         return "skill-or-rule-edit"
     if item.get("learning") and not item.get("already_documented"):
         return "repo-learning"
@@ -259,6 +266,13 @@ def validate(data):
             problems.append(f"{label}: evidence is required")
         if kind == "encode-in-structure" and item.get("structure") not in STRUCTURES:
             problems.append(f"{label}: structure must be one of {', '.join(STRUCTURES)}")
+        if kind == "encode-in-structure":
+            if not _has_text(item.get("proposal")):
+                problems.append(f"{label}: a structure finding needs a proposal")
+            if len({i["ref"] for i in _instances(item)}) < MIN_INSTANCES:
+                problems.append(
+                    f"{label}: a structure finding needs at least {MIN_INSTANCES} cited instances"
+                )
         if kind == "skill-or-rule-edit":
             if not _has_text(item.get("diff")):
                 problems.append(f"{label}: an edit finding needs a diff")
@@ -297,6 +311,9 @@ def write_findings(data, out):
 
 def approve(path, finding_id):
     data = _load_findings(path)
+    problems = validate(data)
+    if problems:
+        raise RetroError("refusing to approve an invalid findings file: " + "; ".join(problems))
     for item in data.get("findings", []):
         if item.get("id") == finding_id:
             if item.get("type") != "skill-or-rule-edit":

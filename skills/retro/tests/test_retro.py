@@ -208,3 +208,38 @@ def test_approve_refuses_a_non_edit_finding(tmp_path):
     run("build", FIX / "draft.json", "--out", out)
     assert run("approve", out, "line-length").returncode == 2
     assert by_id(json.loads(out.read_text()), "deps")["approved"] is False
+
+
+# ---- round 2
+
+
+def test_mechanical_class_needs_two_distinct_instances():
+    item = draft()["findings"][1]
+    item["instances"] = item["instances"][:1]
+    data = retro.build({"findings": [item]})
+    assert [f["type"] for f in data["findings"]] == ["nothing-met-the-bar"]
+    typed = built()
+    by_id(typed, "line-length")["instances"] = by_id(typed, "line-length")["instances"][:1]
+    assert any("at least 2" in p for p in retro.validate(typed))
+
+
+def test_structure_finding_needs_a_proposal():
+    data = built()
+    by_id(data, "line-length")["proposal"] = "  "
+    assert any("needs a proposal" in p for p in retro.validate(data))
+
+
+def test_passing_check_runs_are_not_failures():
+    out = json.loads(run("scan", FIX / "passing.jsonl").stdout)
+    assert out["mechanical_candidates"] == []
+
+
+def test_approve_refuses_an_invalid_file(tmp_path):
+    out = tmp_path / "f.json"
+    run("build", FIX / "draft.json", "--out", out)
+    data = json.loads(out.read_text())
+    data["findings"].reverse()
+    out.write_text(json.dumps(data))
+    result = run("approve", out, "deps")
+    assert result.returncode == 2 and "invalid" in result.stderr
+    assert by_id(json.loads(out.read_text()), "deps")["approved"] is False
