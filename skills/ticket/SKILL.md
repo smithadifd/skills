@@ -168,12 +168,15 @@ state`) that lands between them is accepted by the CLI, and the skill's event
 lands after it. The adapter therefore reads the events again after every
 append and, when anything landed in between, refuses by that writer's name and
 says its own event landed after it and was not undone; check both with the
-person. Two of those interleavings are repaired before
-the refusal: a claim that landed is released with a matching `session.closed`,
-and a close whose status write landed after an outside event is invalidated by
-a note, and the outside event's status, owner, claim and blocked-by fields are
-written back. Resume then reports the close as invalidated and does not treat
-the ticket as closed. The adapter never changes the ticket's status, owner, claim or
+person. Two of those interleavings are handled before
+the refusal. A claim that landed is released with a matching `session.closed`.
+A close whose status write landed after an outside event is invalidated by a
+note: it is detected and never silently trusted, and resume reports the close
+as invalidated and not closed, naming the outside event, its writer and the
+fields it set. The ledger CLI has no compare-and-set, so the skill never
+writes ticket state as a repair and does not undo the outside write's
+overwrite; the person reconciles status, owner, claim and blocked-by from the
+printed line. The adapter never changes the ticket's status, owner, claim or
 blocked-by fields, except that a confirmed close sets the status to `closed`
 and keeps the other three. A ticket someone has claimed for work stays claimed
 and can still be written.
