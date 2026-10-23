@@ -139,7 +139,7 @@ def test_kickoff_alone_uses_clean_home_fallback_and_three_notices(tmp_path):
 
 def test_skill_invocation_uses_installed_path():
     skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    assert "python3 ~/.claude/skills/kickoff/paths.py --slug <slug>" in skill, (
+    assert "python3 ${CLAUDE_SKILL_DIR}/paths.py --slug <slug>" in skill, (
         "INSTALL-PATH: kickoff instructions must invoke the installed resolver"
     )
     assert "topic_convention" in skill, (

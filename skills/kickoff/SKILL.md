@@ -65,7 +65,7 @@ down what it found.
 Resolve paths once before the interview:
 
 ```bash
-python3 ~/.claude/skills/kickoff/paths.py --slug <slug>
+python3 ${CLAUDE_SKILL_DIR}/paths.py --slug <slug>
 ```
 
 The command loads `skills/topic/topics_dir.py` by path when that resolver is
