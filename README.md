@@ -22,7 +22,7 @@ cd skills
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. |
 | `kickoff` | Turns an early project idea into a researched plan through questions and review points. |
 | `memory-gardener` | Reconciles a Claude memory directory. It reports stale, duplicated or oversized notes first, and only applies changes after you review the report. |
-| `pickup` | Resumes from a handoff note, rerunning its verified commands first and demoting any that now fail. |
+| `pickup` | Resumes from a handoff note, lists its verified commands, reruns only the ones you approve, and demotes any that fail or are not rerun. |
 | `pr` | Prepares a pull request for the current branch using the project's conventions. |
 | `review` | Checks code changes for bugs and security problems. |
 | `shape` | Tests a proposed design for risks and missing considerations before implementation. |

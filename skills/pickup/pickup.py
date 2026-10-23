@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Read a handoff note, recheck it, and print what to trust.
+"""Read a handoff note and show what to trust. Runs nothing unless asked.
 
     python3 pickup.py [NOTE_PATH] [--repo NAME] [--cwd DIR]
+    python3 pickup.py NOTE_PATH --rerun 1,3 [--cwd DIR]
 
-Without NOTE_PATH, uses the newest handoff-*.md in the temporary directory
-(narrowed by --repo when given). Every command in the note's Verified section
-is rerun; one that exits nonzero, or cannot run, is demoted to Claimed.
+Without NOTE_PATH, uses the newest note in the per-user notes directory under
+the temporary directory (only files owned by you, not group- or world-writable,
+not symlinks). The default run parses the note and lists its Verified commands
+numbered; it executes none of them. --rerun runs only the listed commands, and
+requires an explicit NOTE_PATH. A rerun command that exits nonzero or cannot
+run is demoted to Claimed; so is every command not rerun.
 A Verified line looks like:  - `command` => result
 """
 import argparse
 import glob
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,11 +26,37 @@ VERIFIED_LINE = re.compile(r"^- `(?P<cmd>[^`]+)`\s*(?:=>\s*(?P<result>.*))?$")
 RERUN_TIMEOUT = 120
 
 
+def notes_dir():
+    """The private per-user notes directory, or None when absent or unsafe."""
+    path = os.path.join(tempfile.gettempdir(), "handoff-notes-%d" % os.getuid())
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if (stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode)
+            or st.st_uid != os.getuid() or st.st_mode & 0o077):
+        return None
+    return path
+
+
 def find_note(repo=None):
-    """Newest handoff note in the temporary directory, or None."""
+    """Newest of your own handoff notes in the private directory, or None."""
+    base = notes_dir()
+    if base is None:
+        return None
     pattern = "handoff-%s-*.md" % (repo if repo else "*")
-    hits = glob.glob(os.path.join(tempfile.gettempdir(), pattern))
-    return max(hits, key=os.path.getmtime) if hits else None
+    best = None
+    for path in glob.glob(os.path.join(base, pattern)):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                or st.st_mode & 0o022):
+            continue
+        if best is None or st.st_mtime > best[0]:
+            best = (st.st_mtime, path)
+    return best[1] if best else None
 
 
 def parse_sections(text):
@@ -43,7 +74,10 @@ def written_at(text):
     m = re.search(r"^Written: (\S+)", text, re.MULTILINE)
     if not m:
         return None
-    return datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def latest_commit_time(cwd):
@@ -57,11 +91,14 @@ def latest_commit_time(cwd):
         return None
     if out.returncode != 0 or not out.stdout.strip():
         return None
-    return datetime.fromisoformat(out.stdout.strip())
+    try:
+        return datetime.fromisoformat(out.stdout.strip())
+    except ValueError:
+        return None
 
 
 def rerun(cmd, cwd):
-    """Run a Verified command. Returns (ok, detail)."""
+    """Run one Verified command. Returns (ok, detail)."""
     try:
         done = subprocess.run(
             cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=RERUN_TIMEOUT,
@@ -77,29 +114,36 @@ def _bullets(body):
     return [l.strip() for l in body.splitlines() if l.strip() and l.strip() != "none"]
 
 
-def pickup(text, cwd=None):
-    """Recheck a note. Returns a dict: stale, verified, demoted, claimed,
-    open_questions, skills, decisions."""
+def pickup(text, cwd=None, rerun_indices=()):
+    """Parse a note. Runs only the Verified commands whose 1-based number is in
+    rerun_indices (none by default). Returns a dict: stale, commands, verified,
+    demoted, not_rerun, claimed, open_questions, skills, decisions."""
     sections = parse_sections(text)
-    verified, demoted = [], []
+    commands = []
     for line in sections.get("Verified", "").splitlines():
         m = VERIFIED_LINE.match(line.strip())
-        if not m:
+        if m:
+            commands.append({"command": m.group("cmd"), "result": m.group("result") or ""})
+    verified, demoted, not_rerun = [], [], []
+    for number, item in enumerate(commands, 1):
+        if number not in rerun_indices:
+            not_rerun.append(item)
             continue
-        ok, detail = rerun(m.group("cmd"), cwd)
-        (verified if ok else demoted).append(
-            {"command": m.group("cmd"), "result": m.group("result") or "", "detail": detail}
-        )
+        ok, detail = rerun(item["command"], cwd)
+        (verified if ok else demoted).append(dict(item, detail=detail))
     claimed = _bullets(sections.get("Claimed but not verified", ""))
     claimed += ["- `%s` (was verified; failed on rerun: %s)" % (d["command"], d["detail"])
                 for d in demoted]
+    claimed += ["- `%s` (was verified; not rerun)" % d["command"] for d in not_rerun]
     wrote, head = written_at(text), latest_commit_time(cwd)
     return {
         "stale": bool(wrote and head and head > wrote),
         "written": wrote,
         "head_commit": head,
+        "commands": commands,
         "verified": verified,
         "demoted": demoted,
+        "not_rerun": not_rerun,
         "claimed": claimed,
         "open_questions": _bullets(sections.get("Open questions", "")),
         "skills": _bullets(sections.get("Skills to invoke next", "")),
@@ -109,13 +153,18 @@ def pickup(text, cwd=None):
 
 def report(result):
     out = []
-    if result["stale"]:
+    if result["written"] is None:
+        out.append("WARNING: the note has no readable Written date; cannot compare with commits.")
+    elif result["stale"]:
         out.append("WARNING: the repository has a commit newer than this note (%s > %s)."
                    % (result["head_commit"].isoformat(), result["written"].isoformat()))
-    out.append("Still verified (%d):" % len(result["verified"]))
+    out.append("Verified commands in the note (%d):" % len(result["commands"]))
+    out += ["  %d. `%s`" % (i, c["command"]) for i, c in enumerate(result["commands"], 1)]
+    out.append("Rerun and passed (%d):" % len(result["verified"]))
     out += ["  - `%s`" % v["command"] for v in result["verified"]]
-    out.append("Demoted to claimed (%d):" % len(result["demoted"]))
+    out.append("Rerun and failed, demoted to claimed (%d):" % len(result["demoted"]))
     out += ["  - `%s` (%s)" % (d["command"], d["detail"]) for d in result["demoted"]]
+    out.append("Not rerun, treated as claimed (%d)" % len(result["not_rerun"]))
     out.append("Claimed, not verified:")
     out += ["  " + c for c in result["claimed"]] or ["  none"]
     out.append("Open questions:")
@@ -125,20 +174,37 @@ def report(result):
     return "\n".join(out)
 
 
+def parse_indices(spec):
+    try:
+        return {int(p) for p in spec.split(",") if p.strip()}
+    except ValueError:
+        raise ValueError("--rerun takes comma-separated command numbers, got %r" % spec)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("note", nargs="?")
     ap.add_argument("--repo")
     ap.add_argument("--cwd", default=os.getcwd())
+    ap.add_argument("--rerun", help="comma-separated Verified command numbers to run")
     args = ap.parse_args(argv)
-    path = args.note or find_note(args.repo)
-    if not path or not os.path.isfile(path):
-        print("no handoff note found", file=sys.stderr)
+    if args.rerun is not None and not args.note:
+        print("pickup: --rerun needs an explicit note path", file=sys.stderr)
+        return 2
+    try:
+        indices = parse_indices(args.rerun) if args.rerun is not None else set()
+        path = args.note or find_note(args.repo)
+        if not path or not os.path.isfile(path):
+            print("pickup: no handoff note found", file=sys.stderr)
+            return 1
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        result = pickup(text, cwd=args.cwd, rerun_indices=indices)
+    except (OSError, ValueError) as exc:
+        print("pickup: %s" % exc, file=sys.stderr)
         return 1
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
     print("Note: " + path)
-    print(report(pickup(text, cwd=args.cwd)))
+    print(report(result))
     return 0
 
 

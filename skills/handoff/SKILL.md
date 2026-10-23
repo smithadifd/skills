@@ -45,19 +45,23 @@ reader with no memory of this conversation, so every line must stand alone.
    (one bullet each).
 3. **Run the script:**
    `python3 ~/.claude/skills/handoff/handoff.py --repo <repo-name> --slug <short-topic> --input <content.json>`
-   It prints the note's path. The default is `handoff-<repo>-<slug>.md` in the
-   temporary directory. Pass `--out <path>` only when the person names a path;
-   never write the note inside the repository on your own.
-4. **Report** the path, whether the script said it truncated the note, and the
-   one-line command to resume: `/pickup <path>`.
+   It prints the note's path and a line `truncated: yes` or `truncated: no`.
+   The default is `handoff-<repo>-<slug>.md` in a private per-user directory
+   (mode 0700) under the temporary directory; the file is mode 0600. Pass
+   `--out <path>` only when the person names a path; never write the note
+   inside the repository on your own.
+4. **Report** the path, the truncated line, and the command to resume:
+   `/pickup <path>`.
 
 ## What the script does
 
 - Redacts secret-shaped strings by pattern (cloud access keys, GitHub tokens,
-  `sk-` keys, bearer tokens, private-key blocks, `KEY=`, `TOKEN=`, `SECRET=`
-  and `PASSWORD=` assignments). Pattern matching is a net, not a guarantee, so
-  still keep secrets out of the content.
-- Caps the note at 20 KB and appends a visible truncation notice when it cuts.
+  Slack and `sk-` keys, bearer and `Authorization` headers, private-key
+  blocks, `NAME=value` and `NAME: value` for key, token, secret and password
+  names, and `--token`-style flags). Pattern matching is a net, not a
+  guarantee, so still keep secrets out of the content.
+- Caps the note at 20 KB. Over the cap it shortens the largest section bodies,
+  keeps every heading, and appends a visible truncation notice.
 - Never makes a commit.
 
 ## Commits
