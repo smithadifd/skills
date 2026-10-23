@@ -7,7 +7,8 @@ content.json maps section names to text (a string, or a list of strings that
 become bullet lines). Missing sections are written as "none". The Secrets
 section is always "none, redacted", whatever the input says.
 
-Default output: handoff-<repo>-<slug>.md in a private per-user directory
+Default output: handoff-<repo>-<slug>.md (a repo or slug that looks like a
+credential becomes redacted-<hex>) in a private per-user directory
 (mode 0700) under the temporary directory, file mode 0600. The note is never
 written inside a repository unless --out names a path there.
 """
@@ -15,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -85,6 +87,9 @@ _COLON = re.compile(r"\b(" + _NAME + r")(\s*:\s*)(" + _VALUE + ")", re.IGNORECAS
 _JSON_PAIR = re.compile(r"(\"" + _NAME + r"\"\s*:\s*)" + _DQ, re.IGNORECASE)
 
 
+REDACTED_TRIES = 5
+
+
 class NoteError(Exception):
     pass
 
@@ -151,6 +156,11 @@ def _section_text(value):
 HEADER_FIELD_MAX = 80
 
 
+def _oneline(value):
+    """The one whitespace-joined form that the title and the file name both check."""
+    return " ".join(str(value).split())
+
+
 def _bound(value):
     """One line, at most HEADER_FIELD_MAX characters, with a marker when cut."""
     value = " ".join(str(value).split())
@@ -163,7 +173,7 @@ def build_note(content, repo, slug, now=None):
     """Render the note. Returns (text, truncated). Every section is always
     present; when the note is too large, section bodies are cut, never headings."""
     now = now or datetime.now(timezone.utc)
-    repo, slug = _bound(repo), _bound(slug)
+    repo, slug = (_bound(redact(_oneline(v))) for v in (repo, slug))
     head = "# Handoff: %s / %s\n\nWritten: %s\n\n" % (
         repo, slug, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     bodies = {}
@@ -206,15 +216,45 @@ def notes_dir():
     return path
 
 
+def _name_part(value):
+    """File-name part for a user-supplied value, as (part, redacted). A value
+    that redaction would change, or whose cleaned-up form it would change, is
+    replaced by the stem "redacted" plus a random suffix, never a partly masked
+    name. The suffix is random (not a hash of the value, which could be
+    brute-forced)."""
+    line = _oneline(value)
+    safe = _safe(line)
+    if redact(line) != line or redact(safe) != safe:
+        return "redacted-" + secrets.token_hex(4), True
+    return safe, False
+
+
+def _target(repo, slug):
+    """(path, exclusive): exclusive when a redacted part must never reuse a file."""
+    (r, rr), (sl, sr) = _name_part(repo), _name_part(slug)
+    return os.path.join(notes_dir(), "handoff-%s-%s.md" % (r, sl)), rr or sr
+
+
 def default_path(repo, slug):
-    return os.path.join(notes_dir(), "handoff-%s-%s.md" % (_safe(repo), _safe(slug)))
+    return _target(repo, slug)[0]
 
 
 def write_note(content, repo, slug, out=None, now=None):
     """Write the note. Returns (path, truncated)."""
-    path = out or default_path(repo, slug)
     note, truncated = build_note(content, repo, slug, now=now)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+    if out:
+        path, fd = out, os.open(out, flags | os.O_TRUNC, 0o600)
+    else:
+        for _ in range(REDACTED_TRIES):
+            path, exclusive = _target(repo, slug)
+            try:
+                fd = os.open(path, flags | (os.O_EXCL if exclusive else os.O_TRUNC), 0o600)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise NoteError("could not pick an unused file name for a redacted note")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         os.fchmod(fh.fileno(), 0o600)
         fh.write(note)

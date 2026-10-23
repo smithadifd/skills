@@ -46,7 +46,8 @@ reader with no memory of this conversation, so every line must stand alone.
 3. **Run the script:**
    `python3 ${CLAUDE_SKILL_DIR}/handoff.py --repo <repo-name> --slug <short-topic> --input <content.json>`
    It prints the note's path and a line `truncated: yes` or `truncated: no`.
-   The default is `handoff-<repo>-<slug>.md` in a private per-user directory
+   The default is `handoff-<repo>-<slug>.md` (a repo or slug that looks like
+   a credential becomes `redacted-<hex>`) in a private per-user directory
    (mode 0700) under the temporary directory; the file is mode 0600. Pass
    `--out <path>` only when the person names a path; never write the note
    inside the repository on your own.
