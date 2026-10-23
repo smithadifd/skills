@@ -28,7 +28,7 @@ The adapters parse the return without its trailing record block. Without that, a
 
 ## 2. Validation
 
-`run_phase`, after the selected adapter has parsed the verdict and findings, checks only the record block. It performs no scan of prose, Issues, Evidence, headings or verdict lines for duration-shaped tokens, and it never asks whether the verdict really relies on an interval: the reviewer's declaration is the input, as every other claim in a verdict is.
+`run_phase` checks the record block first, before the selected adapter parses the verdict and findings and before the Jev fallback tries the other adapters or calls Jev. A return without a valid record is refused by the record's own name, never by a findings parse error, and never reaches an adapter or an external call. That check is the only one about time. It performs no scan of prose, Issues, Evidence, headings or verdict lines for duration-shaped tokens, and it never asks whether the verdict really relies on an interval: the reviewer's declaration is the input, as every other claim in a verdict is.
 
 | Condition | Refusal (`reason` = `<backend>: <name>: line <n>: <line, cut at 200 characters>`) |
 |---|---|
@@ -39,7 +39,7 @@ The adapters parse the return without its trailing record block. Without that, a
 | `none` beside a measured line, or `none` twice | `review_interval_contradictory`, naming the second of the two |
 | Two measured lines identical after trimming | `review_interval_duplicate`, naming the second |
 
-Every refusal is `status: failure`, exit `1`, `artifacts["review.md"]` verbatim and `findings.json` null, exactly as an adapter parse error is; the review is retried by running it again. The first failing line wins, in text order; within one measured line the form is checked (malformed, endpoints, duration) before its relation to the lines above it (contradictory, duplicate). On success the phase result always carries `intervals`: `[]` for `none`, otherwise the parsed records in order. The Jev fallback and Jev shadow paths run the same check on the same text; nothing is quoted or exempted for them either, and the shadow runs only after the check passes.
+Every refusal is `status: failure`, exit `1`, `artifacts["review.md"]` verbatim and `findings.json` null, exactly as an adapter parse error is; the review is retried by running it again. The first failing line wins, in text order; within one measured line the form is checked (malformed, endpoints, duration) before its relation to the lines above it (contradictory, duplicate). On success the phase result always carries `intervals`: `[]` for `none`, otherwise the parsed records in order. The Jev fallback and Jev shadow paths rely on the same check, made once on the same text before either can run; nothing is quoted or exempted for them either.
 
 Checks that are deliberately absent: no cross-check that the review text mentions the duration; no check that a measured record is used; no exemption for timeouts, bounds, shas, paths, section numbers, emphasis, quotes, code spans or fences, since none of those lines is read.
 
@@ -58,7 +58,7 @@ The instruction lives in the installed contracts, never in a per-review brief: a
 - This change lands the parser and every emitter text in this repository together, so a user installing this repository at any commit has a `reviewer` agent and a `review` skill that write the line the parser requires. Splitting them, parser first and prompts later, would refuse every otherwise valid review for anyone who installed between the two.
 - Stored results: a caller's receipt of an earlier review carries a verdict, a result digest and the like, not an INTERVAL record, and is never re-parsed. Old receipts and old verdict outputs stay valid; nothing is rewritten.
 - A review in progress across the switch: the next round is a fresh verdict under whatever adapter is installed when it runs; the earlier round reaches the reviewer as text and is not re-parsed.
-- A caller that pins this repository at a tag or commit, and keeps its own review prompts, should update in this order to keep its own tests green: (1) teach its prompts to end with the INTERVAL line while still pinned to the older adapter, which is safe because the older adapter reads `INTERVAL: none` as an incomplete record only when its prose scan also finds a duration, where it refused already, and reads a measured record in the same grammar; (2) move the pin to a release that includes this change, together with any copied fixtures and test stubs of the adapter. Between (1) and (2) the old prose scan still runs, so its refusals can occur until (2) lands; keep the two adjacent.
+- A caller that pins this repository at a tag or commit, and keeps its own review prompts, changes its prompts and moves its pin in one change: the prompts ask for the INTERVAL line, the pin moves to a release that includes this change, and any copied fixtures and test stubs of the adapter move with it. Neither half is safe alone. An adapter from before this change never removes a trailing `INTERVAL:` line (section 1), so on the older pin a return whose last section is Issues, Minor notes or `FINDINGS:` reads the record as prose in that section and fails the findings parse; prompts that ask for the line before the pin moves break those reviews. Moving the pin before the prompts change breaks the rest: this adapter refuses every return without the line as `review_interval_missing`.
 - The phase result's `intervals` key now appears on every success. A consumer that compared the full key set of a result must expect it.
 
 ## 5. What no longer exists
@@ -85,13 +85,12 @@ From the tests: every test of the deleted scan (reference forms, wrappers, shiel
 | Change | Where | Contents |
 |---|---|---|
 | 1 | this repository | The parser per sections 2 and 6, the tests and fixtures, the `reviewer` agent and `review` skill wording per section 3, and this document. One change, so no install of this repository ever has a parser that requires a line its own prompts do not ask for. |
-| 2 | a caller that composes its own review prompts | Its prompt texts ask for the last line (section 4, step 1). |
-| 3 | the same caller | Its pin of this repository moves to a release with change 1, with any copied adapter fixtures and test stubs (section 4, step 2). |
+| 2 | a caller that composes its own review prompts and pins this repository | One change: its prompt texts ask for the last line, and its pin of this repository moves to a release with change 1, with any copied adapter fixtures and test stubs (section 4). |
 
-Changes 2 and 3 belong to other repositories and come after change 1 and a release of it.
+Change 2 belongs to another repository and comes after change 1 and a release of it.
 
 ## 8. Non-goals and risks
 
 Non-goals: verifying that a declared interval is true or that the review mentions it; recording intervals in a caller's receipt; a v2 of `review-findings`; any change to how a caller chooses which message carries the verdict; the Jev shadow's payload trim.
 
-Risks: (1) A reviewer omits the line or puts it before Evidence. The refusal names the line and the review is run again; the installed contracts show the line in the block. (2) A model appends a sign-off after the line: refused as missing, retryable; the contracts say "last line". (3) A false `none`: accepted as an attestation, auditable through a pinned result digest (section 2). (4) Between a caller's prompt change and its pin move, the old prose scan still runs (section 4); keep those two changes adjacent. (5) This change deletes most of one file; read the surviving code in full rather than the diff.
+Risks: (1) A reviewer omits the line or puts it before Evidence. The refusal names the line and the review is run again; the installed contracts show the line in the block. (2) A model appends a sign-off after the line: refused as missing, retryable; the contracts say "last line". (3) A false `none`: accepted as an attestation, auditable through a pinned result digest (section 2). (4) A caller that changes its prompts and moves its pin in separate changes breaks reviews between them, whichever lands first (section 4); the two land as one change. (5) This change deletes most of one file; read the surviving code in full rather than the diff.

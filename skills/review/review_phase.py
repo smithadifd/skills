@@ -703,6 +703,14 @@ def run_phase(envelope: object) -> dict:
             None,
             None,
         )
+    # The record is checked before any adapter reads the return. A return
+    # whose last line is not a record would otherwise reach an adapter with
+    # that line still in its last section and fail as an unparsed section, and
+    # with the fallback on it would reach the other adapters and Jev first.
+    try:
+        intervals = _require_intervals(text)
+    except ParseError as exc:
+        return _result("failure", f"{backend}: {exc}", text, None)
     selected = ADAPTERS[backend]
     try:
         verdict, findings = selected(text)
@@ -711,12 +719,8 @@ def run_phase(envelope: object) -> dict:
             return _result("failure", f"{backend}: {exc}", text, None)
         parsed = _try_other_adapters(backend, text)
         if parsed is None:
-            return _consult_jev(backend, text)
+            return _consult_jev(backend, text, intervals)
         verdict, findings = parsed
-    try:
-        intervals = _require_intervals(text)
-    except ParseError as exc:
-        return _result("failure", f"{backend}: {exc}", text, None)
     source = "regex" if _jev_fallback_enabled(envelope) else None
     result = _finish(backend, verdict, findings, text, source=source)
     _attach_intervals(result, intervals)
@@ -818,7 +822,8 @@ def _record_jev_shadow(result: dict, regex_verdict: str, text: str) -> None:
     result["jev_reason"] = jev_reason
 
 
-def _consult_jev(backend: str, text: str) -> dict:
+def _consult_jev(backend: str, text: str, intervals: list[dict]) -> dict:
+    """Ask Jev for the verdict; `intervals` is the record run_phase checked."""
     try:
         client = JevClient()
         verdict, confidence = client.decide(text)
@@ -826,10 +831,6 @@ def _consult_jev(backend: str, text: str) -> dict:
         return _result("failure", str(exc), text, None)
     except Exception:
         return _result("failure", "jev: request failed", text, None)
-    try:
-        intervals = _require_intervals(text)
-    except ParseError as exc:
-        return _result("failure", f"{backend}: {exc}", text, None)
     result = _finish(backend, verdict, [], text, source="jev", confidence=confidence)
     return _attach_intervals(result, intervals)
 

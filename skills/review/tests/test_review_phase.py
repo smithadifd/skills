@@ -503,7 +503,8 @@ def test_run_phase_refuses_non_sentinel_prose_in_issues():
     text = (
         "## Verdict: REQUEST CHANGES\n\n"
         "### Issues\n"
-        "This paragraph is not a bullet or a numbered item at all.\n"
+        "This paragraph is not a bullet or a numbered item at all.\n\n"
+        "INTERVAL: none\n"
     )
     result = review_phase.run_phase(_envelope("claude-fresh", text))
     assert result["status"] == "failure", result
@@ -1145,7 +1146,7 @@ def test_grok_record_after_the_verdict_value_parses_and_before_it_refuses():
     assert _accepted(after, backend="grok-notools")["intervals"] == []
     before = "## FINDINGS\n- none\n\n## VERDICT\nINTERVAL: none\ncleared — fine\n"
     reason = _refused(before, backend="grok-notools")
-    assert reason == "grok-notools: no `## VERDICT` line reading cleared or flagged"
+    assert reason == "grok-notools: review_interval_missing: line 6: cleared — fine"
 
 
 def test_from_text_cli_refuses_a_missing_record_with_exit_1(tmp_path: Path):
@@ -1175,9 +1176,9 @@ def _jev_fallback_run(monkeypatch, text: str, backend: str = "claude-fresh") -> 
     return review_phase.run_phase(envelope)
 
 
-def test_jev_fallback_refuses_a_missing_record_after_jev_decides(monkeypatch):
+def test_jev_fallback_refuses_a_missing_record_before_jev_is_asked(monkeypatch):
     result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n")
-    assert _ApprovingJev.calls == 1
+    assert _ApprovingJev.calls == 0
     assert result["status"] == "failure"
     assert result["reason"] == (
         "claude-fresh: review_interval_missing: line 1: The diff looks reasonable."
@@ -1219,6 +1220,79 @@ def test_jev_shadow_runs_only_after_the_record_passes(monkeypatch):
     assert accepted["intervals"] == [MEASURED_RECORD]
     assert accepted["jev_verdict"] == "approved"
     assert _ApprovingJev.calls == 1
+
+
+# Each shape ends on a findings section, so a last line that is not a record
+# would be foreign prose in that section if an adapter read it first. `{tail}`
+# starts on the line given.
+_SECTION_LAST_SHAPES = [
+    pytest.param(
+        "claude-fresh",
+        "## Verdict: APPROVE\n\nChecked the change.\n\n### Issues\n- none\n{tail}\n",
+        7,
+        id="claude-issues",
+    ),
+    pytest.param(
+        "claude-fresh",
+        "## Verdict: APPROVE\n\nChecked the change.\n\n### Issues\n- none\n\n"
+        "### Minor notes\n- `a.py:3` — the helper name is vague\n{tail}\n",
+        10,
+        id="claude-minor-notes",
+    ),
+    pytest.param(
+        "claude-fresh",
+        "VERDICT: APPROVE\n\nFINDINGS:\n- none\n{tail}\n",
+        5,
+        id="claude-headless-findings",
+    ),
+    pytest.param(
+        "grok-notools",
+        "## VERDICT\ncleared — fine\n\n## FINDINGS\n- none\n{tail}\n",
+        6,
+        id="grok-findings",
+    ),
+    pytest.param(
+        "grok-notools",
+        "VERDICT: cleared — fine\n\nFINDINGS:\n- none\n{tail}\n",
+        5,
+        id="grok-headless-findings",
+    ),
+]
+
+
+@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
+@pytest.mark.parametrize("last", ["**INTERVAL: none**", "Happy to look again."])
+@pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
+def test_section_ending_in_a_non_record_line_is_refused_as_missing(
+    monkeypatch, backend, shape, tail_line, last, jev_fallback
+):
+    text = shape.format(tail=last)
+    if jev_fallback:
+        result = _jev_fallback_run(monkeypatch, text, backend=backend)
+        assert _ApprovingJev.calls == 0
+        assert result["status"] == "failure"
+        reason = result["reason"]
+    else:
+        reason = _refused(text, backend=backend)
+    assert reason == f"{backend}: review_interval_missing: line {tail_line}: {last}"
+
+
+@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
+@pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
+def test_malformed_record_under_an_unparsed_section_is_refused_by_its_own_name(
+    monkeypatch, backend, shape, tail_line, jev_fallback
+):
+    text = shape.format(tail="Happy to look again.\nINTERVAL: maybe")
+    if jev_fallback:
+        result = _jev_fallback_run(monkeypatch, text, backend=backend)
+        assert _ApprovingJev.calls == 0
+        assert result["status"] == "failure"
+        reason = result["reason"]
+    else:
+        reason = _refused(text, backend=backend)
+    assert reason == (
+        f"{backend}: review_interval_malformed: line {tail_line + 1}: INTERVAL: maybe"
+    )
 
 
 RECORD_LIMIT_SECONDS = 1.0
