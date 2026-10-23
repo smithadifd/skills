@@ -231,6 +231,10 @@ After plan go:
 6. Stop after a passing review or after round three. The cap counts every
    round the store holds for the ticket, across resumes. At the cap, stamp the
    unresolved findings and exact next evidence needed; do not start round four.
+   The cap stops the pass only once its stop stamp is stored. If a session
+   ended after round three was stored but before that stamp, a resume reports
+   `cap stop not recorded` and the pass stays live with one allowed step:
+   `record_cap_stop()`, which writes the stamp and ends the pass.
 
 ## 6. Outward go — hard stop
 
@@ -243,10 +247,14 @@ request, Jira comment, status change, message, merge, release, or deploy. Call
 `require_outward_go()` before each outward action; it checks the store.
 
 After approval, perform only the listed outward actions under the target
-repository's rules. Then call `close(point, refs=…, next_skills=…)`: it writes
-a pending close stamp and reads the card back to confirm the stop point, both
-go decisions, the review rounds, next skills, and references; only then does
-it confirm the close. A mismatch raises and leaves the ticket open, in the
+repository's rules. Then call `close(point, refs=…, next_skills=…)`. It first
+checks the card: both go decisions, the review rounds, and a final review that
+passed every criterion, with its evidence, to an outward go stop. It refuses,
+writing no close stamp, when any of these fails. It then writes a pending
+close stamp and reads the card back to confirm the stop point, next skills,
+references and the same checks; only then does it confirm the close, and it
+runs them once more on the confirmed card. A resume applies the same checks to
+a closed card. A mismatch raises and leaves the ticket open, in the
 store and on resume; repair the card before reporting the ticket closed.
 
 ## More-information exits

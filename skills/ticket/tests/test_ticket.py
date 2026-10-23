@@ -1357,3 +1357,153 @@ def test_skill_tree_assembles_no_hidden_paths_or_environment_names():
         for line in disguised_lines(path.read_text(encoding="utf-8")):
             offenders.append(f"{path.relative_to(SKILL_DIR)}: {line.strip()}")
     assert offenders == []
+
+
+# Comment markers and entities in recorded text stay inside the card's one
+# machine comment, and read back exactly as they were recorded.
+
+MARKERS = "ends here --> starts here <!-- and & keeps its ampersand &amp; <b>"
+
+
+def test_recorded_comment_markers_leave_one_comment_block_and_round_trip(tmp_path):
+    repo = init_ignored_repo(tmp_path)
+    store = ticket.MarkdownStore(repo, KEY, TITLE)
+    store.record_decision(
+        ticket.DecisionRecord(
+            "the person",
+            "person",
+            "settled",
+            ticket.DecisionSource("ratification", "conversation:7"),
+            MARKERS,
+            ({"type": "ticket", "id": KEY},),
+            MARKERS,
+            "plan",
+        )
+    )
+    store.record_tried(ticket.TriedRecord(MARKERS, "build", MARKERS))
+    body = store.path.read_text(encoding="utf-8")
+    assert body.count("<!--") == 1
+    assert body.count("-->") == 1
+    assert body.rstrip("\n").endswith("-->")
+    card = ticket.MarkdownStore(repo, KEY, TITLE).read_card()
+    assert (card["decisions"][0]["verbatim"], card["decisions"][0]["effect"]) == (MARKERS, MARKERS)
+    assert card["tried"] == [{"what": MARKERS, "phase": "build", "outcome": MARKERS}]
+
+
+# One validator decides whether a card may close: before the close stamp is
+# written, after it is read back, and after the close is confirmed.
+
+NOT_PASSED = "the last review round did not pass every criterion to an outward go stop"
+
+
+def final_review_to_changes(card):
+    card["reviews"][-1]["verdict"] = "changes"
+
+
+def test_close_refuses_a_card_whose_final_review_is_changes_and_writes_no_close(tmp_path):
+    store = concrete_store(tmp_path)
+    session = approved_for_close(store)
+    edit_card(store, final_review_to_changes)
+    before = store.read_card()
+    with pytest.raises(ticket.StoreUnavailable, match=NOT_PASSED):
+        session.close("Done.", refs=("example/repo#14",))
+    after = store.read_card()
+    # The refusal ends the pass, which releases its claim; nothing else changes.
+    assert after == {**before, "pass": None}
+    assert after["status"] == "open"
+    assert [stamp["phase"] for stamp in after["stamps"]] == ["plan", "review"]
+
+
+class FlipsTheFinalReviewWithTheCloseStamp:
+    """The store changes the final review while it writes the pending close stamp."""
+
+    def write_stamp(self, point, phase, next_skills=(), refs=()):
+        super().write_stamp(point, phase, next_skills, refs)
+        if phase == "close":
+            edit_card(self, final_review_to_changes)
+
+
+class FlipsTheFinalReviewWithTheConfirm:
+    """The store changes the final review while it confirms the close."""
+
+    def confirm_close(self, position, point):
+        super().confirm_close(position, point)
+        edit_card(self, final_review_to_changes)
+
+
+def test_close_read_back_refuses_a_final_review_that_changed_before_the_confirm(tmp_path):
+    store = concrete_store(tmp_path, FlipsTheFinalReviewWithTheCloseStamp)
+    session = approved_for_close(store)
+    with pytest.raises(ticket.StoreUnavailable, match="close read-back failed: .*" + NOT_PASSED):
+        session.close("Done.", refs=("example/repo#14",))
+    card = store.read_card()
+    assert card["status"] == "open"
+    assert card["stamps"][-1]["close"] is False
+
+
+def test_close_final_read_back_refuses_a_final_review_that_changed_with_the_confirm(tmp_path):
+    store = concrete_store(tmp_path, FlipsTheFinalReviewWithTheConfirm)
+    session = approved_for_close(store)
+    with pytest.raises(ticket.StoreUnavailable, match="close read-back failed: .*" + NOT_PASSED):
+        session.close("Done.", refs=("example/repo#14",))
+    assert session.phase == "outward_go"
+    assert resume(store).phase != "closed"
+
+
+# Three recorded reviews stop the pass only once the cap stop stamp is stored.
+
+CAP_POINT = "Review did not converge after round three."
+
+
+class LosesTheCapStamp:
+    """The process dies after round three is stored and before its cap stop stamp."""
+
+    lose = True
+
+    def write_stamp(self, point, phase, next_skills=(), refs=()):
+        if self.lose and point == CAP_POINT:
+            raise RuntimeError("the process died before the cap stop stamp")
+        super().write_stamp(point, phase, next_skills, refs)
+
+
+def test_a_lost_cap_stop_stamp_resumes_retryable_until_the_stamp_is_written(tmp_path):
+    store = concrete_store(tmp_path, LosesTheCapStamp)
+    session = to_build(store)
+    session.record_review("changes", evidence="reviews/1")
+    session.record_review("changes", evidence="reviews/2")
+    with pytest.raises(RuntimeError, match="before the cap stop stamp"):
+        session.record_review("changes", evidence="reviews/3")
+    card = store.read_card()
+    assert len(card["reviews"]) == 3
+    assert CAP_POINT not in [stamp["point"] for stamp in card["stamps"]]
+    assert card["pass"] is None
+
+    # Resume reports the missing stop and keeps the pass live to write it.
+    store.lose = False
+    resumed = resume(store)
+    assert resumed.phase == "cap_stop"
+    assert resumed.live
+    assert any("cap stop not recorded" in line for line in resumed.reconciliation)
+    # Writing that stamp is the only action: a fourth review and other stops are refused.
+    with pytest.raises(ticket.TicketError):
+        resumed.record_review("changes", evidence="reviews/4")
+    with pytest.raises(ticket.TicketError):
+        resumed.more_info("person", "Which API owns retries?")
+    with pytest.raises(ticket.TicketError):
+        resumed.record_tried("Retry in the client.")
+    assert len(store.read_card()["reviews"]) == 3
+
+    resumed.record_cap_stop()
+    assert (resumed.phase, resumed.live) == ("stopped", False)
+    stamps = store.read_card()["stamps"]
+    assert (stamps[-1]["point"], stamps[-1]["phase"]) == (CAP_POINT, "review")
+    assert stamps[-1]["next_skills"] == ["ticket", "review"]
+    assert stamps[-1]["refs"] == [".ticket/EK-14.md", "reviews/3"]
+    again = resume(store)
+    assert (again.phase, again.reconciliation) == ("stopped", ())
+
+
+def test_record_cap_stop_is_refused_outside_the_cap_stop_state():
+    session = to_build(MemoryStore())
+    with pytest.raises(ticket.TicketError, match="expected phase cap_stop"):
+        session.record_cap_stop()
