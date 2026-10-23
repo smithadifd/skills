@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -145,7 +146,7 @@ def build_note(content, repo, slug, now=None):
     """Render the note. Returns (text, truncated). Every section is always
     present; when the note is too large, section bodies are cut, never headings."""
     now = now or datetime.now(timezone.utc)
-    repo, slug = _bound(repo), _bound(slug)
+    repo, slug = (_bound(redact(" ".join(str(v).split()))) for v in (repo, slug))
     head = "# Handoff: %s / %s\n\nWritten: %s\n\n" % (
         repo, slug, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     bodies = {}
@@ -189,11 +190,15 @@ def notes_dir():
 
 def _name_part(value):
     """File-name part for a user-supplied value. A value that redaction would
-    change is replaced by the fixed stem, never a partly masked name."""
+    change, or whose cleaned-up form it would change, is replaced by the stem
+    "redacted" plus a random suffix, never a partly masked name. The suffix is
+    random (not a hash of the value, which could be brute-forced) so two such
+    values never share, and so never overwrite, one file."""
     value = str(value)
-    if redact(value) != value:
-        return "redacted"
-    return _safe(value)
+    safe = _safe(value)
+    if redact(value) != value or redact(safe) != safe:
+        return "redacted-" + secrets.token_hex(4)
+    return safe
 
 
 def default_path(repo, slug):

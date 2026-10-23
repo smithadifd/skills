@@ -1,6 +1,7 @@
 """Stdlib-only tests for redaction, the size cap, the note layout and file safety."""
 import json
 import os
+import re
 import stat
 import tempfile
 
@@ -224,7 +225,7 @@ def test_default_path_and_stdout_carry_no_slug_credential(private_tmp, capsys, s
     assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE]) == 0
     out = capsys.readouterr().out
     path = out.splitlines()[0]
-    assert os.path.basename(path) == "handoff-r-redacted.md"
+    assert re.fullmatch(r"handoff-r-redacted-[0-9a-f]{8}\.md", os.path.basename(path))
     assert os.path.exists(path)
     assert needle not in out and needle not in path
     assert needle not in os.listdir(os.path.dirname(path))[0]
@@ -233,7 +234,7 @@ def test_default_path_and_stdout_carry_no_slug_credential(private_tmp, capsys, s
 @pytest.mark.parametrize("slug,needle", CRED_SLUGS)
 def test_default_path_helper_uses_fixed_stem_for_a_credential(private_tmp, slug, needle):
     path = handoff.default_path("r", slug)
-    assert os.path.basename(path) == "handoff-r-redacted.md"
+    assert re.fullmatch(r"handoff-r-redacted-[0-9a-f]{8}\.md", os.path.basename(path))
 
 
 def test_credential_in_repo_argument_is_not_a_file_name(private_tmp, capsys):
@@ -241,7 +242,7 @@ def test_credential_in_repo_argument_is_not_a_file_name(private_tmp, capsys):
     assert handoff.main(["--repo", repo, "--slug", "s", "--input", FIXTURE]) == 0
     out = capsys.readouterr().out
     assert "a1b2c3d4" not in out
-    assert os.path.basename(out.splitlines()[0]) == "handoff-redacted-s.md"
+    assert re.fullmatch(r"handoff-redacted-[0-9a-f]{8}-s\.md", os.path.basename(out.splitlines()[0]))
 
 
 def test_ordinary_slug_path_is_unchanged(private_tmp):
@@ -255,3 +256,25 @@ def test_explicit_out_path_is_unaffected_by_slug_redaction(private_tmp, capsys):
     assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE, "--out", str(out)]) == 0
     assert capsys.readouterr().out.splitlines()[0] == str(out)
     assert "zq9w8e7r" not in out.read_text()
+
+
+def test_two_credential_slugs_keep_both_notes(private_tmp, capsys):
+    paths = []
+    for slug in ("token=" + "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2", "x Authorization: Bearer zq9w8e7r"):
+        assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE]) == 0
+        paths.append(capsys.readouterr().out.splitlines()[0])
+    assert paths[0] != paths[1]
+    assert all(os.path.exists(p) for p in paths)
+
+
+def test_joined_pieces_that_look_like_a_secret_are_not_a_file_name(private_tmp):
+    path = handoff.default_path("r", "rotate sk-live abcdefghijklmnop")
+    assert "abcdefghijklmnop" not in path
+    assert re.fullmatch(r"handoff-r-redacted-[0-9a-f]{8}\.md", os.path.basename(path))
+
+
+def test_token_straddling_the_header_limit_leaves_no_bytes_in_the_note():
+    token = "ghp_" + "QZ" * 12
+    slug = "a" * (handoff.HEADER_FIELD_MAX - 10) + " " + token
+    note, _ = handoff.build_note({"Goal": "g"}, "r", slug)
+    assert "QZQZ" not in note and "ghp_" not in note
