@@ -6,17 +6,16 @@ Why: earlier designs kept some of the section. One kept the text after the crede
 
 ## 1. The key grammar
 
-A key is one of these names, compared case-insensitively:
+A key is one of these names, compared case-insensitively (only the name; the escape markers below are not):
 
 - `Authorization`
-- `Proxy-Authorization`
 - `HTTP_AUTHORIZATION`
 - `REDIRECT_HTTP_AUTHORIZATION`
 - `HTTP_PROXY_AUTHORIZATION`
 
-The name must stand alone as a token: the character before it is not a letter, digit, underscore or dash, and the character after it is not a letter, digit or underscore. So `reauthorization`, `authorizations` and `authorization_url` are not keys, and a prefix such as `X-` or `MY_` is not part of a key unless it forms one of the names above.
+The name must stand alone as a token: the character before it is not a letter, digit or underscore, and the character after it is not a letter, digit or underscore. So `reauthorization`, `authorizations` and `authorization_url` are not keys, and a prefix such as `MY_` is not part of a key unless it forms one of the names above. A dash is a boundary on both sides, so `Proxy-Authorization`, `X-Authorization`, `X-Proxy-Authorization` and `Authorization-related` are all keys through the plain name. This keeps every form the earlier single-header pattern (`\bAuthorization` followed by `:` or `=` and a scheme) redacted; see section 6 for the comparison.
 
-Escapes and encodings: a letter or digit before the name still counts as a boundary when it ends a written escape sequence or a percent-encoded byte, because then it stands for a separator, not a word character. The accepted forms are `\n`, `\r`, `\t`, `\xHH` and `\uHHHH` (so `"…\r\nAuthorization: …"` and `"x\tAuthorization: …"` are keys, and so is the doubly escaped `\\r\\nAuthorization`), and `%HH` and `%25HH` (so `%22Authorization%22%3A…` and the twice-encoded `%2522Authorization` are keys).
+Escapes and encodings: a letter or digit before the name still counts as a boundary when it ends a written escape sequence or a percent-encoded byte, because then it stands for a separator, not a word character. The accepted forms are the lowercase `\n`, `\r`, `\t`, `\xHH` and `\uHHHH` (so `"…\r\nAuthorization: …"` and `"x\tAuthorization: …"` are keys, and so is the doubly escaped `\\r\\nAuthorization`), and `%HH` and `%25HH` (so `%22Authorization%22%3A…` and the twice-encoded `%2522Authorization` are keys). An uppercase `\N`, `\X0a` or `\U000a` is not an escape, so a name right after it runs on from a letter and is not a key.
 
 Percent-encoded letters inside the name (`%41uthorization`) are not decoded. URL encoders do not encode letters, digits, `-` or `_` (RFC 3986 calls them unreserved), so a real encoded key keeps the name in plain letters, as in `%22Authorization%22`.
 
@@ -36,7 +35,7 @@ Lost: the whole text of every section that holds a key, including the parts that
 
 This is acceptable for a resume note: it records where the work stood, and a command can be rebuilt from the repository or shell history, while a credential persisted in a note cannot be taken back. Keep Authorization mentions in their own short section, or out of the note.
 
-Not covered: a custom header whose name is not one of the five (for example `X-Authorization: …` or `MY_AUTHORIZATION=…`), a name joined to a longer word by a plain letter (curl's unspaced `-HAuthorization:…`, `setAuthorizationHeader(…)`), other escapes before the name (octal `\012`, Python's `\U0000000a`, percent-encoding three times or more), and percent-encoded letters inside the name. The other patterns may still catch their values.
+Not covered: a name joined to a prefix by an underscore that is not one of the names above (for example `MY_AUTHORIZATION=…`), a name joined to a longer word by a plain letter (curl's unspaced `-HAuthorization:…`, `setAuthorizationHeader(…)`), other escapes before the name (octal `\012`, Python's `\U0000000a`, percent-encoding three times or more), and percent-encoded letters inside the name. The other patterns may still catch their values.
 
 ## 4. Required tests
 
@@ -111,6 +110,15 @@ Escapes and encodings:
 | E07 | `q=%7B%22Authorization%22%3A%22Basic dXNlcjpwYXNz%22%7D` |
 | E08 | `next=%2522Authorization%2522%253A%2522Basic dXNlcjpwYXNz` |
 
+A dash before or after the name:
+
+| # | Input |
+|---|---|
+| D01 | `X-Authorization: Basic dXNlcjpwYXNz` |
+| D02 | `X-Proxy-Authorization: Digest username="u", response="tailsecret"` |
+| D03 | `curl -H "x-authorization: Token tailsecret" https://x` |
+| D04 | `the Authorization-related fix landed` `\n` `next: tailsecret` (prose, redacted) |
+
 Not keys, and sections without a key:
 
 | # | Input | Expected |
@@ -119,6 +127,11 @@ Not keys, and sections without a key:
 | N02 | `two authorizations are pending` | unchanged |
 | N03 | `see authorization_url in the config` | unchanged |
 | N04 | `kept line` `\n` `DB_PASSWORD=hunter2fake and ghp_<token>` | `kept line` `\n` `DB_PASSWORD=R and R` (the other patterns as before) |
+| N05 | `x\NAuthorization` | unchanged (uppercase is not an escape) |
+| N06 | `x\RAuthorization` | unchanged |
+| N07 | `x\TAuthorization` | unchanged |
+| N08 | `x\X0aAuthorization` | unchanged |
+| N09 | `x\U000aAuthorization` | unchanged |
 
 Sections, the header and size:
 
@@ -139,9 +152,10 @@ Each mutation is applied on a scratch copy and must turn the named tests red; re
 | Drop the `REDIRECT_HTTP_` name | K16 |
 | Drop the `HTTP_PROXY_` name | K17 |
 | Drop the `HTTP_` name | K15 |
-| Drop the `Proxy-` name | K14 |
+| A dash before the name blocks the key | K14, D01–D03 |
 | Drop the quoted-key shape (a key followed by a quote is not a key) | K04–K09 |
-| Match the name case-sensitively | every K, L and E case except K12, K15–K17, plus S01–S03, T01 and the general secret-shape test |
+| Match the name case-sensitively | every K, L, E and D case except K12, K15–K17, plus S01–S03, T01 and the general secret-shape test |
+| Case-insensitive over the whole pattern, escape markers included | N05–N09 |
 | Drop the `\n` `\r` `\t` escape boundary | E01–E04 |
 | Drop the `\xHH` escape boundary | E05 |
 | Drop the `\uHHHH` escape boundary | E06 |
@@ -151,3 +165,9 @@ Each mutation is applied on a scratch copy and must turn the named tests red; re
 | Redact the header from the key instead of whole | S03 |
 | A key in one section also redacts every later section | S02 |
 | A key in any section redacts every section | S01, S02 |
+
+## 6. Comparison with the earlier pattern
+
+Before this rule, one pattern redacted the value after `\bAuthorization` followed by `:` or `=` and a `Basic`, `Bearer`, `Token` or `Digest` scheme. Every section that pattern matches holds a key under this rule, so it is redacted whole: the earlier pattern's word boundary is a non-word character before the name, and this rule's boundary accepts every such character (a dash included), plus escapes and percent bytes.
+
+Checked by a generated probe: 50 prefixes (dashes, underscores, letters, digits, quotes, brackets, escapes in both cases, percent bytes, non-ASCII), 14 spellings of the names (mixed case, dotless and dotted i), 9 separators, 7 schemes and 5 surroundings, 220 500 inputs. The earlier pattern matches 106 470 of them; this rule finds a key in every one, and no input whose credential the earlier code removed keeps it here. Run against the version before the dash fix, the same probe reports 12 375 such inputs (all with a dash before the name).

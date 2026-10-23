@@ -81,6 +81,11 @@ KEYED = [
     ("E06", '{"h": "x\\u000aAuthorization: Basic %s"}' % B64),
     ("E07", "q=%%7B%%22Authorization%%22%%3A%%22Basic %s%%22%%7D" % B64),
     ("E08", "next=%%2522Authorization%%2522%%253A%%2522Basic %s" % B64),
+    # A dash before the name, as in custom headers.
+    ("D01", "X-Authorization: Basic %s" % B64),
+    ("D02", 'X-Proxy-Authorization: Digest username="u", response="tailsecret"'),
+    ("D03", 'curl -H "x-authorization: Token tailsecret" https://x'),
+    ("D04", "the Authorization-related fix landed\nnext: tailsecret"),
 ]
 
 # Text where the name runs on into a longer word: not a key, kept unchanged.
@@ -88,6 +93,13 @@ NOT_KEYS = [
     ("N01", "the reauthorization flow is done"),
     ("N02", "two authorizations are pending"),
     ("N03", "see authorization_url in the config"),
+    # Escape markers are lowercase only: an uppercase letter after the
+    # backslash is not an escape, so the name runs on from a letter.
+    ("N05", "x\\NAuthorization"),
+    ("N06", "x\\RAuthorization"),
+    ("N07", "x\\TAuthorization"),
+    ("N08", "x\\X0aAuthorization"),
+    ("N09", "x\\U000aAuthorization"),
 ]
 
 

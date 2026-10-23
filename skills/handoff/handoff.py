@@ -60,20 +60,21 @@ _PATTERNS = [
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
 ]
 # An Authorization key: one of these names, case-insensitive, not run on from
-# or into a longer word (a letter, digit, underscore or dash before it, or a
-# letter, digit or underscore after it, makes it part of another word). A
-# letter or digit that ends a written escape (\n, \r, \t, \xHH, \uHHHH) or a
-# percent-encoded byte (%HH, %25HH) is a boundary, not part of a word. No
+# or into a longer word (a letter, digit or underscore on either side makes
+# it part of another word; a dash does not, so X-Authorization and
+# Proxy-Authorization are keys through the plain name). A
+# letter or digit that ends a written escape (\n, \r, \t, \xHH, \uHHHH, all
+# lowercase) or a percent-encoded byte (%HH, %25HH) is a boundary. Only the
+# name is case-insensitive, so \N or \X0a is not an escape. No
 # separator is required, so prose mentions count as keys too. A section that
 # holds a key is redacted whole.
 # See references/authorization-redaction.md.
 _AUTH_KEY = re.compile(
-    r"(?:(?<![A-Za-z0-9_-])"
+    r"(?:(?<![A-Za-z0-9_])"
     r"|(?<=\\[nrt])|(?<=\\x[0-9A-Fa-f]{2})|(?<=\\u[0-9A-Fa-f]{4})"
     r"|(?<=%[0-9A-Fa-f]{2})|(?<=%25[0-9A-Fa-f]{2}))"
-    r"(?:REDIRECT_HTTP_|HTTP_PROXY_|HTTP_|PROXY-)?AUTHORIZATION"
+    r"(?i:(?:REDIRECT_HTTP_|HTTP_PROXY_|HTTP_)?AUTHORIZATION)"
     r"(?![A-Za-z0-9_])",
-    re.IGNORECASE,
 )
 _FLAG = re.compile(
     r"(--[A-Za-z0-9-]*(?:key|token|secret|password|passwd)[A-Za-z0-9-]*)(\s+|=)(?!-)(" + _VALUE + ")",
