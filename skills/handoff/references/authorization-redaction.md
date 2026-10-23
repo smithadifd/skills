@@ -16,6 +16,10 @@ A key is one of these names, compared case-insensitively:
 
 The name must stand alone as a token: the character before it is not a letter, digit, underscore or dash, and the character after it is not a letter, digit or underscore. So `reauthorization`, `authorizations` and `authorization_url` are not keys, and a prefix such as `X-` or `MY_` is not part of a key unless it forms one of the names above.
 
+Escapes and encodings: a letter or digit before the name still counts as a boundary when it ends a written escape sequence or a percent-encoded byte, because then it stands for a separator, not a word character. The accepted forms are `\n`, `\r`, `\t`, `\xHH` and `\uHHHH` (so `"…\r\nAuthorization: …"` and `"x\tAuthorization: …"` are keys, and so is the doubly escaped `\\r\\nAuthorization`), and `%HH` and `%25HH` (so `%22Authorization%22%3A…` and the twice-encoded `%2522Authorization` are keys).
+
+Percent-encoded letters inside the name (`%41uthorization`) are not decoded. URL encoders do not encode letters, digits, `-` or `_` (RFC 3986 calls them unreserved), so a real encoded key keeps the name in plain letters, as in `%22Authorization%22`. Only a hand-built string would encode them, and matching that would mean a second, decoding pass for no input seen in practice.
+
 Nothing else is required. A key needs no separator, quote or bracket around it, so every shape is covered by the same test: a bare header (`Authorization: …`), an assignment (`AUTHORIZATION=…`, `"Authorization" = …`), a mapping key (`{"Authorization": …}`, `'Authorization' => …`), a quoted-key tuple or call argument (`("Authorization", …)`, `headers.add('Authorization', …)`), and a space-separated config line (`proxy_set_header Authorization "…";`).
 
 Prose: a mention in a sentence ("the Authorization header is required") is also a key, and the rest of that section is redacted. This is the over-redacting side on purpose. A rule that told prose from a key would need a separator, and real credential forms have none (`proxy_set_header Authorization "Basic …"`, `RequestHeader set Authorization "…"`, `Authorization header: Basic …`), so any such condition would reopen a leak.
@@ -31,19 +35,26 @@ Prose: a mention in a sentence ("the Authorization header is required") is also 
 
 The redacted span becomes one `[REDACTED]`, so the output is the section text up to and including the key, then `[REDACTED]`, and nothing after it: `Authorization[REDACTED]`, `curl -H "Authorization[REDACTED]`, `{"Authorization[REDACTED]`. No closing quote is added.
 
-This step runs before the other `redact()` patterns (token shapes, `*_TOKEN=` assignments and the rest), so none of them can consume the key before it is found; they then run on what remains, unchanged.
+## 4. The other patterns, before the key
 
-## 4. Cost
+The other `redact()` patterns (token shapes, `*_TOKEN=` assignments, `NAME: value`, JSON pairs, `--token`-style flags) still redact the text before the key. Two orderings each leak, so neither is used:
+
+- Running them first lets one of them consume the key: `--token Authorization: Basic <b64>` becomes `--token [REDACTED] Basic <b64>`, and the key is gone before it is looked for.
+- Cutting at the key first removes the closing quote they need: in `API_TOKEN="prefixsecret Authorization: …"` the quoted value no longer closes, so `prefixsecret` is kept.
+
+Instead, the key is found on the original text, and the other patterns are matched on the original text too. Every part they would replace that starts before the key is masked, and a part that runs into the key is masked up to the key. They are matched once more on the text before the key closed by a `"` and once by a `'`, so a quoted value that has no closing quote at all is masked too. Overlapping or adjacent masks become one `[REDACTED]`. The output is the masked text before the key, the key, and `[REDACTED]`. A section with no key is redacted by the other patterns exactly as before.
+
+## 5. Cost
 
 Lost: everything after the key in that section. That includes the benign rest of a header line (`-X POST`, a URL, a trailing comment, the other pairs of a JSON object), every later line of the section (the rest of a multi-line command, later list items), and, after a prose mention, the rest of that section's prose. Other sections are untouched.
 
 This is acceptable for a resume note: it records where the work stood, and a command can be rebuilt from the repository or shell history, while a credential persisted in a note cannot be taken back. Keep Authorization mentions out of the sections that matter most, or put them last.
 
-Not covered: a custom header whose name is not one of the five above (for example `X-Authorization: …` or `MY_AUTHORIZATION=…`). The bearer-token and `NAME=value` patterns may still catch its value; the name list can grow if one is found in practice.
+Not covered: a custom header whose name is not one of the five above (for example `X-Authorization: …` or `MY_AUTHORIZATION=…`). The bearer-token and `NAME=value` patterns may still catch its value; the name list can grow if one is found in practice. Also not covered: a name run into a longer word by a plain letter, as in curl's unspaced `-HAuthorization:…` or `setAuthorizationHeader(…)`, and percent-encoded letters inside the name (section 1).
 
-## 5. Required tests
+## 6. Required tests
 
-Secret markers `tailsecret` and `dXNlcjpwYXNz`: neither may appear in the output. `R` stands for `[REDACTED]`. Each expected output is exact. A `\n` is a line break inside the same section; `\` at the end of a line is a literal backslash.
+Secret markers `tailsecret` and `dXNlcjpwYXNz`: neither may appear in the output. `R` stands for `[REDACTED]`. Each expected output is exact. A `\n` is a line break inside the same section; `\` at the end of a line is a literal backslash. Cases 1–51 are from the first round; 52–55 were added in the second.
 
 Carried from the v2 design (32 cases; 19 and 21 have two inputs each):
 
@@ -111,7 +122,30 @@ Added with this rule:
 | 50c | `see authorization_url in the config` | unchanged (not a key) |
 | 51 | A large section: 40 000 and 160 000 characters of near-keys (`xAuthorization -Authorization _HTTP_ HTTP_PROXY_ REDIRECT_ …`), and of plain text with one key at the very end | Each call under a second; four times the input takes at most eight times as long (linear); the key at the end is still found |
 
-## 6. Mutations (suite-level kills)
+Added in review round 2. In cases 54a–54f, `\r`, `\n`, `\t`, `\x0a` and `\u000a` are written escapes (a backslash and letters in the text), not line breaks.
+
+| # | Input | Expected |
+|---|---|---|
+| 52a | `API_TOKEN="prefixsecret Authorization: Bearer tailsecret"` | `API_TOKEN=RAuthorizationR` |
+| 52b | `password: "prefixsecret Authorization: Bearer tailsecret"` | `password: RAuthorizationR` |
+| 52c | `{"api_key": "prefixsecret Authorization: Bearer tailsecret"}` | `{"api_key": "RAuthorizationR` |
+| 52d | `tool --api-key "prefixsecret Authorization: Bearer tailsecret"` | `tool --api-key RAuthorizationR` |
+| 52e | `API_TOKEN="prefixsecret Authorization: Bearer tailsecret` (no closing quote) | `API_TOKEN=RAuthorizationR` |
+| 52f | `client_secret: 'prefixsecret Authorization: Bearer tailsecret` (no closing quote) | `client_secret: RAuthorizationR` |
+| 52g | `MY_TOKEN=ghp_<token> Authorization: Basic dXNlcjpwYXNz` (two patterns overlap on one value) | `MY_TOKEN=R AuthorizationR` |
+| 53a | `--token Authorization: Basic dXNlcjpwYXNz` | `--token AuthorizationR` |
+| 53b | `SECRET=Authorization: Basic dXNlcjpwYXNz` | `SECRET=AuthorizationR` |
+| 53c | `export AUTH_TOKEN=Authorization:Basic dXNlcjpwYXNz` | `export AUTH_TOKEN=AuthorizationR` |
+| 54a | `printf "GET / HTTP/1.1\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n"` | `printf "GET / HTTP/1.1\r\nAuthorizationR` |
+| 54b | `req = "Accept: json\nAuthorization: Basic dXNlcjpwYXNz"` | `req = "Accept: json\nAuthorizationR` |
+| 54c | `s = "x\tAuthorization: Basic dXNlcjpwYXNz"` | `s = "x\tAuthorizationR` |
+| 54d | `s = "x\\r\\nAuthorization: Basic dXNlcjpwYXNz"` | `s = "x\\r\\nAuthorizationR` |
+| 54e | `s = "x\x0aAuthorization: Basic dXNlcjpwYXNz"` | `s = "x\x0aAuthorizationR` |
+| 54f | `{"h": "x\u000aAuthorization: Basic dXNlcjpwYXNz"}` | `{"h": "x\u000aAuthorizationR` |
+| 55a | `q=%7B%22Authorization%22%3A%22Basic dXNlcjpwYXNz%22%7D` | `q=%7B%22AuthorizationR` |
+| 55b | `next=%2522Authorization%2522%253A%2522Basic dXNlcjpwYXNz` | `next=%2522AuthorizationR` |
+
+## 7. Mutations (suite-level kills)
 
 Each mutation is applied on a scratch copy and must turn the named tests red; restored, all are green.
 
@@ -121,3 +155,8 @@ Each mutation is applied on a scratch copy and must turn the named tests red; re
 | Drop the tuple / quoted-key shape (a key followed by a closing quote is not a key) | 7, 8, 34, 43, 44, 45 |
 | Stop the redaction at the end of the line instead of the end of the section | 26, 28, 29, 30, 31, 33, 37, 38, 39, 40, 49 |
 | Start the redaction after the value's closing quote instead of right after the key | 7, 8, 15, 33, 34, 43, 44, 45, 47 |
+| Cut at the key first, then run the other patterns on what is left | 52a–52f, 53a–53c |
+| Cut moved after the other patterns (look for the key only in their output) | 52a–52f, 53a–53c (53a–53c also leak `dXNlcjpwYXNz`) |
+| Drop the escape boundaries (`\n`, `\r`, `\t`, `\xHH`, `\uHHHH`) | 54a–54f |
+| Drop the percent-encoded byte boundaries (`%HH`, `%25HH`) | 55a, 55b |
+| Match the other patterns on the original text only, not also on the quote-closed text before the key | 52e, 52f |

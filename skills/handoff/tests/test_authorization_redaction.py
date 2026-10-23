@@ -115,6 +115,51 @@ CASES = [
      "proxy_set_header Authorization" + R),
     ("48", "ran ok\nthen curl -H 'proxy-authorization: Basic %s' https://x" % B64,
      "ran ok\nthen curl -H 'proxy-authorization" + R),
+    # A secret value that starts before the key and runs into it: the part
+    # before the key is still redacted by the other patterns.
+    ("52a", 'API_TOKEN="prefixsecret Authorization: Bearer tailsecret"',
+     "API_TOKEN=" + R + "Authorization" + R),
+    ("52b", 'password: "prefixsecret Authorization: Bearer tailsecret"',
+     "password: " + R + "Authorization" + R),
+    ("52c", '{"api_key": "prefixsecret Authorization: Bearer tailsecret"}',
+     '{"api_key": "' + R + "Authorization" + R),
+    ("52d", 'tool --api-key "prefixsecret Authorization: Bearer tailsecret"',
+     "tool --api-key " + R + "Authorization" + R),
+    # The same with no closing quote anywhere, and two patterns overlapping
+    # on one value before the key (one marker for both).
+    ("52e", 'API_TOKEN="prefixsecret Authorization: Bearer tailsecret',
+     "API_TOKEN=" + R + "Authorization" + R),
+    ("52f", "client_secret: 'prefixsecret Authorization: Bearer tailsecret",
+     "client_secret: " + R + "Authorization" + R),
+    ("52g", "MY_TOKEN=ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2 Authorization: Basic %s" % B64,
+     "MY_TOKEN=" + R + " Authorization" + R),
+    # The key is the value of another secret pattern: the key must still be
+    # found, so the cut is decided on the text as given.
+    ("53a", "--token Authorization: Basic %s" % B64,
+     "--token Authorization" + R),
+    ("53b", "SECRET=Authorization: Basic %s" % B64,
+     "SECRET=Authorization" + R),
+    ("53c", "export AUTH_TOKEN=Authorization:Basic %s" % B64,
+     "export AUTH_TOKEN=Authorization" + R),
+    # A key right after a written escape sequence (the text holds a
+    # backslash and a letter, not a control character).
+    ("54a", 'printf "GET / HTTP/1.1\\r\\nAuthorization: Basic %s\\r\\n\\r\\n"' % B64,
+     'printf "GET / HTTP/1.1\\r\\nAuthorization' + R),
+    ("54b", 'req = "Accept: json\\nAuthorization: Basic %s"' % B64,
+     'req = "Accept: json\\nAuthorization' + R),
+    ("54c", 's = "x\\tAuthorization: Basic %s"' % B64,
+     's = "x\\tAuthorization' + R),
+    ("54d", 's = "x\\\\r\\\\nAuthorization: Basic %s"' % B64,
+     's = "x\\\\r\\\\nAuthorization' + R),
+    ("54e", 's = "x\\x0aAuthorization: Basic %s"' % B64,
+     's = "x\\x0aAuthorization' + R),
+    ("54f", '{"h": "x\\u000aAuthorization: Basic %s"}' % B64,
+     '{"h": "x\\u000aAuthorization' + R),
+    # A key right after a percent-encoded byte, once or twice encoded.
+    ("55a", "q=%%7B%%22Authorization%%22%%3A%%22Basic %s%%22%%7D" % B64,
+     "q=%7B%22Authorization" + R),
+    ("55b", "next=%%2522Authorization%%2522%%253A%%2522Basic %s" % B64,
+     "next=%2522Authorization" + R),
 ]
 
 # Text where the name runs on into a longer word: not a key, kept unchanged.
