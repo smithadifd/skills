@@ -739,10 +739,10 @@ def test_classify_shard_first_keyword_wins_else_core():
 def test_default_taxonomy_classifies_real_topic_shapes():
     # Sanity on the shipped default taxonomy (anonymized real stems).
     assert mg.classify_shard("fleet-roadmap", mg.DEFAULT_SHARD_TAXONOMY) == "fleet"
-    assert mg.classify_shard("infra-map-living-map", mg.DEFAULT_SHARD_TAXONOMY) == "infra"
+    assert mg.classify_shard("infra-living-map", mg.DEFAULT_SHARD_TAXONOMY) == "infra"
     assert mg.classify_shard("ai-coding-tasks-pipeline", mg.DEFAULT_SHARD_TAXONOMY) == "automation"
     assert mg.classify_shard("op-tcc-appdata-gate", mg.DEFAULT_SHARD_TAXONOMY) == "secrets"
-    assert mg.classify_shard("foundry", mg.DEFAULT_SHARD_TAXONOMY) is None
+    assert mg.classify_shard("patio-umbrella", mg.DEFAULT_SHARD_TAXONOMY) is None
 
 
 def test_default_taxonomy_classifies_generic_note_stems():
@@ -758,6 +758,37 @@ def test_default_taxonomy_classifies_generic_note_stems():
     assert mg.classify_shard("podcast-feed-refresh", tax) == "automation"
     assert mg.classify_shard("streaming-library-index", tax) == "automation"
     assert mg.classify_shard("broker-trade-digest", tax) == "automation"
+
+
+def test_default_taxonomy_keywords_do_not_match_inside_longer_words():
+    tax = mg.DEFAULT_SHARD_TAXONOMY
+    # Short generic words such as `feed` or `server` would capture these
+    # unrelated stems, so the defaults carry no such keyword.
+    for stem in (
+        "feedback-self-review",
+        "observer-cache",
+        "breastfeed-support-notes",
+        "home-serverless-migration",
+    ):
+        assert mg.classify_shard(stem, tax) is None
+    # As whole tokens they classify, wherever they sit in the stem.
+    for stem, shard in (
+        ("rss-feed", "automation"),
+        ("feed-refresh", "automation"),
+        ("home-server", "infra"),
+        ("server-maintenance", "infra"),
+        ("home_server.setup", "infra"),
+    ):
+        assert mg.classify_shard(stem, tax) == shard
+
+
+def test_multi_token_keyword_matches_a_contiguous_run_anywhere():
+    tax = [("pipes", "Pipes", ["night-batch"])]
+    assert mg.classify_shard("night-batch-notes", tax) == "pipes"
+    assert mg.classify_shard("old-night-batch-notes", tax) == "pipes"
+    assert mg.classify_shard("old-night-batch", tax) == "pipes"
+    assert mg.classify_shard("night-old-batch", tax) is None
+    assert mg.classify_shard("nights-batch", tax) is None
 
 
 def test_default_taxonomy_has_zero_no_person_deny_hits():
@@ -893,6 +924,9 @@ def test_taxonomy_precedence_store_local_wins_defaults_stop_limit_regression(
 
 def test_taxonomy_precedence_defaults_only_when_no_file_exists(tmp_path, capsys):
     work = _seed_stop_limit_store(tmp_path)
+    # A note the built-in defaults file under secrets by a whole-token keyword.
+    with open(work / "MEMORY.md", "a") as index:
+        index.write("- [Password vault](password-vault.md) — Defaults shard this.\n")
 
     budget_rc, budget_io, shard_rc, shard_io = _run_budget_and_shard(
         work, capsys)
@@ -1508,9 +1542,9 @@ def test_shard_pointer_line_never_classified_into_a_shard():
     pointer, not a note — propose_shards must never fold it into a shard even
     when its stem keyword-matches the taxonomy."""
     # DEFAULT taxonomy: `MEMORY.fleet` would match the "fleet" keyword.
-    pointer = ("- [MEMORY.fleet.md](MEMORY.fleet.md) — Fleet / SEROTINE · "
+    pointer = ("- [MEMORY.fleet.md](MEMORY.fleet.md) — Fleet / Overview · "
                "11 notes · ~500 tok · load JIT when the topic comes up")
-    text = ("# Memory Index\n\n%s\n- [Foundry](foundry.md) — meta repo\n"
+    text = ("# Memory Index\n\n%s\n- [Notes](notes.md) — meta repo\n"
             % pointer)
     prop = mg.propose_shards(text, mg.DEFAULT_SHARD_TAXONOMY)
     # No shard captured the pointer.
@@ -3083,7 +3117,7 @@ def test_find_hyphen_underscore_mismatches_scoped_to_one_store(tmp_path):
 def test_scan_includes_hyphen_underscore_repairs_key():
     """Regression guard on the shipped invented fixture: it has no
     hyphen/underscore-fixable dangling links today (matches the real corpus
-    finding for the non-hoard stores)."""
+    finding for the other stores)."""
     result = mg.scan(FIXTURE, TODAY)
     assert result["hyphen_underscore_repairs"] == []
 

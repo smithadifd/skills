@@ -53,6 +53,23 @@ Use the built-in Explore agent for open-ended reading of a codebase, and the bui
 
 ## Install
 
+There are two ways to install: as a Claude Code plugin, or with `install.sh`. Use one, not both.
+
+### As a plugin
+
+From inside your clone, add the marketplace and install the `sdlc` plugin, which carries every skill and agent:
+
+```sh
+claude plugin marketplace add .
+claude plugin install sdlc@skills
+```
+
+A plugin install prefixes every command with the plugin's name, so a command that this README writes as `/review` is invoked with that prefix.
+
+### With `install.sh`
+
+The installer copies skills and agents into `~/.claude/` with no plugin involved. It needs no marketplace.
+
 Install one skill:
 
 ```sh
@@ -90,7 +107,7 @@ Skills are copied to `~/.claude/skills/`. Agents are copied to `~/.claude/agents
 
 ## Update
 
-After pulling changes in your clone, rerun the install command for a skill or agent. The installer replaces the installed copy. Use `./install.sh --all` and `./install.sh --all-agents` to refresh everything.
+For a plugin install, run `claude plugin update sdlc`. For an `install.sh` install, after pulling changes in your clone, rerun the install command for a skill or agent. The installer replaces the installed copy. Use `./install.sh --all` and `./install.sh --all-agents` to refresh everything.
 
 ## Uninstall
 

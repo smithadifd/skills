@@ -1,0 +1,10 @@
+{
+  "name": "sdlc",
+  "version": "0.9.2",
+  "description": "Skills for planning, building, reviewing and handing off software work, with the agents that support them.",
+  "author": {
+    "name": "Skills maintainers"
+  },
+  "repository": "https://github.com/smithadifd/skills",
+  "license": "MIT"
+}

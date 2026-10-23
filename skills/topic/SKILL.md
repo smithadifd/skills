@@ -14,7 +14,8 @@ description: >
   names the close tier (LITE vs FULL). Use when the user says "/topic <slug>",
   "open a topic for this", "resume the <x> topic", "track this investigation",
   "stage this for later", or when an attended session starts with an ad-hoc ask
-  that will outlive the sitting.
+  that will outlive the sitting. NOT for a handoff note to a fresh session (that
+  is `handoff`), and NOT for a throwaway question that ends with the sitting.
 ---
 
 # Topic
