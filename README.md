@@ -60,7 +60,7 @@ Use the built-in Explore agent for open-ended reading of a codebase, and the bui
 Which skill or agent to reach for at each step of delivering a change:
 
 - Discover: `kickoff` turns an early idea into a researched plan. `sharpen` asks questions until the requirements are clear. `shape` tests a design for risks before you build it.
-- Understand: `teach` explains how a codebase works. `researcher` answers a focused question about code or an API. `api-contract-tracer` follows an endpoint to its callers. `dependency-auditor` compares dependency versions across projects. `doc-researcher`, `doc-writer` and `doc-verifier` gather facts for, write and check a documentation page.
+- Understand: `teach` explains how a codebase works. `researcher` answers a focused question about code or an API. `api-contract-tracer` follows an endpoint to its callers. `dependency-auditor` compares dependency versions across projects. `doc-researcher`, `doc-writer` and `doc-verifier` gather facts for, write and check a documentation page. `document` runs all three to write a page into your docs folder.
 - Plan: use Claude Code's Plan mode to outline the steps.
 - Build: `builder-core` builds one ticket on its own branch and opens a draft pull request. `tdd` is the test-first loop for when you change behavior directly yourself rather than delegating the build.
 - Debug: `debug` reproduces a bug, isolates the cause and fixes it behind its own failing test. Like `tdd`, it never calls a fix done without a test that failed first.
