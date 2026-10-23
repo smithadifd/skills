@@ -39,6 +39,8 @@ _JSON_END = "\n-->"
 _PLAN_NOTE = "ticket-plan-card/v1 "
 # A ledger note that names the stop event confirmed as the close.
 _CLOSE_NOTE = "ticket-close/v1 event:"
+# A ledger note that invalidates the close naming that stop event.
+_VOID_NOTE = "ticket-close-void/v1 event:"
 # What a stamp may point at: a path (absolute, or relative with a directory or
 # an extension, optionally :line or :start-end), a PR or issue (owner/repo#N or
 # #N), a branch (branch:<name>), a commit SHA, or a store event (event:<N>).
@@ -1050,7 +1052,18 @@ class LedgerStore:
         pass_id = _new_pass_id()
         claim = {"id": pass_id, "host": _host(), "started_at": _now()}
         text = f"{_PASS_PREFIX}{pass_id} host={claim['host']} started={claim['started_at']}"
-        self._append("session.opened", {"purpose": text}, taking=True)
+        try:
+            self._append("session.opened", {"purpose": text}, taking=True)
+        except TicketHeld:
+            # The claim may have landed before the read-back found an interleaved
+            # event. A claim this session never got to use would refuse every later
+            # session, so release it before refusing. A refusal that wrote no claim
+            # finds nothing to release.
+            with contextlib.suppress(StoreUnavailable):
+                self._pass = pass_id
+                self.release_pass("the claim landed after an interleaved write")
+            self._pass = self._ended = None
+            raise
         self._pass, self._ended = pass_id, None
         return pass_id
 
@@ -1140,7 +1153,54 @@ class LedgerStore:
         stops = [event for event in events if event["kind"] == "item.stopped"]
         _require_pending_close([event["payload"] for event in stops], position, point)
         self._append("item.note", {"text": f"{_CLOSE_NOTE}{int(stops[position]['id'])}"})
-        self._append("item.state", {**_carried_state(events), "status": "closed"})
+        try:
+            self._append("item.state", {**_carried_state(events), "status": "closed"})
+        except TicketHeld:
+            self._void_close(int(stops[position]["id"]))
+            raise
+
+    def _void_close(self, stop_id: int) -> None:
+        """Invalidate a close whose status write landed after an interleaved event.
+
+        The closed status was built from a snapshot that missed that event, so
+        it may have overwritten the event's owner, claim, blocked-by or status.
+        The note comes first so no resume can validate the close; the state
+        that follows puts those fields back as the interleaved event left them.
+        Neither carries a revision check: they only undo this close.
+        """
+
+        events = self._events()
+        ours = [
+            event
+            for event in events
+            if event["kind"] == "item.state"
+            and (event.get("payload") or {}).get("status") == "closed"
+            and (event.get("payload") or {}).get("source") == self.holder
+        ]
+        if not ours:
+            return
+        before = [event for event in events if int(event["id"]) < int(ours[-1]["id"])]
+        latest: Mapping[str, Any] = {}
+        for event in before:
+            if event["kind"] == "item.state":
+                latest = event.get("payload") or {}
+        restored = {**_carried_state(before), "status": latest.get("status") or "open"}
+        for kind, body, name in (
+            ("item.note", {"text": f"{_VOID_NOTE}{stop_id}"}, "void"),
+            ("item.state", restored, "restore"),
+        ):
+            body = {**body, "source": self.holder}
+            self._run(
+                "append",
+                "--kind",
+                kind,
+                "--item",
+                self.key,
+                "--idempotency-key",
+                f"ticket-close-{name}/{self.key}/{stop_id}/{int(ours[-1]['id'])}",
+                "--payload",
+                json.dumps(body, sort_keys=True, separators=(",", ":")),
+            )
 
     def record_decision(self, decision: DecisionRecord) -> None:
         _validate_decision(decision)
@@ -1320,6 +1380,7 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
     stamps: list[dict[str, Any]] = []
     stop_ids: list[int] = []
     close_id: int | None = None
+    voided = False
     tried: list[dict[str, Any]] = []
     plan: dict[str, Any] | None = None
     plan_ref: str | None = None
@@ -1357,9 +1418,13 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
         elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_CLOSE_NOTE):
             named = payload["text"][len(_CLOSE_NOTE) :]
             close_id = int(named) if named.isdigit() else None
+            voided = False
+        elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_VOID_NOTE):
+            named = payload["text"][len(_VOID_NOTE) :]
+            voided = voided or (named.isdigit() and int(named) == close_id)
     status = card["status"]
     # Only the stop the latest close note names is the close, and only while closed.
-    if status == "closed" and close_id in stop_ids:
+    if status == "closed" and close_id in stop_ids and not voided:
         stamps[stop_ids.index(close_id)]["close"] = True
     return {
         "key": card["item_id"],
@@ -1372,6 +1437,7 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
         "plan_ref": plan_ref,
         "tried": tried,
         "pass": _live_pass(events),
+        **({"close_voided": True} if voided else {}),
     }
 
 
@@ -1707,9 +1773,14 @@ class TicketPass:
             self._plan_pass = _plan_pass(card)
             self.reconciliation = tuple(flags)
         stamps = card.get("stamps") or ()
+        if card.get("close_voided"):
+            self.reconciliation += (
+                "the last close was invalidated because another writer's event landed while it was "
+                "being confirmed; the ticket is not closed",
+            )
         # A closed status counts only when the final stamp is the confirmed close
         # and the card still validates; otherwise the pass resumes before close.
-        if card.get("status") == "closed":
+        if card.get("status") == "closed" and not card.get("close_voided"):
             problems = self._closed_problems(card, stored, reviews)
             if not problems:
                 self._phase = "closed"

@@ -1612,6 +1612,74 @@ def test_skill_tree_assembles_no_hidden_paths_or_environment_names():
     assert offenders == []
 
 
+def check_an_interleaved_write_during_open_leaves_no_orphan_claim(cli, make_store):
+    """An outside event lands between the open's revision check and its claim append."""
+
+    class OpenRace(ticket.LedgerStore):
+        inject = True
+
+        def _run(self, *args):
+            if self.inject and args[0] == "append" and "session.opened" in args:
+                self.inject = False
+                cli("state", KEY, "--status", "blocked", "--owner", "outside-owner")
+            return super()._run(*args)
+
+    template = make_store()
+    racing = OpenRace(KEY, TITLE, cli=template.cli, db=template.db, writer="opening")
+    with pytest.raises(ticket.TicketHeld, match="between this write's revision check and its append"):
+        ticket.TicketPass.open(KEY, source(), racing)
+    # The claim that landed was released: no live claim, and the next session proceeds.
+    assert make_store("reader").read_card()["pass"] is None
+    nxt = ticket.TicketPass.open(KEY, source(), make_store("next"))
+    assert nxt.live
+    nxt.end()
+
+
+def check_an_interleaved_state_during_close_invalidates_the_close(cli, make_store):
+    """An outside state event lands between the close's revision check and its status write."""
+
+    class CloseRace(ticket.LedgerStore):
+        inject = False
+
+        def _run(self, *args):
+            if self.inject and args[0] == "append" and "item.state" in args:
+                self.inject = False
+                cli("state", KEY, "--status", "blocked", "--owner", "outside-owner", "--blocked-by", "EK-1")
+            return super()._run(*args)
+
+    template = make_store()
+    store = CloseRace(KEY, TITLE, cli=template.cli, db=template.db, writer="closing")
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    session.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    store.inject = True
+    with pytest.raises(ticket.TicketHeld, match="between this write's revision check and its append"):
+        session.close("Done.", refs=("reviews/1",), next_skills=("ticket",))
+
+    # The outside event's fields are put back, and the close no longer counts.
+    assert latest_state(cli) == {
+        "status": "blocked",
+        "owner": "outside-owner",
+        "blocked_by": ["EK-1"],
+    }
+    card = make_store("reader").read_card()
+    assert card["status"] == "blocked"
+    assert card["close_voided"] is True
+    assert all(stamp["close"] is False for stamp in card["stamps"])
+    resumed = ticket.TicketPass.open(KEY, source(), make_store("resume"), resume=True)
+    assert resumed.phase != "closed"
+    assert any("close was invalidated" in line for line in resumed.reconciliation)
+    resumed.end()
+
+
+def test_ledger_interleaved_write_during_open_leaves_no_orphan_claim(tmp_path, monkeypatch):
+    check_an_interleaved_write_during_open_leaves_no_orphan_claim(*fake_ledger_harness(tmp_path, monkeypatch))
+
+
+def test_ledger_interleaved_state_during_close_invalidates_the_close(tmp_path, monkeypatch):
+    check_an_interleaved_state_during_close_invalidates_the_close(*fake_ledger_harness(tmp_path, monkeypatch))
+
+
 def test_real_ledger_cli_adapter_when_configured(tmp_path):
     configured = os.environ.get("TICKET_LEDGER_CLI")
     if not configured or not Path(configured).is_file():
@@ -1658,6 +1726,8 @@ def test_real_ledger_cli_adapter_when_configured(tmp_path):
 
     check_a_pass_holds_the_ticket_across_processes(harness("two-passes")[1])
     check_the_pass_record_is_released_on_every_exit_path(harness("exit-paths")[1])
+    check_an_interleaved_write_during_open_leaves_no_orphan_claim(*harness("open-race"))
+    check_an_interleaved_state_during_close_invalidates_the_close(*harness("close-race"))
     check_a_write_between_the_check_and_the_append_is_refused_by_name(*harness("interleaved"))
     check_a_writer_that_passed_the_revision_check_is_refused(harness("append-key")[1])
     check_a_stale_view_is_refused_by_the_cli_writer_name(*harness("stale-view"))
