@@ -32,7 +32,14 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 RULE_CODE = re.compile(r"\b[A-Z]{1,4}\d{2,4}\b")
 TEST_NODE = re.compile(r"[\w./-]+\.py::[\w:\[\]./-]+")
 EXIT_LINE = re.compile(r"Exit code [1-9][0-9]*")
-WRAPPERS = {"env", "npx", "command", "time", "sudo"}
+# Wrapper commands, each with the options that take a separate operand.
+WRAPPERS = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "npx": {"-p", "--package"},
+    "command": set(),
+    "time": {"-f", "--format", "-o", "--output"},
+    "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-D", "-R", "-T"},
+}
 CORRECTION_CUE = re.compile(
     r"^\s*(no\b|don'?t\b|do not\b|stop\b|again\b|i said\b|that'?s not\b|wrong\b)", re.I
 )
@@ -76,7 +83,7 @@ def events(path):
         if not isinstance(record, dict):
             continue
         role, content = _blocks(record)
-        for block in content:
+        for ordinal, block in enumerate(content, 1):
             if not isinstance(block, dict):
                 continue
             kind = block.get("type")
@@ -88,7 +95,7 @@ def events(path):
                     "line": number,
                     "id": block.get("id"),
                     "name": block.get("name", ""),
-                    "input": block.get("input") or {},
+                    "input": block["input"] if isinstance(block.get("input"), dict) else {},
                 }
             elif kind == "tool_result":
                 body = block.get("content", "")
@@ -98,6 +105,7 @@ def events(path):
                     "kind": "tool_result",
                     "line": number,
                     "id": block.get("tool_use_id"),
+                    "block": ordinal,
                     "has_flag": "is_error" in block,
                     "error": block.get("is_error") is True,
                     "text": str(body),
@@ -117,12 +125,27 @@ def triage(path):
 
 
 def _tool(command):
-    """First command word after env, assignments, 'python -m' and npx."""
-    words = command.split()
+    """The command word a shell line runs.
+
+    Grammar: take the last command of a simple `&&` / `;` chain (so `cd d && pytest`
+    is `pytest`); skip leading variable assignments; skip a wrapper (env, npx,
+    command, time, sudo) with its options, and the operand of each option that
+    takes one (`env -u NAME`); skip `python -m`. Quoting is not parsed.
+    """
+    parts = [p for p in re.split(r"&&|;", command) if p.strip()]
+    words = parts[-1].split() if parts else []
     i = 0
+    wrapper = None
     while i < len(words):
         word = words[i]
-        if word in WRAPPERS or re.match(r"^[A-Za-z_]\w*=", word) or word.startswith("-"):
+        if word in WRAPPERS:
+            wrapper = word
+            i += 1
+        elif re.match(r"^[A-Za-z_]\w*=", word):
+            i += 1
+        elif word.startswith("-") and wrapper:
+            i += 2 if word in WRAPPERS[wrapper] else 1
+        elif word.startswith("-"):
             i += 1
         elif re.match(r"^python[\d.]*$", word) and words[i + 1 : i + 2] == ["-m"]:
             i += 2
@@ -170,7 +193,9 @@ def scan(path):
             if not tool:
                 continue
             excerpt = next((ln for ln in event["text"].splitlines()[1:] if ln.strip()), "")[:120]
-            instance = {"ref": f"line {event['line']}", "excerpt": excerpt}
+            # Parallel results share a record, so the id keeps each ref distinct.
+            ref = f"line {event['line']}, tool_use_id {event['id']}"
+            instance = {"ref": ref, "excerpt": excerpt}
             idents = _identifiers(event["text"])
             if not idents:
                 unclassified.setdefault(tool, []).append(instance)
@@ -238,7 +263,16 @@ def classify(item):
 def build(draft):
     findings = []
     dropped = []
-    for item in draft.get("findings", []):
+    if not isinstance(draft, dict):
+        raise RetroError("draft must be a JSON object")
+    raw = draft.get("findings", [])
+    if not isinstance(raw, list):
+        raise RetroError("draft findings must be a list")
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RetroError("each draft finding must be an object")
+        if "severity" in item and not isinstance(item["severity"], str):
+            raise RetroError(f"finding {item.get('id', '?')}: severity must be a string")
         kind = classify(item)
         if kind is None:
             dropped.append(item.get("id", "?"))
@@ -432,7 +466,7 @@ def main(argv=None):
         elif args.cmd == "approve":
             approve(args.path, args.finding_id)
             print(f"approved {args.finding_id}")
-    except (RetroError, OSError, KeyError, json.JSONDecodeError) as exc:
+    except (RetroError, OSError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(f"retro: {exc}", file=sys.stderr)
         return 2
     return 0

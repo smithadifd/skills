@@ -23,7 +23,7 @@ The summary text is never parsed for pass/fail.
 
 Within failed check runs only, `scan` extracts rule identifiers (lint codes such as `E501`, `F401`, test node ids) from the output and groups by `(tool, identifier)`. A group seen in two or more distinct failed runs is a mechanical candidate. A failed run with no identifier groups under `(tool, "unclassified")`, which is reported but never becomes a candidate on its own.
 
-`tool` is the first word of the command (`ruff`, `pytest`, `eslint`, ...), after stripping `env`, variable assignments and a leading `python -m`/`npx`.
+`tool` is the command word (`ruff`, `pytest`, `eslint`, ...) of the last command in a simple `&&`/`;` chain, after skipping variable assignments, a leading `python -m`, and the wrappers `env`, `npx`, `command`, `time` and `sudo` with their options (including the operand of an option that takes one, as in `env -u NAME`). Quoting is not parsed. Each instance's ref carries the tool-use id, so parallel runs in one record stay distinct.
 
 ## Known limit
 

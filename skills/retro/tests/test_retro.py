@@ -471,3 +471,69 @@ def test_unhashable_tool_use_ids_do_not_crash_scan(tmp_path):
     src.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
     out = scan_file(src)
     assert out["mechanical_candidates"] == [] and out["unclassified"] == []
+
+
+# ---- fix round 2
+
+FAIL = "Exit code 1\nsrc/a.py:1:1: E501 long"
+
+
+def write_records(path, records):
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return path
+
+
+def test_parallel_failed_results_in_one_record_get_distinct_refs(tmp_path):
+    uses = [{"type": "tool_use", "id": f"t{n}", "name": "Bash", "input": {"command": "ruff check ."}}
+            for n in (1, 2)]
+    results = [{"type": "tool_result", "tool_use_id": f"t{n}", "is_error": True, "content": FAIL}
+               for n in (1, 2)]
+    src = write_records(tmp_path / "t.jsonl", [
+        {"type": "assistant", "message": {"role": "assistant", "content": uses}},
+        {"type": "user", "message": {"role": "user", "content": results}}])
+    out = scan_file(src)
+    (candidate,) = out["mechanical_candidates"]
+    refs = [i["ref"] for i in candidate["instances"]]
+    assert len(set(refs)) == 2
+    draft_ = {"findings": [{"id": "x", "title": "t", "severity": "low", "mechanical": True,
+                            "structure": "lint", "proposal": "p", "evidence": ["e"],
+                            "instances": candidate["instances"]}]}
+    assert retro.build(draft_)["findings"][0]["type"] == "encode-in-structure"
+
+
+def test_wrapper_options_with_operands_and_command_chains_group_with_the_plain_tool():
+    for command in ("env -u PYTHONPATH pytest", "cd sub && pytest", "FOO=1 env -C d pytest -q",
+                    "sudo -u bob time -f %e pytest", "cd a; npx -p pkg pytest"):
+        assert retro._tool(command) == "pytest", command
+    assert retro._tool("pytest") == "pytest"
+    assert retro._tool("cd d &&") == "cd"
+
+
+def test_non_object_tool_input_is_not_a_crash(tmp_path):
+    src = write_records(tmp_path / "t.jsonl", [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": ["ruff"]}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": True, "content": FAIL}]}}])
+    result = run("scan", src)
+    assert result.returncode == 0 and "Traceback" not in result.stderr
+    assert json.loads(result.stdout)["mechanical_candidates"] == []
+
+
+def test_malformed_draft_shapes_are_refused_with_rc_2(tmp_path):
+    bad = [[], {"findings": {}}, {"findings": [[]]},
+           {"findings": [{"id": "a", "severity": ["high"]}]}]
+    for index, doc in enumerate(bad):
+        src = tmp_path / f"d{index}.json"
+        src.write_text(json.dumps(doc))
+        result = run("build", src, "--out", tmp_path / "o.json")
+        assert result.returncode == 2 and "Traceback" not in result.stderr, doc
+
+
+def test_binary_inputs_are_refused_with_rc_2(tmp_path):
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"\xff\xfe\x00\x80")
+    for args in (("scan", blob), ("triage", blob), ("check", blob),
+                 ("build", blob, "--out", tmp_path / "o.json")):
+        result = run(*args)
+        assert result.returncode == 2 and "Traceback" not in result.stderr, args
