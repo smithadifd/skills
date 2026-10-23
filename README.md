@@ -4,7 +4,7 @@ This repository contains reusable Claude Code skills for common tasks and agents
 
 ## Before you start
 
-You need Claude Code, `git`, and `bash`. Python 3 is required for `handoff`, `kickoff`, `memory-gardener`, `pickup`, `sharpen`, and `topic`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
+You need Claude Code, `git`, and `bash`. Python 3 is required for `handoff`, `kickoff`, `memory-gardener`, `pickup`, `sharpen`, `topic`, and `document`, which run bundled Python scripts. It is also needed for `review`'s optional structured output. The `pr` skill needs the GitHub CLI (`gh`).
 
 This is a private repository. If you've been invited as a collaborator, clone it using the URL provided with your access, then run the commands below from the clone:
 
@@ -18,7 +18,7 @@ cd skills
 | Skill | What it does |
 | --- | --- |
 | `debug` | Finds the cause of a bug by reproducing it, testing a hypothesis and isolating the fault, then fixes it behind a test that fails first and passes after. |
-| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder. |
+| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder, through a guard script. It needs the `doc-researcher`, `doc-writer` and `doc-verifier` agents; install each with `./install.sh --agent <name>` (the plugin install includes them). |
 | `handoff` | Writes one redacted, size-capped resume note so a fresh session can continue the work. |
 | `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. |
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. |
