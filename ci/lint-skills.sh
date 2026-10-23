@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# Lint the skills repository. Usage: ci/lint-skills.sh [root]
+#
+# Rules (each failure prints "LINT FAIL [rule]: ..."):
+#   frontmatter       every skill has name, kind, version and description
+#   description-size description plus when_to_use stay under 1,536 characters
+#   triggers          the description names a trigger phrase and a NOT-for case
+#   skill-size        SKILL.md body warns above 16,384 bytes, fails above 32,768
+#   tests-dir         a skill that ships a script has a tests/ directory
+#   readme-rows       every skill and agent has a README table row
+#   prefixed-command  no file spells a command with the plugin prefix
+#   no-person-*       no person, host, home path or dated line in a tracked file
+#
+# NO_PERSON_DENY is a grep extended regular expression (term1|term2|...). When
+# it is unset the deny step is skipped with a notice. OWNER and REPO default to
+# the origin remote and let a line with the repository's own URL pass.
+set -uo pipefail
+
+root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+cd "$root" || { printf 'LINT ERROR: cannot enter %s\n' "$root" >&2; exit 2; }
+
+fail=0
+lint_fail() {
+  printf 'LINT FAIL [%s]: %s\n' "$1" "$2"
+  fail=1
+}
+lint_warn() {
+  printf 'LINT WARN [%s]: %s\n' "$1" "$2"
+}
+
+# field <file> <key>: the frontmatter value of a top-level key, with folded
+# continuation lines joined by single spaces. Empty when the key is absent.
+field() {
+  awk -v key="$2" '
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    {
+      if (match($0, /^[A-Za-z_-]+:/)) {
+        current = substr($0, 1, RLENGTH - 1)
+        if (current == key) {
+          rest = substr($0, RLENGTH + 1)
+          sub(/^[ \t]+/, "", rest)
+          if (rest == ">" || rest == "|" || rest == ">-" || rest == "|-") rest = ""
+          out = rest
+        }
+        next
+      }
+      if (current == key) {
+        line = $0
+        sub(/^[ \t]+/, "", line)
+        out = (out == "" ? line : out " " line)
+      }
+    }
+    END { print out }
+  ' "$1"
+}
+
+# body_bytes <file>: bytes after the closing frontmatter marker.
+body_bytes() {
+  awk 'BEGIN { n = 0 } n >= 2 { print } $0 == "---" && n < 2 { n++ }' "$1" | wc -c | tr -d ' '
+}
+
+plugin_name=sdlc
+if [ -f .claude-plugin/plugin.json ]; then
+  found=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .claude-plugin/plugin.json | head -n 1)
+  [ -z "$found" ] || plugin_name=$found
+fi
+
+shopt -s nullglob
+skill_files=(skills/*/SKILL.md)
+[ "${#skill_files[@]}" -gt 0 ] || lint_fail frontmatter 'no skills/*/SKILL.md files found'
+
+for file in "${skill_files[@]}"; do
+  dir=${file%/SKILL.md}
+  skill=${dir##*/}
+
+  missing=
+  for key in name kind version description; do
+    [ -n "$(field "$file" "$key")" ] || missing="$missing $key"
+  done
+  [ -z "$missing" ] || lint_fail frontmatter "$file lacks:$missing"
+
+  description=$(field "$file" description)
+  when_to_use=$(field "$file" when_to_use)
+  size=$(printf '%s%s' "$description" "$when_to_use" | wc -m | tr -d ' ')
+  if [ "$size" -ge 1536 ]; then
+    lint_fail description-size "$file description plus when_to_use is $size characters; the limit is 1,535"
+  fi
+
+  if [ -n "$description" ]; then
+    printf '%s' "$description $when_to_use" | grep -qE '"[^"]+"|Use when|Use this|Trigger on|Trigger phrases' ||
+      lint_fail triggers "$file description names no trigger phrase (a quoted phrase, or 'Use when ...')"
+    printf '%s' "$description $when_to_use" | grep -qE '\bNOT\b|[Nn]ot for' ||
+      lint_fail triggers "$file description names no NOT-for case ('NOT for ...')"
+  fi
+
+  bytes=$(body_bytes "$file")
+  if [ "$bytes" -gt 32768 ]; then
+    lint_fail skill-size "$file body is $bytes bytes; the limit is 32,768. Move longer material to references/"
+  elif [ "$bytes" -gt 16384 ]; then
+    lint_warn skill-size "$file body is $bytes bytes; above 16,384, consider paging material from references/"
+  fi
+
+  scripts=$(find "$dir" -path "$dir/tests" -prune -o -type f \( -name '*.py' -o -name '*.sh' -o -name '*.js' -o -name '*.mjs' -o -name '*.ts' -o -name '*.rb' \) -print | head -n 1)
+  if [ -n "$scripts" ] && [ ! -d "$dir/tests" ]; then
+    lint_fail tests-dir "$dir ships a script ($scripts) but has no tests/ directory"
+  fi
+
+  grep -qE "^\| \`$skill\` \|" README.md 2>/dev/null ||
+    lint_fail readme-rows "README.md has no table row for skill $skill"
+done
+
+for agent_file in agents/*.md; do
+  agent=${agent_file##*/}
+  agent=${agent%.md}
+  grep -qE "^\| \`$agent\` \|" README.md 2>/dev/null ||
+    lint_fail readme-rows "README.md has no table row for agent $agent"
+done
+
+# Unprefixed commands: only the two manifests carry the plugin name.
+prefixed="/${plugin_name}:"
+if git ls-files -z | xargs -0 grep -nE "${prefixed}[a-z]" 2>/dev/null; then
+  lint_fail prefixed-command "a file spells a command with the plugin prefix; write the bare command name"
+fi
+
+# No-person gate. Step 1: person-neutral shapes in every tracked file but LICENSE*.
+if git ls-files -z -- ':!LICENSE*' | xargs -0 grep -nE \
+  '/Users/[a-z][a-z0-9_-]*|-Users-[a-z]|\b[a-z0-9-]+\.home([^A-Za-z0-9_(]|$)|\bstanding (grant|election)\b|\bgranted to\b' |
+  grep -vE '/Users/example\b|-Users-someone-app\b'; then
+  lint_fail no-person-shapes 'a tracked file carries a home path, a .home host, or a grant phrase (lines above)'
+fi
+
+# Step 2: the deny list, case-insensitive; the repository's own URL is allowed.
+if [ -z "${OWNER:-}" ] || [ -z "${REPO:-}" ]; then
+  slug=$(git remote get-url origin 2>/dev/null | sed -n 's#.*github\.com[:/]\([^/]*\)/\([^/]*\)$#\1 \2#p')
+  OWNER=${OWNER:-${slug%% *}}
+  REPO=${REPO:-${slug#* }}
+  REPO=${REPO%.git}
+fi
+if [ -z "${NO_PERSON_DENY:-}" ]; then
+  printf 'LINT NOTE [no-person-deny]: NO_PERSON_DENY is unset; the deny-list step was skipped\n'
+else
+  own_url='github\.com/[^[:space:]]*'
+  if [ -n "$OWNER" ] && [ -n "$REPO" ]; then
+    own_url="github\\.com/$OWNER/$REPO"
+  fi
+  # Print only path:line; the matched text could be the denied term itself.
+  if git ls-files -z -- ':!LICENSE*' | xargs -0 grep -inE -e "$NO_PERSON_DENY" |
+    grep -viE "$own_url" | cut -d: -f1,2 | sed 's/^/denied term at /' | grep .; then
+    lint_fail no-person-deny 'a tracked file carries a denied term (locations above)'
+  fi
+fi
+
+# Step 3: dated lines outside tests, except lines carrying a URL.
+if git ls-files -- ':!LICENSE*' | grep -vE '(^|/)tests/|(^|/)test[_-][^/]*$' | tr '\n' '\0' |
+  xargs -0 grep -nE '\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b' | grep -vE 'https?://'; then
+  lint_fail no-person-dates 'a tracked non-test file carries a dated line (lines above)'
+fi
+
+# Identity: report only. History carries a non-noreply address by the owner's choice.
+git log --format='%ae%n%ce' 2>/dev/null | sort -u | grep -v '@users\.noreply\.github\.com$' | grep . |
+  sed 's/^/LINT NOTE [identity] (report only): /' | sed 's/[^ ]*@[^ ]*$/<address>/'
+
+if [ "$fail" -eq 0 ]; then
+  printf 'PASS: skills lint\n'
+fi
+exit "$fail"
