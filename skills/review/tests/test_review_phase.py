@@ -2018,17 +2018,45 @@ def test_reference_scan_finishes_a_4000_character_token_within_a_second(scan, to
     )
 
 
+# The growth test sizes its inputs so a linear scan takes several milliseconds
+# (a 4000-character token takes well under one, where runner noise alone can
+# triple a timing). Each size is timed several times and the fastest call is
+# kept, since noise only ever adds time. The longer input is four times the
+# shorter, so a linear scan grows about four times and a quadratic one about
+# sixteen; the bound of eight sits between them.
+GROWTH_SHORT_LENGTH = 40_000
+GROWTH_LONG_LENGTH = 4 * GROWTH_SHORT_LENGTH
+GROWTH_REPETITIONS = 9
+GROWTH_RATIO_BOUND = 8
+
+
+def _fastest_call_seconds(scan, text: str) -> float:
+    """The fastest of several single calls; one call over the limit ends it."""
+    best = float("inf")
+    for _ in range(GROWTH_REPETITIONS):
+        call = _one_call_seconds(scan, text)
+        if call > REDOS_LIMIT_SECONDS:
+            return call
+        best = min(best, call)
+    return best
+
+
 @pytest.mark.parametrize("scan", list(REFERENCE_SCANS))
 @pytest.mark.parametrize("token", list(LONG_TOKENS))
 def test_reference_scan_time_grows_linearly_with_token_length(scan, token):
-    shorter = _best_seconds_per_call(REFERENCE_SCANS[scan], LONG_TOKENS[token](4000))
-    assert shorter <= REDOS_LIMIT_SECONDS, (
-        f"{scan} took {shorter:.2f}s on a 4000-character {token} token"
+    shorter = _fastest_call_seconds(
+        REFERENCE_SCANS[scan], LONG_TOKENS[token](GROWTH_SHORT_LENGTH)
     )
-    longer = _best_seconds_per_call(REFERENCE_SCANS[scan], LONG_TOKENS[token](8000))
-    assert longer <= 3 * shorter, (
-        f"{scan} on a {token} token: doubling 4000 to 8000 characters took "
-        f"{shorter * 1e3:.3f}ms to {longer * 1e3:.3f}ms, more than three times"
+    assert shorter <= REDOS_LIMIT_SECONDS, (
+        f"{scan} took {shorter:.2f}s on a {GROWTH_SHORT_LENGTH}-character {token} token"
+    )
+    longer = _fastest_call_seconds(
+        REFERENCE_SCANS[scan], LONG_TOKENS[token](GROWTH_LONG_LENGTH)
+    )
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"{scan} on a {token} token: quadrupling {GROWTH_SHORT_LENGTH} to "
+        f"{GROWTH_LONG_LENGTH} characters took {shorter * 1e3:.3f}ms to "
+        f"{longer * 1e3:.3f}ms, more than {GROWTH_RATIO_BOUND} times"
     )
 
 
