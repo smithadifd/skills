@@ -24,7 +24,14 @@ The value is a quoted span when either:
 - (a) the first character after the separator is `"` or `'` (the key/value forms: `"Authorization": "Bearer abc"`); or
 - (b) the key itself sits inside a quoted string that opened with a quote immediately before `Authorization` (the header-string form: `"Authorization: Digest ..."` inside a `curl -H` argument or a Python list).
 
-Either way the span has an opening quote character `q`. The span ends at the first `q` that is not preceded by an odd number of backslashes (escape-aware). Treating a backslash as an escape inside single quotes is deliberate even though a shell does not: it can only make the span longer, which is the safe direction.
+**Which quote is `q`.** (a) is checked first and wins: when the first character after the separator is a quote, that quote is `q`, whether or not the key is quoted. (b) applies only when (a) does not and the quote immediately before `Authorization` is still open at the separator, that is, no unescaped matching quote appears between it and the separator. A quoted or bracketed key (`"Authorization":`, `headers["Authorization"] =`) closes its quote before the separator, so (b) never applies to it: its value is either an (a) span or, when unquoted, § 3.
+
+| Line | `q` |
+|---|---|
+| `"Authorization": "Bearer x"` | the `"` after `: ` (a) |
+| `headers["Authorization"] = 'Basic x'` | the `'` after `= ` (a) |
+| `-H "Authorization: Bearer x"` | the `"` before `Authorization` (b) |
+| `"Authorization": Bearer x` | none: § 3 | The span ends at the first `q` that is not preceded by an odd number of backslashes (escape-aware). Treating a backslash as an escape inside single quotes is deliberate even though a shell does not: it can only make the span longer, which is the safe direction.
 
 **Clean end.** The suffix after the closing quote is kept only when the closing quote is followed by:
 
