@@ -333,3 +333,57 @@ def test_persistent_collision_fails_cleanly(private_tmp, monkeypatch, capsys):
     assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE]) == 1
     assert "handoff:" in capsys.readouterr().err
     assert open(first).read() == before
+
+
+REPO_CRED = "token=" + "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2"
+
+
+def _plant(name, data=b"existing note\n"):
+    """Create a file in the private notes directory and return its path."""
+    path = os.path.join(handoff.notes_dir(), name)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
+
+
+def test_credential_in_repo_never_overwrites_a_colliding_name(private_tmp, monkeypatch, capsys):
+    suffixes = iter(["aaaaaaaa", "bbbbbbbb"])
+    monkeypatch.setattr(handoff.secrets, "token_hex", lambda n: next(suffixes))
+    planted = _plant("handoff-redacted-aaaaaaaa-s.md")
+    assert handoff.main(["--repo", REPO_CRED, "--slug", "s", "--input", FIXTURE]) == 0
+    written = capsys.readouterr().out.splitlines()[0]
+    assert os.path.basename(written) == "handoff-redacted-bbbbbbbb-s.md"
+    with open(planted, "rb") as fh:
+        assert fh.read() == b"existing note\n"
+    assert os.path.getsize(written) > len(b"existing note\n")
+
+
+def test_credential_in_repo_fails_when_every_name_collides(private_tmp, monkeypatch, capsys):
+    monkeypatch.setattr(handoff.secrets, "token_hex", lambda n: "cccccccc")
+    planted = _plant("handoff-redacted-cccccccc-s.md")
+    assert handoff.main(["--repo", REPO_CRED, "--slug", "s", "--input", FIXTURE]) == 1
+    assert "could not pick an unused file name" in capsys.readouterr().err
+    with open(planted, "rb") as fh:
+        assert fh.read() == b"existing note\n"
+    assert os.listdir(os.path.dirname(planted)) == [os.path.basename(planted)]
+
+
+def test_plain_repo_and_slug_reuse_one_file(private_tmp, capsys):
+    first_input, second_input = private_tmp / "first.json", private_tmp / "second.json"
+    first_content, second_content = {"Goal": "first run goal " + "long " * 200}, {"Goal": "second"}
+    first_input.write_text(json.dumps(first_content))
+    second_input.write_text(json.dumps(second_content))
+    paths = []
+    for src in (first_input, second_input):
+        assert handoff.main(["--repo", "my-repo", "--slug", "plain slug", "--input", str(src)]) == 0
+        paths.append(capsys.readouterr().out.splitlines()[0])
+    assert paths[0] == paths[1]
+    assert os.path.basename(paths[0]) == "handoff-my-repo-plain-slug.md"
+    assert os.listdir(os.path.dirname(paths[0])) == ["handoff-my-repo-plain-slug.md"]
+    # The second note is much shorter, so a file opened without truncation would keep
+    # the tail of the first note: the file must be exactly one note of the second size.
+    with open(paths[0], "rb") as fh:
+        data = fh.read()
+    expected, _ = handoff.build_note(second_content, "my-repo", "plain slug")
+    assert len(data) == len(expected.encode("utf-8"))
+    assert b"second" in data and b"first run goal" not in data and b"long long" not in data
