@@ -1,0 +1,16 @@
+{
+  "name": "skills",
+  "owner": {
+    "name": "Skills maintainers"
+  },
+  "plugins": [
+    {
+      "name": "sdlc",
+      "source": "./",
+      "description": "Skills for planning, building, reviewing and handing off software work, with the agents that support them."
+    }
+  ],
+  "metadata": {
+    "description": "Skills and agents for planning, building, reviewing and handing off software work."
+  }
+}
