@@ -1513,7 +1513,9 @@ class TicketPass:
         self._rounds = len(reviews)
         stored = card.get("plan")
         changes: list[str] = []
-        if stored:
+        # Only an absent plan means none was presented yet; an empty one is as
+        # unreadable as any other and is refused below.
+        if stored is not None:
             identity = _plan_identity(stored)
             if identity is None:
                 # Nothing can be compared with a plan that cannot be read, and

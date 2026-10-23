@@ -2526,6 +2526,24 @@ def test_a_stored_plan_that_cannot_be_identified_is_refused_and_writes_nothing(s
     assert store.card == before
 
 
+# Only an absent plan means the card has none yet; an empty stored plan is
+# corrupt like any other unreadable one. A card that never had a plan still
+# resumes: a missing plan key in
+# test_public_api_and_attribute_assignment_cannot_forge_gates_or_passes, a
+# stored None in test_resume_pulls_live_ticket_before_reading_card and
+# test_a_person_clears_a_crashed_pass_with_the_documented_command.
+@pytest.mark.parametrize("empty", ({}, [], ""), ids=("empty mapping", "empty list", "empty text"))
+def test_an_empty_stored_plan_is_refused_and_writes_nothing(empty):
+    store = MemoryStore()
+    at_plan_go(store)
+    store.card["plan"] = empty
+    before = copy.deepcopy(store.card)
+    with pytest.raises(ticket.StoreUnavailable, match="cannot be identified") as refused:
+        resume(store)
+    assert refused.value.code == "plan_unidentifiable"
+    assert store.card == before
+
+
 def test_a_live_pass_whose_stored_plan_cannot_be_identified_is_refused_and_ends():
     store = MemoryStore()
     session = approved_for_close(store)
