@@ -259,10 +259,16 @@ explicit approval is recorded with `record_go("outward", …)`: no push, pull
 request, Jira comment, status change, message, merge, release, or deploy. Call
 `require_outward_go()` before each outward action; it checks the store.
 
+One check backs outward go wherever the pass relies on it, read from the card
+each time: the final review is a passing round of the current plan revision,
+every criterion cites that round and its evidence, and its outward go stop
+stamp is stored. Resuming at outward go, `record_go("outward", …)`,
+`require_outward_go()` and `close` all refuse when it fails.
+
 After approval, perform only the listed outward actions under the target
 repository's rules. Then call `close(point, refs=…, next_skills=…)`. It first
-checks the card: both go decisions, the review rounds, and a final review that
-passed every criterion, with its evidence, to an outward go stop. It refuses,
+checks the card: both go decisions, the review rounds, and that outward go
+check. It refuses,
 writing no close stamp, when any of these fails. It then writes a pending
 close stamp and reads the card back to confirm the stop point, next skills,
 references and the same checks; only then does it confirm the close, and it

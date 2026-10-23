@@ -222,8 +222,10 @@ class PlanStep:
 class PlanCard:
     """Acceptance criteria and explicit skip records for one ticket.
 
-    ``passes`` is not settable here: only ``TicketPass.record_review`` flips it,
-    after the store has recorded the review round the evidence names.
+    ``passes`` is not settable here. It flips only in ``TicketPass``, from a
+    review round the store has recorded: ``record_review`` after storing the
+    round, or ``record_outward_stop`` completing a stored passing round of the
+    current plan revision.
     """
 
     def __init__(self, ticket: Ticket):
@@ -502,15 +504,73 @@ def _validate_review(review: ReviewRecord) -> None:
 def _validate_plan(plan: Mapping[str, Any], key: str) -> None:
     if not isinstance(plan, Mapping) or plan.get("schema") != PLAN_SCHEMA:
         raise TicketError(f"a plan snapshot must carry schema {PLAN_SCHEMA}")
+    # Every value is checked as stored, never in a coerced form.
+    if set(plan) - _PLAN_FIELDS:
+        raise TicketError("a plan snapshot has unknown fields")
+    # Comparing with a str key or name refuses any other type, without coercion.
     if plan.get("key") != key:
         raise TicketError("plan snapshot belongs to another ticket")
+    if not _is_text(plan.get("title")):
+        raise TicketError("a plan snapshot requires its title")
     revision = plan.get("revision")
     if type(revision) is not int or revision < 1:
         raise TicketError("a plan snapshot requires a revision of at least 1")
+    for name in ("ticket_status", "ticket_updated_at"):
+        if name in plan and type(plan[name]) is not str:
+            raise TicketError(f"a plan snapshot's {name} must be text")
+    if "pass" in plan and not _is_text(plan["pass"]):
+        raise TicketError("a plan snapshot's pass must be non-empty text")
+    questions = plan.get("open_questions", [])
+    if type(questions) is not list or not all(_is_text(question) for question in questions):
+        raise TicketError("a plan snapshot's open questions must be a list of non-empty text")
+    if "diff_statement" in plan and not _is_text(plan["diff_statement"]):
+        raise TicketError("a plan snapshot's diff_statement must be non-empty text")
     criteria = plan.get("acceptance_criteria")
-    if not isinstance(criteria, list) or not criteria:
+    if type(criteria) is not list or not criteria:
         raise TicketError("a plan snapshot requires its acceptance criteria")
+    for item in criteria:
+        _validate_criterion(item)
     _validate_steps(plan)
+
+
+_PLAN_FIELDS = frozenset(
+    (
+        "schema",
+        "key",
+        "title",
+        "acceptance_criteria",
+        "steps",
+        "open_questions",
+        "diff_statement",
+        "revision",
+        "ticket_status",
+        "ticket_updated_at",
+        "pass",
+    )
+)
+_CRITERION_FIELDS = frozenset(("text", "passes", "review_evidence", "review_round"))
+
+
+def _is_text(value: Any) -> bool:
+    return type(value) is str and bool(value.strip())
+
+
+def _validate_criterion(item: Any) -> None:
+    """One acceptance criterion as the plan card schema states it."""
+
+    if not isinstance(item, Mapping) or set(item) - _CRITERION_FIELDS:
+        raise TicketError("an acceptance criterion has unknown fields")
+    if not _is_text(item.get("text")):
+        raise TicketError("an acceptance criterion requires its text")
+    if type(item.get("passes")) is not bool:
+        raise TicketError("an acceptance criterion's passes must be true or false")
+    evidence, review_round = item.get("review_evidence"), item.get("review_round")
+    if evidence is not None and type(evidence) is not str:
+        raise TicketError("an acceptance criterion's review evidence must be text")
+    if review_round is not None and (type(review_round) is not int or review_round < 1):
+        raise TicketError("an acceptance criterion's review round must be at least 1")
+    if item["passes"] and (not _is_text(evidence) or review_round is None):
+        raise TicketError("a passing acceptance criterion cites its review round and evidence")
 
 
 def _validate_steps(plan: Mapping[str, Any]) -> None:
@@ -520,22 +580,24 @@ def _validate_steps(plan: Mapping[str, Any]) -> None:
     """
 
     steps = plan.get("steps")
-    if not isinstance(steps, list) or not all(isinstance(step, Mapping) for step in steps):
+    if type(steps) is not list or not all(isinstance(step, Mapping) for step in steps):
         raise TicketError("a plan snapshot requires its steps")
-    if [step.get("name") for step in steps] != list(STEPS):
+    names = [step.get("name") for step in steps]
+    if names != list(STEPS):
         raise TicketError(f"a plan snapshot lists the steps {', '.join(STEPS)}, each once and in order")
     for step in steps:
         if set(step) - {"name", "status", "skip"}:
             raise TicketError(f"plan step {step['name']} has unknown fields")
-        if step.get("status") not in ("pending", "complete", "skipped"):
+        status = step.get("status")
+        if status not in ("pending", "complete", "skipped"):
             raise TicketError(f"plan step {step['name']} has an unknown status")
-        skipped = step["status"] == "skipped"
-        reason = step.get("skip")
-        if skipped and not (isinstance(reason, str) and reason.strip()):
+        skipped = status == "skipped"
+        if skipped and not _is_text(step.get("skip")):
             raise TicketError(f"skipped plan step {step['name']} requires skip: <reason>")
         if not skipped and "skip" in step:
             raise TicketError(f"plan step {step['name']} is not skipped, so it carries no skip reason")
-        if skipped and step["name"] == "plan" and not _one_sentence(str(plan.get("diff_statement") or "").strip()):
+        diff = plan.get("diff_statement")
+        if skipped and step["name"] == "plan" and not (_is_text(diff) and _one_sentence(diff.strip())):
             raise TicketError("the plan may be skipped only for a one-sentence diff")
 
 
@@ -1021,24 +1083,56 @@ def _close_card_problems(card: Mapping[str, Any], key: str, revision: int, round
         for gate in ("plan", "outward")
         if not _has_go(card, gate, revision, key)
     ]
-    reviews = list(card.get("reviews") or ())
-    if len(reviews) != rounds:
+    if len(card.get("reviews") or ()) != rounds:
         problems.append("the review rounds differ")
-    final = reviews[-1] if reviews else {}
-    recorded = _recorded_rounds(reviews)
+    return problems + _review_problems(card, revision)
+
+
+def _passing_final_review(card: Mapping[str, Any], revision: int) -> Mapping[str, Any] | None:
+    """The card's final review when it is a passing round of plan revision ``revision``.
+
+    A passing round carries its round number and its evidence; a round that
+    reviewed another plan revision covers nothing in this one.
+    """
+
+    reviews = card.get("reviews") or ()
+    final = reviews[-1] if reviews else None
+    if (
+        isinstance(final, Mapping)
+        and final.get("verdict") == "pass"
+        and type(final.get("round")) is int
+        and type(final.get("plan_revision")) is int
+        and final["plan_revision"] == revision
+        and isinstance(final.get("evidence"), str)
+        and final["evidence"]
+    ):
+        return final
+    return None
+
+
+def _review_problems(card: Mapping[str, Any], revision: int) -> list[str]:
+    """What the card fails of reaching outward go: a passing final round of this plan
+    revision, every criterion citing it, and its outward go stop stamp.
+
+    Outward authorization, outward actions, close and resume all read it from
+    the card at the moment they rely on it.
+    """
+
+    final = _passing_final_review(card, revision)
+    recorded = _recorded_rounds(card.get("reviews") or ())
     criteria = [
         Criterion(item.get("text"), item.get("passes") is True, item.get("review_evidence"), item.get("review_round"))
         for item in (card.get("plan") or {}).get("acceptance_criteria") or ()
         if isinstance(item, Mapping)
     ]
     if (
-        final.get("verdict") != "pass"
+        final is None
         or not criteria
-        or not all(item.review_round == final.get("round") and _verified(item, recorded) for item in criteria)
-        or not _has_stamp(card, _outward_go_point(final.get("round")), "review")
+        or not all(item.review_round == final["round"] and _verified(item, recorded) for item in criteria)
+        or not _has_stamp(card, _outward_go_point(final["round"]), "review")
     ):
-        problems.append("the last review round did not pass every criterion to an outward go stop")
-    return problems
+        return ["the last review round did not pass every criterion to an outward go stop"]
+    return []
 
 
 def _reconcile(
@@ -1303,17 +1397,11 @@ class TicketPass:
             return
         last = reviews[-1] if reviews else None
         self._last_review = last
-        passed = (
-            last is not None
-            and last.get("verdict") == "pass"
-            and all(item.passes and item.review_round == last.get("round") for item in plan.acceptance_criteria)
-        )
-        stamped = last is not None and _has_stamp(card, _outward_go_point(last.get("round")), "review")
         # A passing round covers only the plan revision it reviewed.
-        passed_this_plan = (
-            last is not None and last.get("verdict") == "pass" and last.get("plan_revision") == self._revision
-        )
-        if passed and stamped:
+        final = _passing_final_review(card, self._revision)
+        passed_this_plan = final is not None
+        stamped = passed_this_plan and _has_stamp(card, _outward_go_point(final["round"]), "review")
+        if not _review_problems(card, self._revision):
             self._phase = "outward_go"
         elif passed_this_plan and not stamped:
             # A passing round reaches outward go only once its stop stamp is
@@ -1341,10 +1429,16 @@ class TicketPass:
                 )
                 self._phase = "stopped"
             else:
-                self.reconciliation += (
-                    f"cap stop not recorded: review round {self._rounds} is stored without its stop stamp; "
-                    "record_cap_stop() writes it",
-                )
+                # Three stored rounds mean ``last`` is a stored review here.
+                if last.get("verdict") == "pass":
+                    why = (
+                        f"review round {last.get('round')} passed plan revision {last.get('plan_revision')}, "
+                        f"not the current plan revision {self._revision}, so the round cap is reached "
+                        "without a passing round of this plan"
+                    )
+                else:
+                    why = f"review round {self._rounds} is stored without its stop stamp"
+                self.reconciliation += (f"cap stop not recorded: {why}; record_cap_stop() writes it",)
                 self._phase = "cap_stop"
         else:
             self._phase = "build"
@@ -1429,6 +1523,8 @@ class TicketPass:
                     code="plan_changed",
                 )
             pass_id = self._pass_id
+        else:
+            self._require_review_on_card("no outward go was recorded")
         self.store.record_decision(
             DecisionRecord(
                 who="the person",
@@ -1538,13 +1634,21 @@ class TicketPass:
 
         self._require_phase("outward_stop")
         last = self._last_review or {}
-        # Resume enters this phase only for a stored passing round of the
-        # current plan revision, so the plan and the round are both present.
-        review_round, evidence = last["round"], last.get("evidence")
-        rounds = _recorded_rounds(self.store.read_card().get("reviews") or [])
+        # The card is read again: the round must still be the passing round of
+        # this plan revision that the resume found, with the same evidence.
+        reviews = self.store.read_card().get("reviews") or ()
+        stored = reviews[-1] if reviews and isinstance(reviews[-1], Mapping) else {}
+        if type(stored.get("round")) is not int:
+            raise TicketError("the stored final review carries no round number, so no outward stop was written")
+        final = _passing_final_review({"reviews": reviews}, self._revision)
+        if final is None or (final["round"], final["evidence"]) != (last.get("round"), last.get("evidence")):
+            raise StoreUnavailable(
+                f"the stored final review is no longer the passing round of plan revision {self._revision} "
+                "this pass resumed, so no outward stop was written",
+                code="review_changed",
+            )
+        review_round, evidence = final["round"], final["evidence"]
         criteria = tuple(Criterion(item.text, True, evidence, review_round) for item in self._plan.acceptance_criteria)
-        if not all(_verified(item, rounds) for item in criteria):
-            raise StoreUnavailable(f"review round {review_round} does not carry this evidence")
         if criteria != self._plan.acceptance_criteria:
             self._plan._criteria = criteria
             self._plan_ref = self.store.record_plan(self._snapshot(self._plan, self._revision))
@@ -1566,12 +1670,22 @@ class TicketPass:
         self._phase = "stopped"
         self.end("review did not converge after round three")
 
+    @_ends_on_failure
     def require_outward_go(self) -> None:
-        """Call before any outward action; the store must hold the outward go."""
+        """Call before any outward action; the store must hold the outward go.
+
+        The card must also still hold the passing review that reached outward go.
+        """
 
         self._require_phase("outward_go")
         if not self.approved("outward"):
             raise GateRequired("outward go is required before any outward action")
+        self._require_review_on_card("no outward action is allowed")
+
+    def _require_review_on_card(self, refused: str) -> None:
+        problems = _review_problems(self.store.read_card(), self._revision)
+        if problems:
+            raise StoreUnavailable(f"{refused}: " + "; ".join(problems), code="review_changed")
 
     @_ends_on_failure
     def close(
