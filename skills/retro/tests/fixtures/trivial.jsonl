@@ -1,8 +1,8 @@
 {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "What does the report command print?"}]}}
-{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "src/report.py"}}]}}
-{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": false, "content": "def report(rows): ..."}]}}
-{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "def report"}}]}}
-{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "is_error": false, "content": "src/report.py:1"}]}}
-{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t3", "name": "Edit", "input": {"file_path": "src/report.py"}}]}}
-{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t3", "is_error": false, "content": "edited"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "Read", "input": {"file_path": "src/report.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "def report(rows): ...", "is_error": false}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_02", "name": "Grep", "input": {"pattern": "def report"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_02", "content": "src/report.py:1", "is_error": false}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_03", "name": "Edit", "input": {"file_path": "src/report.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_03", "content": "edited", "is_error": false}]}}
 {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "It prints one line per row."}]}}

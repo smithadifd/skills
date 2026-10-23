@@ -44,9 +44,13 @@ transcript is a JSONL file of messages whose content blocks are text,
    Exit code 3 means a trivial session: print its one-line message and stop.
    Without a transcript, skip if the range has fewer than two commits and no
    review thread, and say so.
-2. **Scan.** Run `python3 retro.py scan <transcript>`. It lists failed check
-   runs grouped by class (a lint rule code or normalized error line) and the
-   person's correction turns. These are leads for the reviewers, not findings.
+2. **Scan.** Run `python3 retro.py scan <transcript>`. It lists the person's
+   correction turns and the tool-and-identifier classes (a lint code or test id)
+   that failed in at least two runs. These are leads for the reviewers, not
+   findings. A run counts as failed only when its result is an error that
+   starts with a non-zero `Exit code`; summary text is never read, so a failure
+   hidden by a pipe (`pytest | tail`) is missed rather than guessed. Details:
+   `references/failure-detection.md`.
 3. **Review in parallel.** Start three read-only subagents in one message. Each
    reads the same inputs plus the scan output, applies all seven lenses in
    `references/lenses.md`, and returns candidate findings as JSON objects (shape

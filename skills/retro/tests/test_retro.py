@@ -53,7 +53,7 @@ def test_real_transcript_proceeds():
 def test_scan_finds_the_repeated_mechanical_class_and_both_corrections():
     out = json.loads(run("scan", FIX / "mistakes.jsonl").stdout)
     classes = {c["class"]: c["count"] for c in out["mechanical_candidates"]}
-    assert classes == {"E501": 2}
+    assert classes == {"ruff:E501": 2}
     assert len(out["corrections"]) == 2
 
 
@@ -229,9 +229,6 @@ def test_structure_finding_needs_a_proposal():
     assert any("needs a proposal" in p for p in retro.validate(data))
 
 
-def test_passing_check_runs_are_not_failures():
-    out = json.loads(run("scan", FIX / "passing.jsonl").stdout)
-    assert out["mechanical_candidates"] == []
 
 
 def test_approve_refuses_an_invalid_file(tmp_path):
@@ -248,22 +245,8 @@ def test_approve_refuses_an_invalid_file(tmp_path):
 # ---- round 3
 
 
-def test_suffix_zero_counts_are_not_failures():
-    out = json.loads(run("scan", FIX / "passing.jsonl").stdout)
-    assert out["mechanical_candidates"] == []
 
 
-def test_nonzero_suffix_counts_are_still_failures(tmp_path):
-    rec = [
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "pytest"}}]}},
-        {"type": "user", "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "a", "content": "Errors: 10"}]}},
-    ]
-    src = tmp_path / "t.jsonl"
-    src.write_text("\n".join(json.dumps(r) for r in rec) + "\n")
-    out = json.loads(run("scan", src).stdout)
-    assert len(out["mechanical_candidates"]) == 1
 
 
 def test_malformed_instance_ref_is_reported_cleanly(tmp_path):
@@ -285,11 +268,69 @@ def test_malformed_instance_ref_is_reported_cleanly(tmp_path):
 # ---- round 4
 
 
-def test_mixed_zero_and_nonzero_summary_is_a_failure_class():
-    out = json.loads(run("scan", FIX / "mixed-failing.jsonl").stdout)
-    assert [c["count"] for c in out["mechanical_candidates"]] == [2]
+# ---- scan: a failed run is decided from the tool result, never from summary text
 
 
-def test_all_zero_summary_is_not_a_failure():
-    out = json.loads(run("scan", FIX / "mixed-passing.jsonl").stdout)
+def scan(name):
+    result = run("scan", FIX / name)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_passing_runs_with_any_summary_wording_are_never_failures():
+    out = scan("passing.jsonl")
+    assert out["mechanical_candidates"] == [] and out["unclassified"] == []
+    assert "notice" not in out
+
+
+def test_two_failed_runs_sharing_a_lint_code_are_one_candidate():
+    out = scan("mistakes.jsonl")
+    assert [(c["class"], c["count"]) for c in out["mechanical_candidates"]] == [("ruff:E501", 2)]
+
+
+def test_one_failed_run_is_not_a_candidate():
+    out = scan("single-failure.jsonl")
     assert out["mechanical_candidates"] == []
+
+
+def test_hook_refusal_without_an_exit_line_is_ignored():
+    out = scan("hook-refusal.jsonl")
+    assert out["mechanical_candidates"] == [] and out["unclassified"] == []
+
+
+def test_mixed_summary_counts_by_exit_status_not_by_text():
+    out = scan("mixed-failing.jsonl")
+    assert [(c["class"], c["count"]) for c in out["mechanical_candidates"]] == [
+        ("pytest:tests/test_a.py::test_x", 2)]
+
+
+def test_transcript_without_is_error_fields_gets_a_notice_and_corrections():
+    out = scan("no-error-field.jsonl")
+    assert out["mechanical_candidates"] == []
+    assert "no is_error fields" in out["notice"]
+    assert len(out["corrections"]) == 1
+
+
+def test_unclassified_failures_are_reported_but_never_a_candidate():
+    out = scan("unclassified.jsonl")
+    assert out["mechanical_candidates"] == []
+    assert out["unclassified"] == [{"tool": "make", "count": 2}]
+
+
+def test_tool_name_skips_env_assignments_python_m_and_npx():
+    out = scan("wrapped.jsonl")
+    assert [c["class"] for c in out["mechanical_candidates"]] == ["ruff:F401"]
+
+
+def test_piped_failure_is_under_counted_not_invented():
+    assert scan("piped.jsonl")["mechanical_candidates"] == []
+
+
+def test_error_result_needs_a_non_zero_exit_line():
+    def event(text, error=True):
+        return {"error": error, "text": text}
+    assert retro.failed_run(event("Exit code 2\nboom"))
+    assert not retro.failed_run(event("Exit code 0\nboom"))
+    assert not retro.failed_run(event("boom\nExit code 1"))
+    assert not retro.failed_run(event("Exit code 1\nboom", error=False))
+    assert not retro.failed_run({"error": "true", "text": "Exit code 1"})

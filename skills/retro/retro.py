@@ -29,15 +29,10 @@ TRIVIAL_MAX_TOOL_CALLS = 10
 TRIVIAL_MAX_EDITS = 3
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
-CHECK_COMMAND = re.compile(
-    r"\b(lint|ruff|eslint|flake8|mypy|tsc|pytest|prettier|black|shellcheck|clippy)\b", re.I
-)
-_WORD = r"(?:errors?|failed|failures?)"
-FAILURE_TEXT = re.compile(rf"\b{_WORD}\b", re.I)
-ZERO_COUNT = re.compile(
-    rf"\b(?:0|no)\s+{_WORD}\b|\b{_WORD}\s*[:=]?\s*0\b(?!\.?\d)", re.I
-)
 RULE_CODE = re.compile(r"\b[A-Z]{1,4}\d{2,4}\b")
+TEST_NODE = re.compile(r"[\w./-]+\.py::[\w:\[\]./-]+")
+EXIT_LINE = re.compile(r"Exit code (\d+)")
+WRAPPERS = {"env", "npx", "command", "time", "sudo"}
 CORRECTION_CUE = re.compile(
     r"^\s*(no\b|don'?t\b|do not\b|stop\b|again\b|i said\b|that'?s not\b|wrong\b)", re.I
 )
@@ -103,7 +98,8 @@ def events(path):
                     "kind": "tool_result",
                     "line": number,
                     "id": block.get("tool_use_id"),
-                    "error": bool(block.get("is_error")),
+                    "has_flag": "is_error" in block,
+                    "error": block.get("is_error") is True,
                     "text": str(body),
                 }
 
@@ -120,49 +116,77 @@ def triage(path):
     return {"trivial": trivial, "tool_calls": tool_calls, "edits": edits}
 
 
-def _failure_lines(text):
-    """Lines that report a failure; zero-count results such as '0 errors' do not."""
-    return [ln for ln in text.splitlines() if FAILURE_TEXT.search(ZERO_COUNT.sub("", ln))]
+def _tool(command):
+    """First command word after env, assignments, 'python -m' and npx."""
+    words = command.split()
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in WRAPPERS or re.match(r"^[A-Za-z_]\w*=", word) or word.startswith("-"):
+            i += 1
+        elif re.match(r"^python[\d.]*$", word) and words[i + 1 : i + 2] == ["-m"]:
+            i += 2
+        else:
+            return word.rsplit("/", 1)[-1]
+    return ""
 
 
-def _signature(text):
-    match = RULE_CODE.search(text)
-    if match:
-        return match.group(0)
-    first = next(iter(_failure_lines(text)), text.strip()[:80])
-    first = re.sub(r"\S+\.\w+(:\d+)*:?", "", first)
-    first = re.sub(r"(?<![A-Za-z])\d+", "N", first.lower())
-    return " ".join(first.split())[:80]
+def failed_run(event):
+    """True only for an error result that starts with a non-zero exit-status line."""
+    if event["error"] is not True:
+        return False
+    match = EXIT_LINE.match(event["text"])
+    return bool(match) and int(match.group(1)) != 0
+
+
+def _identifiers(text):
+    return sorted(set(RULE_CODE.findall(text)) | set(TEST_NODE.findall(text)))
 
 
 def scan(path):
-    """Group failed check-tool runs by class; list the person's correction turns."""
+    """Group failed runs by (tool, identifier); list the person's correction turns.
+
+    A run failed only when its result is an error that begins with a non-zero
+    exit-status line. Summary text is never read for pass or fail.
+    """
     commands = {}
-    classes = {}
+    groups = {}
+    unclassified = {}
     corrections = []
+    results = 0
+    flagged = 0
     for event in events(path):
         if event["kind"] == "tool_use":
             commands[event["id"]] = str(event["input"].get("command", ""))
         elif event["kind"] == "tool_result":
-            command = commands.get(event["id"], "")
-            failed = event["error"] or _failure_lines(event["text"])
-            if failed and CHECK_COMMAND.search(command):
-                sig = _signature(event["text"])
-                excerpt = next(
-                    (ln for ln in event["text"].splitlines() if ln.strip()), ""
-                )[:120]
-                classes.setdefault(sig, []).append(
-                    {"ref": f"line {event['line']}", "excerpt": excerpt}
-                )
+            results += 1
+            flagged += event["has_flag"]
+            if not failed_run(event):
+                continue
+            tool = _tool(commands.get(event["id"], ""))
+            excerpt = next((ln for ln in event["text"].splitlines()[1:] if ln.strip()), "")[:120]
+            instance = {"ref": f"line {event['line']}", "excerpt": excerpt}
+            idents = _identifiers(event["text"])
+            if not idents:
+                unclassified.setdefault(tool, []).append(instance)
+            for ident in idents:
+                groups.setdefault((tool, ident), []).append(instance)
         elif event["kind"] == "user" and CORRECTION_CUE.search(event["text"]):
             corrections.append({"ref": f"line {event['line']}", "excerpt": event["text"][:160]})
-    return {
+    out = {
         "mechanical_candidates": [
-            {"class": sig, "count": len(inst), "instances": inst}
-            for sig, inst in sorted(classes.items())
+            {"class": f"{tool}:{ident}", "count": len(inst), "instances": inst}
+            for (tool, ident), inst in sorted(groups.items())
+            if len(inst) >= MIN_INSTANCES
+        ],
+        "unclassified": [
+            {"tool": tool, "count": len(inst)} for tool, inst in sorted(unclassified.items())
         ],
         "corrections": corrections,
     }
+    if results and not flagged:
+        out["notice"] = "no is_error fields in this transcript; failed runs cannot be identified"
+    return out
 
 
 # ------------------------------------------------------------------- findings

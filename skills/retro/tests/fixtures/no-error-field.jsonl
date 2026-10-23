@@ -1,0 +1,5 @@
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "Bash", "input": {"command": "ruff check src"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "Exit code 1\nsrc/a.py:1:89: E501 too long"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_02", "name": "Bash", "input": {"command": "ruff check src"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_02", "content": "Exit code 1\nsrc/b.py:1:89: E501 too long"}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "No, wrong."}]}}
