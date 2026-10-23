@@ -27,7 +27,7 @@ Nothing else is required. A key needs no separator, quote or bracket, so every s
 - A section that holds a key anywhere becomes exactly `[REDACTED]`: one marker, nothing before it, nothing after it. The same marker as every other pattern, so the note has one redaction mark.
 - A section with no key is redacted by the other patterns (token shapes, `NAME=value`, `NAME: value`, JSON pairs, `--token`-style flags) exactly as before.
 - Other sections are untouched: a key in one section never changes another, earlier or later.
-- The header: when the header text holds a key (it carries the repository name, the slug and the date), the header text becomes `[REDACTED]`. The blank line that ends the header is layout added by the script, not content, so it is kept and the first heading stays a heading.
+- The header: when the header text holds a key (it carries the repository name, the slug and the date), the header text becomes `[REDACTED]`. Each field is judged whole, on its one-line form, before a long field is shortened, so a key past the cut still counts. A header with no key has each field redacted by the other patterns before it is shortened, so the cut never leaves part of a secret. The blank line that ends the header is layout added by the script, not content, so it is kept and the first heading stays a heading.
 
 ## 3. Cost
 
@@ -141,6 +141,8 @@ Sections, the header and size:
 | S02 | Section 1 `"Authorization: Bearer x` `\n` `tailsecret` `\n` `more tailsecret`; later sections `next body kept` and a list `kept question` | Section 1 is `R`; the later sections unchanged |
 | S03 | Note header whose slug is `x Authorization: Bearer tailsecret` | The note starts `R`, a blank line, then `## Goal` with its body unchanged; no `Written:` line |
 | S04 | Note header with no key | `# Handoff: r / s`, a blank line, `Written: …` as before |
+| S05 | Note header whose repository is `x Authorization: Bearer tailsecret` | As S03 |
+| S06 | Note header whose slug is 100 `a`s, then ` Authorization: Bearer tailsecret` (the key starts past the cut) | As S03; no byte of the slug remains |
 | T01 | A large section: 40 000 and 160 000 characters of near-keys (`xAuthorization -Authorization _HTTP_ HTTP_PROXY_ REDIRECT_ %2 \x0 …`), and of plain text with one key at the very end | Each call under a second; four times the input takes at most eight times as long (linear); the key at the end still gives `R` |
 
 ## 5. Mutations (suite-level kills)
@@ -163,6 +165,8 @@ Each mutation is applied on a scratch copy and must turn the named tests red; re
 | Drop the `%25HH` boundary | E08 |
 | Redact from the key instead of the section start | every K, L and E case, S01–S03, T01 |
 | Redact the header from the key instead of whole | S03 |
+| Drop the whole-header check (redact each field only) | S03, S05, S06 |
+| Shorten a header field before judging it for a key | S06 |
 | A key in one section also redacts every later section | S02 |
 | A key in any section redacts every section | S01, S02 |
 
