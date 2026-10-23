@@ -232,7 +232,7 @@ def test_default_path_and_stdout_carry_no_slug_credential(private_tmp, capsys, s
 
 
 @pytest.mark.parametrize("slug,needle", CRED_SLUGS)
-def test_default_path_helper_uses_fixed_stem_for_a_credential(private_tmp, slug, needle):
+def test_default_path_helper_uses_redacted_stem_with_suffix_for_a_credential(private_tmp, slug, needle):
     path = handoff.default_path("r", slug)
     assert re.fullmatch(r"handoff-r-redacted-[0-9a-f]{8}\.md", os.path.basename(path))
 
@@ -278,3 +278,47 @@ def test_token_straddling_the_header_limit_leaves_no_bytes_in_the_note():
     slug = "a" * (handoff.HEADER_FIELD_MAX - 10) + " " + token
     note, _ = handoff.build_note({"Goal": "g"}, "r", slug)
     assert "QZQZ" not in note and "ghp_" not in note
+
+
+NEWLINE_SECRET = 'PASSWORD="hunter2\nsecretpart"'
+
+
+def test_quoted_secret_spanning_a_newline_is_not_in_the_title():
+    slug = "x" * 50 + " " + NEWLINE_SECRET + "y" * 30 + '"'
+    note, _ = handoff.build_note({"Goal": "g"}, "r", slug)
+    assert "hunter2" not in note and "secretpa" not in note
+
+
+def test_quoted_secret_spanning_a_newline_is_not_a_file_name(private_tmp, capsys):
+    assert handoff.main(["--repo", "r", "--slug", NEWLINE_SECRET, "--input", FIXTURE]) == 0
+    out = capsys.readouterr().out
+    assert "hunter2" not in out and "secretpart" not in out
+    assert re.fullmatch(r"handoff-r-redacted-[0-9a-f]{8}\.md", os.path.basename(out.splitlines()[0]))
+
+
+def test_same_credential_slug_twice_gives_two_names(private_tmp):
+    slug = "token=" + "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2"
+    assert handoff.default_path("r", slug) != handoff.default_path("r", slug)
+
+
+def test_forced_suffix_collision_keeps_both_notes(private_tmp, monkeypatch, capsys):
+    suffixes = iter(["aaaaaaaa", "aaaaaaaa", "bbbbbbbb"])
+    monkeypatch.setattr(handoff.secrets, "token_hex", lambda n: next(suffixes))
+    slug = "token=" + "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2"
+    paths = []
+    for _ in range(2):
+        assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE]) == 0
+        paths.append(capsys.readouterr().out.splitlines()[0])
+    assert [os.path.basename(p) for p in paths] == ["handoff-r-redacted-aaaaaaaa.md", "handoff-r-redacted-bbbbbbbb.md"]
+    assert all(os.path.getsize(p) > 0 for p in paths)
+
+
+def test_persistent_collision_fails_cleanly(private_tmp, monkeypatch, capsys):
+    monkeypatch.setattr(handoff.secrets, "token_hex", lambda n: "cccccccc")
+    slug = "token=" + "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2"
+    assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE]) == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    before = open(first).read()
+    assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE]) == 1
+    assert "handoff:" in capsys.readouterr().err
+    assert open(first).read() == before
