@@ -40,6 +40,10 @@ WRAPPERS = {
     "time": {"-f", "--format", "-o", "--output"},
     "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-D", "-R", "-T"},
 }
+# Output filters: in a pipeline they read another command's output, so they do
+# not name the line's command unless every stage is one.
+FILTERS = {"tail", "head", "tee", "grep", "less", "more", "cat", "sort", "uniq",
+           "wc", "cut", "sed", "awk", "tr", "column"}
 CORRECTION_CUE = re.compile(
     r"^\s*(no\b|don'?t\b|do not\b|stop\b|again\b|i said\b|that'?s not\b|wrong\b)", re.I
 )
@@ -196,7 +200,18 @@ def _tool(command):
     """
     parts = [[st for st in seg if st.strip()] for seg in _stages(command)]
     parts = [seg for seg in parts if seg]
-    words = parts[-1][0].split() if parts else []
+    if not parts:
+        return ""
+    tools = [_stage_tool(st) for st in parts[-1]]
+    for tool in reversed(tools):
+        if tool not in FILTERS:
+            return tool
+    return tools[0]
+
+
+def _stage_tool(stage):
+    """The command word of one pipeline stage (wrappers and python -m skipped)."""
+    words = stage.split()
     i = 0
     wrapper = None
     while i < len(words):
