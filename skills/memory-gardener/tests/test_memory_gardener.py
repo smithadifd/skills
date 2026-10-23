@@ -739,10 +739,10 @@ def test_classify_shard_first_keyword_wins_else_core():
 def test_default_taxonomy_classifies_real_topic_shapes():
     # Sanity on the shipped default taxonomy (anonymized real stems).
     assert mg.classify_shard("fleet-roadmap", mg.DEFAULT_SHARD_TAXONOMY) == "fleet"
-    assert mg.classify_shard("infra-map-living-map", mg.DEFAULT_SHARD_TAXONOMY) == "infra"
+    assert mg.classify_shard("infra-living-map", mg.DEFAULT_SHARD_TAXONOMY) == "infra"
     assert mg.classify_shard("ai-coding-tasks-pipeline", mg.DEFAULT_SHARD_TAXONOMY) == "automation"
     assert mg.classify_shard("op-tcc-appdata-gate", mg.DEFAULT_SHARD_TAXONOMY) == "secrets"
-    assert mg.classify_shard("foundry", mg.DEFAULT_SHARD_TAXONOMY) is None
+    assert mg.classify_shard("patio-umbrella", mg.DEFAULT_SHARD_TAXONOMY) is None
 
 
 def test_default_taxonomy_classifies_generic_note_stems():
@@ -1508,9 +1508,9 @@ def test_shard_pointer_line_never_classified_into_a_shard():
     pointer, not a note — propose_shards must never fold it into a shard even
     when its stem keyword-matches the taxonomy."""
     # DEFAULT taxonomy: `MEMORY.fleet` would match the "fleet" keyword.
-    pointer = ("- [MEMORY.fleet.md](MEMORY.fleet.md) — Fleet / SEROTINE · "
+    pointer = ("- [MEMORY.fleet.md](MEMORY.fleet.md) — Fleet / Overview · "
                "11 notes · ~500 tok · load JIT when the topic comes up")
-    text = ("# Memory Index\n\n%s\n- [Foundry](foundry.md) — meta repo\n"
+    text = ("# Memory Index\n\n%s\n- [Notes](notes.md) — meta repo\n"
             % pointer)
     prop = mg.propose_shards(text, mg.DEFAULT_SHARD_TAXONOMY)
     # No shard captured the pointer.
@@ -3083,7 +3083,7 @@ def test_find_hyphen_underscore_mismatches_scoped_to_one_store(tmp_path):
 def test_scan_includes_hyphen_underscore_repairs_key():
     """Regression guard on the shipped invented fixture: it has no
     hyphen/underscore-fixable dangling links today (matches the real corpus
-    finding for the non-hoard stores)."""
+    finding for the other stores)."""
     result = mg.scan(FIXTURE, TODAY)
     assert result["hyphen_underscore_repairs"] == []
 

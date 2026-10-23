@@ -35,7 +35,7 @@
   explicitly to garden a different project's memory. Don't widen a run across
   projects.
 - **`--today` is for tests/determinism.** Real runs use the system date; the
-  fixture tests pin `--today 2026-07-08` so age math is stable.
+  fixture tests pin `--today` to a fixed `YYYY-MM-DD` date so age math is stable.
 - **`budget` is chars/4, not a real tokenizer.** The estimate can be off by
   10–20%; that's fine for a tripwire. Don't swap in a heavyweight tokenizer —
   raise/lower `--max-tokens` instead if the ceiling feels wrong.
