@@ -2021,33 +2021,67 @@ GROWTH_RATIO_BOUND = 8
 GROWTH_WINDOW_SECONDS = 0.005
 
 
-def _span_seconds(scan, text: str, calls: int) -> float:
-    start = time.perf_counter()
+def _span_seconds(scan, text: str, calls: int, clock=time.perf_counter) -> float:
+    start = clock()
     for _ in range(calls):
         scan(text)
-    return time.perf_counter() - start
+    return clock() - start
 
 
-def _fastest_call_seconds(scan, text: str) -> float:
+def _fastest_call_seconds(scan, text: str, clock=time.perf_counter) -> float:
     """The fastest per-call time over several timed spans.
 
     A span repeats the call until it lasts GROWTH_WINDOW_SECONDS (a single call
-    when one already does). A first call over the limit ends it, so a pattern
-    that is far too slow is not timed again.
+    when one already does). The spans that find that call count are discarded,
+    since they are shorter than the window and so the noisiest samples. A first
+    call over the limit ends it, so a pattern that is far too slow is not timed
+    again. `clock` is a seam for the helper's own test.
     """
     calls = 1
-    best = float("inf")
-    span = _span_seconds(scan, text, calls)
+    span = _span_seconds(scan, text, calls, clock)
     while span < GROWTH_WINDOW_SECONDS:
-        best = min(best, span / calls)
         calls *= 2
-        span = _span_seconds(scan, text, calls)
-    best = min(best, span / calls)
+        span = _span_seconds(scan, text, calls, clock)
     if calls == 1 and span > REDOS_LIMIT_SECONDS:
         return span
+    best = span / calls
     for _ in range(GROWTH_REPETITIONS - 1):
-        best = min(best, _span_seconds(scan, text, calls) / calls)
+        best = min(best, _span_seconds(scan, text, calls, clock) / calls)
     return best
+
+
+class _VirtualClock:
+    """A clock that moves only when a scan spends time on it."""
+
+    def __init__(self, costs):
+        self.now = 0.0
+        self.costs = costs
+        self.calls = 0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def scan(self, text: str) -> None:
+        self.now += self.costs(self.calls)
+        self.calls += 1
+
+
+def test_fastest_call_ignores_the_spans_shorter_than_the_window():
+    # The first four calls are cheap (a warm-up or a coarse timer reading), so
+    # every calibration span reads as fast. Only spans that reach the window
+    # count, and those measure the steady 1 ms per call.
+    clock = _VirtualClock(lambda index: 0.0002 if index < 4 else 0.001)
+    fastest = _fastest_call_seconds(clock.scan, "", clock)
+    assert fastest >= 0.0007, (
+        f"the fastest per-call time was {fastest * 1e3:.3f}ms, "
+        "a span shorter than the window was counted"
+    )
+
+
+def test_fastest_call_returns_a_first_call_over_the_limit_without_timing_again():
+    clock = _VirtualClock(lambda index: 2 * REDOS_LIMIT_SECONDS)
+    assert _fastest_call_seconds(clock.scan, "", clock) == 2 * REDOS_LIMIT_SECONDS
+    assert clock.calls == 1
 
 
 @pytest.mark.parametrize("scan", list(REFERENCE_SCANS))
