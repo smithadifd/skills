@@ -38,7 +38,11 @@ Reproduce the bug as a failing test before touching the code. The test, not your
 
 ## Before you finish
 
-Prove each new test can fail against the finished change. Commit first and start with a clean `git status --porcelain`. Restore the production files you changed to the base commit, run the tests and see at least one fail, restore your change from `HEAD`, and confirm the tree is clean and the tests pass. Then run the repo's full test suite and its lint or build steps.
+The red run happens first, against the unchanged code, so the loop already produced the proof. Never commit, restore files, or otherwise modify the person's checkout to prove it. Do not use `git stash`.
+
+If you need a revert proof after the fact, do it in a scratch copy. Take the base, the commit the change started from, as an exported copy outside the checkout (`git worktree add <tmp> <base>`, or `git archive <base> | tar -x -C <tmp>`). Copy the new tests there, run them, and see at least one fail. Remove the scratch copy when done.
+
+Then run the repo's full test suite and its lint or build steps in the real checkout.
 
 ## Handing off the evidence
 
