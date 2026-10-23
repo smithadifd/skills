@@ -549,3 +549,21 @@ def test_python_interpreter_options_before_dash_m_group_with_the_plain_tool():
     assert retro._tool("python script.py") == "python"
     assert retro._tool("python -c 'import x'") == "python"
     assert retro._tool("python -m pytest") == "pytest"
+
+
+def test_python_x_flag_group_with_the_plain_tool():
+    assert retro._tool("python -x -m pytest") == retro._tool("pytest") == "pytest"
+    assert retro._tool("python3 -Ix -m pytest -q") == "pytest"
+
+
+def test_attached_dash_m_module_groups_with_the_plain_tool():
+    assert retro._tool("python -mpytest") == retro._tool("pytest") == "pytest"
+    assert retro._tool("python3 -I -mpytest -q") == "pytest"
+
+
+def test_or_and_pipe_chains_name_the_last_segment_like_and_and_semicolon():
+    plain = retro._tool("pytest")
+    for command in ("a || pytest", "a | pytest", "a && b || pytest -q", "a | b || pytest"):
+        assert retro._tool(command) == plain, command
+    assert retro._tool("pytest || echo failed") == "echo"
+    assert retro._tool("pytest | tail") == "tail"
