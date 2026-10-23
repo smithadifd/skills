@@ -64,7 +64,8 @@ _PATTERNS = [
 # letter, digit or underscore after it, makes it part of another word). A
 # letter or digit that ends a written escape (\n, \r, \t, \xHH, \uHHHH) or a
 # percent-encoded byte (%HH, %25HH) is a boundary, not part of a word. No
-# separator is required, so prose mentions count as keys too.
+# separator is required, so prose mentions count as keys too. A section that
+# holds a key is redacted whole.
 # See references/authorization-redaction.md.
 _AUTH_KEY = re.compile(
     r"(?:(?<![A-Za-z0-9_-])"
@@ -90,12 +91,11 @@ class NoteError(Exception):
 def redact(text):
     """Replace secret-shaped strings with [REDACTED].
 
-    text is one section (or the header). From the first Authorization key,
-    everything after the key to the end of text is replaced.
+    text is one section (or the header). When it holds an Authorization key,
+    the whole of it is replaced by one marker.
     """
-    key = _AUTH_KEY.search(text)
-    if key:
-        return _redact_from_key(text, key)
+    if _AUTH_KEY.search(text):
+        return REDACTED
     for pattern in _PATTERNS:
         text = pattern.sub(REDACTED, text)
     text = _FLAG.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
@@ -103,47 +103,6 @@ def redact(text):
     text = _COLON.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     text = _JSON_PAIR.sub(lambda m: m.group(1) + '"' + REDACTED + '"', text)
     return text
-
-
-def _secret_spans(text):
-    """(start, end) of every part the other patterns would replace, found on
-    text as given, so a value that runs into a key keeps its closing quote."""
-    for pattern in _PATTERNS:
-        for m in pattern.finditer(text):
-            yield m.span()
-    for pattern in (_FLAG, _ASSIGN, _COLON):
-        for m in pattern.finditer(text):
-            yield m.span(3)
-    for m in _JSON_PAIR.finditer(text):
-        yield m.end(1) + 1, m.end() - 1
-
-
-def _redact_from_key(text, key):
-    """Text up to the key with every secret span before the key masked (a
-    span that runs into the key is masked up to it), then the key, then the
-    marker. The key is found and every span is matched on the original text,
-    so no other pattern can consume the key or lose the quote it needs. Spans
-    are also matched on the text before the key closed by each quote, so a
-    quoted value the key leaves unterminated is masked too."""
-    cut = key.start()
-    found = []
-    for variant in (text, text[:cut] + '"', text[:cut] + "'"):
-        found.extend(_secret_spans(variant))
-    spans = sorted((s, min(e, cut)) for s, e in found if s < min(e, cut))
-    out, pos = [], 0
-    for start, end in spans:
-        if end <= pos:
-            continue
-        if start <= pos and out:
-            pos = end
-            continue
-        start = max(start, pos)
-        out.append(text[pos:start])
-        out.append(REDACTED)
-        pos = end
-    out.append(text[pos:key.end()])
-    out.append(REDACTED)
-    return "".join(out)
 
 
 def _trim(body, limit):

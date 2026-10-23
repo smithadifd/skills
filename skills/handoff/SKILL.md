@@ -60,9 +60,9 @@ reader with no memory of this conversation, so every line must stand alone.
   `NAME: value` for key, token, secret and password names, and `--token`-style
   flags). Pattern matching is a net, not a guarantee, so still keep secrets out
   of the content.
-- From any `Authorization` key (also `Proxy-Authorization` and the
-  `HTTP_AUTHORIZATION` forms), redacts everything after it to the end of that
-  section, even a prose mention; see `references/authorization-redaction.md`.
+- Replaces a whole section with `[REDACTED]` when it holds an `Authorization`
+  key (also `Proxy-Authorization` and the `HTTP_AUTHORIZATION` forms), even a
+  prose mention; see `references/authorization-redaction.md`.
 - Caps the note at 20 KB. Over the cap it shortens the largest section bodies,
   keeps every heading, and appends a visible truncation notice.
 - Never makes a commit.
