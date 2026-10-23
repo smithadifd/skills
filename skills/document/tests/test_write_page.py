@@ -8,7 +8,9 @@ copy of the script.
 """
 
 import importlib.util
+import io
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -235,3 +237,83 @@ def test_create_refuses_when_the_page_appears_before_the_link(layout, monkeypatc
     monkeypatch.undo()
     assert page.read_bytes() == b"someone else got here first\n"
     assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
+
+
+def _main_with_stdin(monkeypatch, repo, dest, mode, text):
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(text)))
+    return write_page.main(["--repo", str(repo), "--root", str(repo / "docs"),
+                            "--dest", str(dest), "--mode", mode])
+
+
+def test_a_directory_sync_failure_after_publication_is_not_reported_as_unchanged(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    page.write_bytes(b"old\n")
+    real_fsync = os.fsync
+
+    def fsync_failing_on_directories(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(5, "Input/output error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(write_page.os, "fsync", fsync_failing_on_directories)
+    code = _main_with_stdin(monkeypatch, repo, page, "update", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "written, but syncing the directory failed" in err
+    assert "unchanged" not in err
+    assert page.read_bytes() == b"new\n"
+    assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
+
+
+def test_the_temporary_file_is_never_wider_than_0600_while_it_holds_content(
+        layout, monkeypatch):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    page.write_bytes(b"old\n")
+    page.chmod(0o644)
+    seen = []
+    real_write = os.write
+
+    def watching_write(fd, data):
+        seen.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        return real_write(fd, data)
+
+    monkeypatch.setattr(write_page.os, "write", watching_write)
+    write_page.write_through(
+        os.path.realpath(repo), ["docs", "page.md"], 1, b"secret draft\n", "update")
+    monkeypatch.undo()
+    assert seen and all(mode & 0o077 == 0 for mode in seen), oct(seen[0])
+
+
+def test_update_keeps_the_pages_permission_bits(layout):
+    repo, _ = layout
+    for bits in (0o600, 0o640, 0o664):
+        page = repo / "docs" / f"page-{bits:o}.md"
+        page.write_bytes(b"old\n")
+        page.chmod(bits)
+        result = run(repo, repo / "docs", page, "update", "new\n")
+        assert result.returncode == 0, result.stderr.decode()
+        assert stat.S_IMODE(page.stat().st_mode) == bits
+        assert page.read_bytes() == b"new\n"
+
+
+def test_create_gives_the_page_mode_0644(layout):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    assert run(repo, repo / "docs", page, "create").returncode == 0
+    assert stat.S_IMODE(page.stat().st_mode) == 0o644
+
+
+def test_a_250_byte_page_name_can_be_created_and_updated(layout):
+    repo, _ = layout
+    page = repo / "docs" / ("a" * 247 + ".md")
+    assert len(page.name.encode()) == 250
+    result = run(repo, repo / "docs", page, "create", "long\n")
+    assert result.returncode == 0, result.stderr.decode()
+    result = run(repo, repo / "docs", page, "update", "longer\n")
+    assert result.returncode == 0, result.stderr.decode()
+    assert page.read_bytes() == b"longer\n"
+    assert [p.name for p in (repo / "docs").iterdir()] == [page.name]
