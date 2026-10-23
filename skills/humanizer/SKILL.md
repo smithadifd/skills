@@ -14,7 +14,9 @@ description: >
   much like AI", "clean up the AI voice", "write this naturally", "scan this for AI
   tells", "detect, don't rewrite", or any request where the output shouldn't read as
   machine-generated. Even if the user doesn't use those exact words, use this skill
-  whenever writing quality and natural voice matter for the deliverable.
+  whenever writing quality and natural voice matter for the deliverable. NOT for
+  financial or market digests (use `humanizer-finance`), and NOT for writing new
+  content from scratch when voice is not a concern.
 ---
 
 # Humanizer
