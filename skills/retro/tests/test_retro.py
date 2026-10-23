@@ -457,3 +457,17 @@ def test_obsolete_rule_still_requires_its_removal_diff(tmp_path):
     src.write_text(json.dumps({"findings": [item]}))
     result = run("build", src, "--out", tmp_path / "f.json")
     assert result.returncode == 1 and "needs a diff" in result.stderr
+
+
+# ---- round 4
+
+
+def test_unhashable_tool_use_ids_do_not_crash_scan(tmp_path):
+    text = "Exit code 1\nsrc/a.py:1:1: E501 long"
+    recs = [{"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tid, "is_error": True, "content": text}]}}
+        for tid in ([1], {"a": 1}, [1], {"a": 1})]
+    src = tmp_path / "t.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    out = scan_file(src)
+    assert out["mechanical_candidates"] == [] and out["unclassified"] == []
