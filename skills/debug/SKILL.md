@@ -7,8 +7,8 @@ description: >
   isolating the fault and fixing it behind a test that fails first. Use when
   the user says "why does this fail", "this test is failing", "debug this", or
   reports a crash, wrong output or regression. NOT for feature work or new
-  behavior (use `tdd`, or delegate to the `builder-core` agent), and NOT for
-  reviewing a diff that already exists (that is `review`).
+  behavior (write the test first yourself, or delegate to the `builder-core`
+  agent), and NOT for reviewing a diff that already exists (that is `review`).
 ---
 
 Find the cause of a reported bug and fix it. Never claim a fix without a test
