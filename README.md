@@ -54,6 +54,21 @@ Use the built-in Explore agent for open-ended reading of a codebase, and the bui
 - `reviewer` reviews with no prior context and backs its verdict with what it ran; raise its effort per spawn for an adversarial review.
 - `researcher`, `doc-researcher`, `doc-verifier` and `api-contract-tracer` return a structured answer to a narrow question, where Explore returns free-form notes.
 
+## Where each one fits
+
+Which skill or agent to reach for at each step of delivering a change:
+
+- Discover: `kickoff` turns an early idea into a researched plan. `sharpen` asks questions until the requirements are clear. `shape` tests a design for risks before you build it.
+- Understand: `teach` explains how a codebase works. `researcher` answers a focused question about code or an API. `api-contract-tracer` follows an endpoint to its callers. `dependency-auditor` compares dependency versions across projects. `doc-researcher`, `doc-writer` and `doc-verifier` gather facts for, write and check a documentation page.
+- Plan: use Claude Code's Plan mode to outline the steps.
+- Build: `builder-core` builds one ticket on its own branch and opens a draft pull request. `tdd` is the test-first loop for changing behavior yourself, and it is how a `debug` fix gets built.
+- Debug: `debug` reproduces a bug, finds the cause, and ends in a failing test that `tdd` then turns green.
+- Review: `review` checks your changes for bugs and security problems. `reviewer` is an independent second pair of eyes that shows what it ran.
+- Ship: `pr` prepares the pull request with the project's conventions.
+- Continue: `handoff` writes a resume note, `pickup` resumes from it, and `topic` keeps the notes for a long-running discussion in one file.
+- Learn: `retro` reads a finished session and proposes changes to your setup.
+- Housekeeping: `memory-gardener` tidies a Claude memory directory. `humanizer` revises prose to sound natural, and `humanizer-finance` does the same for market and financial writing.
+
 ## Install
 
 There are two ways to install: as a Claude Code plugin, or with `install.sh`. Use one, not both.
@@ -137,6 +152,17 @@ Remove every available agent:
 ```sh
 ./install.sh --uninstall --all-agents
 ```
+
+## Writing and checking a skill
+
+If you write your own skill, this is the path:
+
+- Draft and tune it with the `skill-creator` plugin.
+- Run `/skill-doctor` to see what a skill costs in context and which installed skills go unused.
+- Run `/doctor prompt-audit` to find instructions that conflict with each other.
+- Run `claude plugin validate` to check the plugin's structure.
+- Run `claude plugin eval` to check how the skill behaves.
+- Run `ci/lint-skills.sh` to check this repository's own contract: a trigger and a NOT-for case in each description, size limits, a README row for every skill and agent, and no hard-coded install paths.
 
 ## License
 
