@@ -29,7 +29,7 @@ finding across several bullets.
 - Any verdict that relies on a measured interval carries an `INTERVAL:` line: `INTERVAL: from <start event>, <start source> to <end event>, <end source> = <duration>` (every part non-empty).
 
 Phase artifacts (optional, when a caller wants the structured result): Python 3
-is needed. Write the review to a file and run `python3 ~/.claude/skills/review/review_phase.py --from-text <file>
+is needed. Write the review to a file and run `python3 ${CLAUDE_SKILL_DIR}/review_phase.py --from-text <file>
 --backend claude-fresh`. It prints a `phase_result: v1`
 whose `artifacts["findings.json"]` validates against `skills/review/findings.schema.json`
 (`--validate <findings.json>` re-checks one); the one-line bullet shape above,

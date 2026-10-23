@@ -1,4 +1,4 @@
 {
   "topics_dir": null,
-  "_notes": "topics_dir is the only path key. A non-empty string is the topics write directory; README.md and TEMPLATE.md in that directory, and standards/model-routing.md beside it, are optional reads. null, absent, empty, or a non-string falls through to topics_dir.py DEFAULT_TOPICS_DIR (~/.claude/topics). This standalone install leaves the key unset so topics default to ~/.claude/topics. Resolve with `python3 ~/.claude/skills/topic/topics_dir.py`."
+  "_notes": "topics_dir is the only path key. A non-empty string is the topics write directory; README.md and TEMPLATE.md in that directory, and standards/model-routing.md beside it, are optional reads. null, absent, empty, or a non-string falls through to topics_dir.py DEFAULT_TOPICS_DIR (~/.claude/topics). This standalone install leaves the key unset so topics default to ~/.claude/topics. Resolve with `python3 ${CLAUDE_SKILL_DIR}/topics_dir.py`."
 }

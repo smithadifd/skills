@@ -24,7 +24,7 @@ SOURCE_KEYS = {
 
 def test_documented_resolver_path_targets_standalone_install():
     text = SKILL_DOC.read_text(encoding="utf-8")
-    assert "python3 ~/.claude/skills/sharpen/paths.py" in text, (
+    assert "python3 ${CLAUDE_SKILL_DIR}/paths.py" in text, (
         "the resolver command must target install.sh's standalone destination"
     )
     assert "~/neighbor-project/" not in text, (

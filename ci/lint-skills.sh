@@ -8,6 +8,7 @@
 #   skill-size        SKILL.md body warns above 16,384 bytes, fails above 32,768
 #   tests-dir         a skill that ships a script has a tests/ directory
 #   readme-rows       every skill and agent has a README table row
+#   skill-path        no SKILL.md hard-codes the .claude/skills/ install directory
 #   prefixed-command  no file spells a command with the plugin prefix
 #   no-person-*       no person, host, home path or dated line in a tracked file
 #
@@ -131,14 +132,22 @@ for agent_file in agents/*.md; do
     lint_fail readme-rows "README.md has no table row for agent $agent"
 done
 
+# A skill runs its scripts from its own directory so both install paths work.
+for skill_doc in skills/*/SKILL.md skills/*/references/*.md; do
+  [ -f "$skill_doc" ] || continue
+  if grep -nF '.claude/skills/' "$skill_doc"; then
+    lint_fail skill-path "$skill_doc hard-codes .claude/skills/; call scripts through \${CLAUDE_SKILL_DIR}"
+  fi
+done
+
 # Unprefixed commands: only the two manifests carry the plugin name.
 prefixed="/${plugin_name}:"
-if git ls-files -z | xargs -0 grep -nE "${prefixed}[a-z]" 2>/dev/null; then
+if git ls-files -z | xargs -0 grep -naE "${prefixed}[a-z]" 2>/dev/null; then
   lint_fail prefixed-command "a file spells a command with the plugin prefix; write the bare command name"
 fi
 
 # No-person gate. Step 1: person-neutral shapes in every tracked file but LICENSE*.
-if git ls-files -z -- ':!LICENSE*' | xargs -0 grep -nE \
+if git ls-files -z -- ':!LICENSE*' | xargs -0 grep -naE \
   '/Users/[a-z][a-z0-9_-]*|-Users-[a-z]|\b[a-z0-9-]+\.home([^A-Za-z0-9_(]|$)|\bstanding (grant|election)\b|\bgranted to\b' |
   grep -vE '/Users/example\b|-Users-someone-app\b'; then
   lint_fail no-person-shapes 'a tracked file carries a home path, a .home host, or a grant phrase (lines above)'
@@ -167,20 +176,43 @@ if [ -z "${NO_PERSON_DENY:-}" ]; then
 elif [ "$deny_status" -eq 2 ]; then
   lint_fail no-person-deny-config 'NO_PERSON_DENY is not a valid extended regular expression'
 else
-  own_url='^$'
+  own_url=
   if [ -n "$OWNER" ] && [ -n "$REPO" ]; then
-    own_url="github\\.com/$OWNER/$REPO"
+    own_url="github.com/$OWNER/$REPO"
   fi
+  # Cut only the repository's own URL text out of each line (a literal,
+  # case-insensitive match that must end at a boundary: end of line, a path
+  # or query separator, .git, whitespace, a quote or a closing bracket), then
+  # apply the deny expression to what is left, so a denied term elsewhere on
+  # the same line is still found. Every stage reads bytes as text (-a, the C
+  # locale, NUL turned into a space) so a tracked binary file is scanned too.
   # Print only path:line; the matched text could be the denied term itself.
-  if git ls-files -z -- ':!LICENSE*' | xargs -0 grep -inE -e "$NO_PERSON_DENY" |
-    grep -viE "$own_url" | cut -d: -f1,2 | sed 's/^/denied term at /' | grep .; then
+  if git ls-files -z -- ':!LICENSE*' | LC_ALL=C xargs -0 grep -naH -e '' |
+    LC_ALL=C tr '\000' ' ' |
+    LC_ALL=C awk -v url="$own_url" '
+      BEGIN {
+        u = tolower(url)
+        ure = u
+        gsub(/\./, "\\.", ure)
+        re = ure "(\\.git)?([]/#?\"\047)>,;: \t]|\\.($|[ \t])|$)"
+      }
+      {
+        out = ""
+        rest = $0
+        while (u != "" && match(tolower(rest), re)) {
+          out = out substr(rest, 1, RSTART - 1)
+          rest = substr(rest, RSTART + length(u))
+        }
+        print out rest
+      }' |
+    LC_ALL=C grep -aiE -e "$NO_PERSON_DENY" | LC_ALL=C cut -d: -f1,2 | sed 's/^/denied term at /' | grep .; then
     lint_fail no-person-deny 'a tracked file carries a denied term (locations above)'
   fi
 fi
 
 # Step 3: dated lines outside tests, except lines carrying a URL.
 if git ls-files -- ':!LICENSE*' | grep -vE '(^|/)tests/|(^|/)test[_-][^/]*$' | tr '\n' '\0' |
-  xargs -0 grep -nE '\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b' | grep -vE 'https?://'; then
+  xargs -0 grep -naE '\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b' | grep -vE 'https?://'; then
   lint_fail no-person-dates 'a tracked non-test file carries a dated line (lines above)'
 fi
 

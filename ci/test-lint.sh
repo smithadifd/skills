@@ -35,7 +35,7 @@ make_tree() {
 
 # run_lint <tree>: the lint with a synthetic deny list, outside any CI setting.
 run_lint() {
-  env -u CI -u GITHUB_ACTIONS NO_PERSON_DENY="$deny" bash "$lint" "$1" 2>&1
+  env -u CI -u GITHUB_ACTIONS -u OWNER -u REPO NO_PERSON_DENY="$deny" bash "$lint" "$1" 2>&1
 }
 
 base=$(new_dir)
@@ -76,6 +76,24 @@ else
   note_fail 'a dated line under tests/ should pass'
 fi
 
+# The repository's own URL is allowed even when the deny list names its owner.
+tree=$(new_dir)
+make_tree "$tree"
+git -C "$tree" remote add origin https://github.com/zzowner/zzrepo.git
+{
+  printf 'See https://github.com/zzowner/zzrepo for the source.\n'
+  printf 'Clone https://github.com/zzowner/zzrepo.git now.\n'
+  printf 'Docs: https://github.com/zzowner/zzrepo/issues, (https://github.com/zzowner/zzrepo)\n'
+  printf 'Link "https://github.com/zzowner/zzrepo" and https://github.com/zzowner/zzrepo.\n'
+  printf 'Last: https://github.com/zzowner/zzrepo\n'
+} > "$tree/notes.md"
+git -C "$tree" add -A
+if env -u CI -u GITHUB_ACTIONS -u OWNER -u REPO NO_PERSON_DENY=zzowner bash "$lint" "$tree" > /dev/null 2>&1; then
+  printf 'PASS: a line holding only the repository URL passes the deny step\n'
+else
+  note_fail 'a line holding only the repository URL should pass the deny step'
+fi
+
 # A tree with a planted denied term, for the deny-list configuration checks.
 tree=$(new_dir)
 make_tree "$tree"
@@ -109,7 +127,7 @@ for ci_var in CI GITHUB_ACTIONS; do
 done
 
 # An invalid deny expression is a configuration error, in or out of CI.
-out=$(env -u CI -u GITHUB_ACTIONS NO_PERSON_DENY='good|(unclosed' bash "$lint" "$tree" 2>&1)
+out=$(env -u CI -u GITHUB_ACTIONS -u OWNER -u REPO NO_PERSON_DENY='good|(unclosed' bash "$lint" "$tree" 2>&1)
 status=$?
 if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -qF 'LINT FAIL [no-person-deny-config]' &&
   ! printf '%s\n' "$out" | grep -q '^PASS'; then

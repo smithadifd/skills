@@ -44,7 +44,7 @@ reader with no memory of this conversation, so every line must stand alone.
    an object mapping each section name to a string, or to a list of strings
    (one bullet each).
 3. **Run the script:**
-   `python3 ~/.claude/skills/handoff/handoff.py --repo <repo-name> --slug <short-topic> --input <content.json>`
+   `python3 ${CLAUDE_SKILL_DIR}/handoff.py --repo <repo-name> --slug <short-topic> --input <content.json>`
    It prints the note's path and a line `truncated: yes` or `truncated: no`.
    The default is `handoff-<repo>-<slug>.md` in a private per-user directory
    (mode 0700) under the temporary directory; the file is mode 0600. Pass
