@@ -72,10 +72,14 @@ _AUTH_QUOTED = re.compile(
 )
 # A header written inside a quoted string ("Authorization: Digest a=\"b\"",
 # single or double quotes): redact up to the matching unescaped closing quote
-# and keep that quote and whatever follows it.
+# and keep that quote and whatever follows it. The closing quote must sit at a
+# real string boundary (space, end, or a separator); otherwise the quoting is
+# ambiguous (for example a concatenated "a="'"b"') and the match is refused, so
+# the line-bounded rule below redacts the rest of the header.
+_BOUNDARY = r"(?:\s|$|[;|&)\]},])"
 _AUTH_IN_STRING = re.compile(
-    r"(\"\bAuthorization\s*:\s*)" + _SCHEME + r"(?:[^\"\\\n]|\\.)*"
-    r"|('\bAuthorization\s*:\s*)" + _SCHEME + r"(?:[^'\\\n]|\\.)*",
+    r"(\"\bAuthorization\s*:\s*)" + _SCHEME + r"(?:[^\"\\\n]|\\.)*(?=\"" + _BOUNDARY + r")"
+    r"|('\bAuthorization\s*:\s*)" + _SCHEME + r"(?:[^'\\\n]|\\.)*(?='" + _BOUNDARY + r")",
     re.IGNORECASE,
 )
 # An unquoted header: a scheme and then the rest of the line, so a multi-part

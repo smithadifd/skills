@@ -102,6 +102,18 @@ def test_quoted_header_with_an_escaped_quote_in_the_digest_value():
     assert out.endswith('", retries=3)'), out
 
 
+def test_quote_concatenated_header_value_never_leaks_its_tail():
+    cases = [
+        ("""curl -H "Authorization: Digest username="'"u", response="tailsecret"' https://example.com/x""", "tailsecret"),
+        ("""curl -H "Authorization: Bearer tok"'tailsecret' https://example.com/x""", "tailsecret"),
+        ("""curl -H 'Authorization: Bearer tok'"tailsecret" https://example.com/x""", "tailsecret"),
+        ("""curl -H "Authorization: Digest a="b"c="tailsecret"" https://example.com/x""", "tailsecret"),
+    ]
+    for text, secret in cases:
+        out = handoff.redact(text)
+        assert secret not in out and handoff.REDACTED in out, (text, out)
+
+
 def test_unquoted_digest_header_leaves_no_tail():
     text = 'Authorization: Digest username="u", realm="r", response="tail-secret-value"'
     out = handoff.redact(text)
