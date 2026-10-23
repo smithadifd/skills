@@ -92,7 +92,7 @@ YAML.
 | Source | Path | Used for |
 |---|---|---|
 | Memory dir | `~/.claude/projects/<project>/memory/` | the fact files + `MEMORY.md` index (the thing being gardened) |
-| Helper | `~/.claude/skills/memory-gardener/memory_gardener.py` | scan / report / apply / budget / shard / filebudget / classify (stdlib-only, offline) |
+| Helper | `${CLAUDE_SKILL_DIR}/memory_gardener.py` | scan / report / apply / budget / shard / filebudget / classify (stdlib-only, offline) |
 | Plan | a scratch `plan.json` you write from the scan | the reviewed set of verdicts; shared by report and apply |
 | Reports | `~/.claude/logs/memory-gardener/` | the only write target of `report`; a same-day re-run claims `<date>-2.md`, never overwrites |
 | Fixture | `skills/memory-gardener/tests/fixtures/memory/` | invented fake memories for the tests (no real content) |

@@ -28,10 +28,10 @@ with no shared library on the path.
 
 CLI
 ---
-    python3 ~/.claude/skills/topic/topics_dir.py
-    python3 ~/.claude/skills/topic/topics_dir.py --config <path>
-    python3 ~/.claude/skills/topic/topics_dir.py --notices
-    python3 ~/.claude/skills/topic/topics_dir.py --open <slug> --ask <text>
+    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py
+    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --config <path>
+    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --notices
+    python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --open <slug> --ask <text>
 
 `--open` writes `<topics_dir>/<slug>.md` only when that file does not already
 exist. Notices go to stderr. The resolved path goes to stdout.

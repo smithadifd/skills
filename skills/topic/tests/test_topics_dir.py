@@ -216,7 +216,7 @@ def test_shipped_config_normative_paths_follow_standalone_default(
 
 
 def test_standalone_install_paths_are_documented():
-    installed_path = "~/.claude/skills/topic/topics_dir.py"
+    installed_path = "${CLAUDE_SKILL_DIR}/topics_dir.py"
     for filename in ("SKILL.md", "topics_dir.py", "config.json"):
         text = (SKILL_DIR / filename).read_text(encoding="utf-8")
         assert re.findall(r"~/(?!\.claude)\S+", text) == [], (

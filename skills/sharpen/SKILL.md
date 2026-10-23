@@ -54,7 +54,7 @@ menu — spend the same channel. Ask only what only the user can answer.
 
 ## Sources and path resolution
 
-Run `python3 ~/.claude/skills/sharpen/paths.py` before reading or
+Run `python3 ${CLAUDE_SKILL_DIR}/paths.py` before reading or
 writing anything. It prints one JSON object containing `roadmaps`, `standards`,
 and the four optional-source paths below.
 
