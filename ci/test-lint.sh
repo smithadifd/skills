@@ -180,7 +180,9 @@ for kind in colon-name crlf; do
       printf "$own zzother wrote this$eol" >> "$target"
     fi
     git -C "$tree" add -A
-    if url_lint "$tree"; then
+    out=$(env -u CI -u GITHUB_ACTIONS -u OWNER -u REPO NO_PERSON_DENY="$url_deny" bash "$lint" "$tree" 2>&1)
+    status=$?
+    if [ "$status" -eq 0 ]; then
       if [ "$variant" = clean ]; then
         printf 'PASS: %s file with a leading own-URL passes the deny step\n' "$kind"
       else
@@ -188,7 +190,11 @@ for kind in colon-name crlf; do
       fi
     else
       if [ "$variant" = planted ]; then
-        printf 'PASS: %s file with a denied word fails the deny step\n' "$kind"
+        if printf '%s\n' "$out" | grep -qxF "denied term at ${target#"$tree"/}:3"; then
+          printf 'PASS: %s file with a denied word fails and reports path:line\n' "$kind"
+        else
+          note_fail "$kind file: the report should hold the full path:line (${target#"$tree"/}:3): $out"
+        fi
       else
         note_fail "$kind file with only a leading own-URL should pass the deny step"
       fi

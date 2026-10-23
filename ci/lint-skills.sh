@@ -278,7 +278,7 @@ else
         {
           body = $0
           match(body, /^[0-9]+:/)
-          pre = ENVIRON["SCAN_FILE"] ":" substr(body, 1, RLENGTH)
+          pre = ENVIRON["SCAN_FILE"] ":" substr(body, 1, RLENGTH - 1)
           body = substr(body, RLENGTH + 1)
           cr = ""
           if (substr(body, length(body), 1) == "\r") {
@@ -292,7 +292,7 @@ else
             match(seg, /[^ \t]+$/)
             out = out substr(seg, 1, RSTART - 1) hide(substr(seg, RSTART))
           }
-          print pre out body cr
+          print pre "\001" out body cr
         }'
   }
   scan_tracked() {
@@ -308,9 +308,11 @@ else
   }
   scan_out=$(scan_tracked)
   scan_status=$?
+  # Each record is path:line, a SOH byte, then the text; print only the part
+  # before the SOH, so a colon in the path cannot cut the line number off.
   # Print only path:line; the matched text could be the denied term itself.
   deny_hits=$(printf '%s\n' "$scan_out" | LC_ALL=C grep -aiE -e "$NO_PERSON_DENY" |
-    LC_ALL=C cut -d: -f1,2 | sed 's/^/denied term at /')
+    LC_ALL=C cut -d"$(printf '\001')" -f1 | sed 's/^/denied term at /')
   if [ -n "$deny_hits" ]; then
     printf '%s\n' "$deny_hits"
     lint_fail no-person-deny 'a tracked file carries a denied term (locations above)'
