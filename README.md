@@ -27,6 +27,7 @@ cd skills
 | `review` | Checks code changes for bugs and security problems. |
 | `shape` | Tests a proposed design for risks and missing considerations before implementation. |
 | `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. |
+| `tdd` | Applies a test-first loop when you change behavior yourself: a failing test, the smallest passing change, then a refactor, with the red-then-green evidence handed to the reviewer. |
 | `teach` | Explains how a codebase works with a system overview, component tour, and traced example. |
 | `topic` | Keeps the notes for an ongoing, focused discussion in one file. |
 
