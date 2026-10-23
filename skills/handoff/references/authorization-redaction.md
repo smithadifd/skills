@@ -31,11 +31,14 @@ The value is a quoted span when either:
 | `"Authorization": "Bearer x"` | the `"` after `: ` (a) |
 | `headers["Authorization"] = 'Basic x'` | the `'` after `= ` (a) |
 | `-H "Authorization: Bearer x"` | the `"` before `Authorization` (b) |
-| `"Authorization": Bearer x` | none: § 3 | The span ends at the first `q` that is not preceded by an odd number of backslashes (escape-aware). Treating a backslash as an escape inside single quotes is deliberate even though a shell does not: it can only make the span longer, which is the safe direction.
+| `"Authorization": Bearer x` | none: § 3 |
+
+The span ends at the first `q` that is not preceded by an odd number of backslashes (escape-aware). Treating a backslash as an escape inside single quotes is deliberate even though a shell does not: it can only make the span longer, which is the safe direction.
 
 **Clean end.** The suffix after the closing quote is kept only when the closing quote is followed by:
 
-- whitespace or the end of the line; or
+- the end of the line; or
+- whitespace, unless the first non-whitespace character after it can continue a string expression: a quote (`"` or `'`), a string prefix of one or two of `r` `b` `u` `f` (any case) immediately followed by a quote, or one of `+` `%` `*` `.`. Python joins adjacent literals (`"Bearer x" "tail"`) and these operators build a string from the literal, so any of them sends the value to § 3; or
 - a shell metacharacter that ends a word: `;` `&` `|` `<` `>` `(` `)`. Whatever follows one of these is a new token (a redirect target, a pipe, the next command), never part of the header argument; or
 - a run of one or more of `,` `]` `}` that is itself followed by whitespace, the end of the line, or one of the metacharacters above. A shell treats `,` `]` `}` as ordinary word characters, so the run alone does not end the argument; only what follows it can.
 
@@ -49,7 +52,10 @@ Anything else is not a clean end, and the value is redacted to the end of the li
 | `"` or `'` (`"a=","response=x"` has `,` then `"`) | shell concatenates adjacent words; a list item with no space after the comma reads the same way | to end of line |
 | a letter, digit or other word character (`"..."tail`) | shell concatenation | to end of line |
 | `]x`, `}x`, `,x` (closer run not followed by whitespace) | shell treats `]` `}` `,` as ordinary word characters | to end of line |
+| ` "tail"`, ` f"tail"`, ` + "tail"`, ` % x`, ` .format(x)` | Python continues the string expression | to end of line |
 | no closing quote on the line | unterminated | to end of line |
+
+A shell command whose next argument is quoted (`-H "Authorization: Bearer x" "https://host"`) also goes to § 3 under this rule; losing that argument is the accepted cost.
 
 So a Python or JSON line written without a space after its separators (`["Authorization: Bearer x","Accept: y"]`) loses its suffix. That is the accepted cost.
 
@@ -82,4 +88,8 @@ Each row below is a test; the secret marker (`tailsecret`) must be absent from t
 12. `curl -H "Authorization: Digest algorithm=MD5",username='"u"',nonce='"tailsecret"' https://x` → no `tailsecret`.
 13. `curl -H "Authorization: Basic dGFpbHNlY3JldA==">response.txt` → no `dGFpbHNlY3JldA==`; `>response.txt` kept.
 
-Cases 2–5 and 12 are inputs that leaked under the previous attempt. Each test is observed red under a targeted mutation of the clean-end rule (for 2–5, 11 and 12: accept a closer run as a clean end whatever follows it; for 1: accept any following character; for 6–8 and 13: always redact to the end of the line) and green after restoration.
+14. `["Authorization: Bearer x" "tailsecret"]` → no `tailsecret`.
+15. `h = "Authorization: Bearer " + "tailsecret"` → no `tailsecret`.
+16. `"Authorization: Bearer x" f"tailsecret"` → no `tailsecret`.
+
+Cases 14–16 are red under a mutation that accepts whitespace as a clean end unconditionally. Cases 2–5 and 12 are inputs that leaked under the previous attempt. Each test is observed red under a targeted mutation of the clean-end rule (for 2–5, 11 and 12: accept a closer run as a clean end whatever follows it; for 1: accept any following character; for 6–8 and 13: always redact to the end of the line) and green after restoration.
