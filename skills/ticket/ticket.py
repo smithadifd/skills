@@ -1071,7 +1071,9 @@ def _close_stamp_problems(
     return problems
 
 
-def _close_card_problems(card: Mapping[str, Any], key: str, revision: int, rounds: int) -> list[str]:
+def _close_card_problems(
+    card: Mapping[str, Any], key: str, revision: int, rounds: int, plan_texts: Sequence[str]
+) -> list[str]:
     """What the card fails of the checks a close needs, apart from its own stamp.
 
     ``close`` runs this before it writes the close stamp, after reading that
@@ -1085,7 +1087,7 @@ def _close_card_problems(card: Mapping[str, Any], key: str, revision: int, round
     ]
     if len(card.get("reviews") or ()) != rounds:
         problems.append("the review rounds differ")
-    return problems + _review_problems(card, revision)
+    return problems + _review_problems(card, revision, plan_texts)
 
 
 def _passing_final_review(card: Mapping[str, Any], revision: int) -> Mapping[str, Any] | None:
@@ -1110,14 +1112,36 @@ def _passing_final_review(card: Mapping[str, Any], revision: int) -> Mapping[str
     return None
 
 
-def _review_problems(card: Mapping[str, Any], revision: int) -> list[str]:
-    """What the card fails of reaching outward go: a passing final round of this plan
-    revision, every criterion citing it, and its outward go stop stamp.
+def _card_plan_problems(card: Mapping[str, Any], revision: int, plan_texts: Sequence[str]) -> list[str]:
+    """What the card's plan fails of being the plan this pass holds: plan
+    revision ``revision`` with the criterion texts ``plan_texts``, same count,
+    same order.
+    """
+
+    plan = card.get("plan") or {}
+    stored = plan.get("acceptance_criteria") or ()
+    texts = [item.get("text") if isinstance(item, Mapping) else None for item in stored]
+    if (
+        type(plan.get("revision")) is not int
+        or plan["revision"] != revision
+        or len(texts) != len(plan_texts)
+        or any(text != expected for text, expected in zip(texts, plan_texts))
+    ):
+        return [f"the card's plan is not plan revision {revision} with this pass's acceptance criteria in order"]
+    return []
+
+
+def _review_problems(card: Mapping[str, Any], revision: int, plan_texts: Sequence[str]) -> list[str]:
+    """What the card fails of reaching outward go: the plan this pass holds
+    (plan revision ``revision`` with the criterion texts ``plan_texts``), a
+    passing final round of that revision, every criterion citing it, and its
+    outward go stop stamp.
 
     Outward authorization, outward actions, close and resume all read it from
     the card at the moment they rely on it.
     """
 
+    problems = _card_plan_problems(card, revision, plan_texts)
     final = _passing_final_review(card, revision)
     recorded = _recorded_rounds(card.get("reviews") or ())
     criteria = [
@@ -1131,8 +1155,8 @@ def _review_problems(card: Mapping[str, Any], revision: int) -> list[str]:
         or not all(item.review_round == final["round"] and _verified(item, recorded) for item in criteria)
         or not _has_stamp(card, _outward_go_point(final["round"]), "review")
     ):
-        return ["the last review round did not pass every criterion to an outward go stop"]
-    return []
+        problems.append("the last review round did not pass every criterion to an outward go stop")
+    return problems
 
 
 def _reconcile(
@@ -1337,6 +1361,11 @@ class TicketPass:
     def plan_revision(self) -> int:
         return self._revision
 
+    def _plan_texts(self) -> tuple[str, ...]:
+        """The criterion texts of the plan this pass holds, in order."""
+
+        return tuple(item.text for item in self._plan.acceptance_criteria) if self._plan else ()
+
     @_ends_on_failure
     def approved(self, gate: str) -> bool:
         if gate not in ("plan", "outward"):
@@ -1401,7 +1430,7 @@ class TicketPass:
         final = _passing_final_review(card, self._revision)
         passed_this_plan = final is not None
         stamped = passed_this_plan and _has_stamp(card, _outward_go_point(final["round"]), "review")
-        if not _review_problems(card, self._revision):
+        if not _review_problems(card, self._revision, self._plan_texts()):
             self._phase = "outward_go"
         elif passed_this_plan and not stamped:
             # A passing round reaches outward go only once its stop stamp is
@@ -1458,7 +1487,7 @@ class TicketPass:
             _validate_stamp(point, "close", next_skills, refs)
         except TicketError as exc:
             problems.append(f"the close stamp is malformed ({exc})")
-        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds)
+        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds, self._plan_texts())
         return problems
 
     def _snapshot(self, plan: PlanCard, revision: int, plan_pass: str | None = None) -> dict[str, Any]:
@@ -1683,7 +1712,7 @@ class TicketPass:
         self._require_review_on_card("no outward action is allowed")
 
     def _require_review_on_card(self, refused: str) -> None:
-        problems = _review_problems(self.store.read_card(), self._revision)
+        problems = _review_problems(self.store.read_card(), self._revision, self._plan_texts())
         if problems:
             raise StoreUnavailable(f"{refused}: " + "; ".join(problems), code="review_changed")
 
@@ -1700,7 +1729,9 @@ class TicketPass:
             raise GateRequired("outward go is required before close")
         # The card must already pass every close check, so a close that cannot
         # be confirmed writes no close stamp.
-        problems = _close_card_problems(self.store.read_card(), self._ticket.key, self._revision, self._rounds)
+        problems = _close_card_problems(
+            self.store.read_card(), self._ticket.key, self._revision, self._rounds, self._plan_texts()
+        )
         if problems:
             raise StoreUnavailable("close refused: " + "; ".join(problems))
         # The close stamp is written pending and confirmed only after the card
@@ -1710,7 +1741,7 @@ class TicketPass:
         stamps = card.get("stamps") or []
         last = stamps[-1] if stamps else {}
         problems = _close_stamp_problems(last, point, next_skills, refs)
-        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds)
+        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds, self._plan_texts())
         if problems:
             raise StoreUnavailable("close read-back failed: " + "; ".join(problems))
         # Confirm only the stamp just read back: a stop appended since is refused.
@@ -1722,7 +1753,7 @@ class TicketPass:
         if card.get("status") != "closed" or len(stamps) - 1 != position or not last.get("close"):
             raise StoreUnavailable("close read-back failed: the card is not marked closed")
         problems = _close_stamp_problems(last, point, next_skills, refs)
-        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds)
+        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds, self._plan_texts())
         if problems:
             raise StoreUnavailable("close read-back failed: " + "; ".join(problems))
         self._phase = "closed"

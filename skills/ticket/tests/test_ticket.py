@@ -1957,6 +1957,30 @@ def test_a_relabelled_final_review_does_not_authorize_outward_actions(tmp_path):
     edit_card(store, relabel_final_review)
     with pytest.raises(ticket.StoreUnavailable, match="no outward action is allowed"):
         session.require_outward_go()
+    # The refusal ends the pass and releases its record.
+    assert not session.live
+    assert fresh_handle(store).read_card()["pass"] is None
+
+
+def test_a_store_read_that_fails_inside_the_outward_check_ends_the_pass(tmp_path):
+    store = concrete_store(tmp_path)
+    session = approved_for_close(store)
+    reads = []
+    read_card = store.read_card
+
+    def fails_on_the_second_read():
+        # The first read is the outward go lookup; the second is the review check.
+        reads.append("read-card")
+        if len(reads) == 2:
+            raise RuntimeError("disk went away mid-read")
+        return read_card()
+
+    store.read_card = fails_on_the_second_read
+    with pytest.raises(RuntimeError, match="mid-read"):
+        session.require_outward_go()
+    assert len(reads) == 2
+    assert not session.live
+    assert fresh_handle(store).read_card()["pass"] is None
 
 
 def test_a_relabelled_final_review_does_not_close(tmp_path):
@@ -2090,3 +2114,80 @@ def test_close_refuses_when_the_stored_review_count_differs_from_the_pass(tmp_pa
     with pytest.raises(ticket.StoreUnavailable, match="the review rounds differ"):
         session.close("Done.", refs=("example/repo#14",))
     assert [stamp["phase"] for stamp in store.read_card()["stamps"]] == ["plan", "review"]
+
+
+# The card's plan is checked against the plan this pass holds wherever the
+# review evidence is trusted: its plan revision, and its criterion texts in
+# count and order. Each edit below is made after the passing review.
+
+
+def bump_plan_revision(card):
+    card["plan"]["revision"] = 2
+
+
+def drop_last_criterion(card):
+    card["plan"]["acceptance_criteria"].pop()
+
+
+def change_one_criterion_text(card):
+    card["plan"]["acceptance_criteria"][0]["text"] = "Retries are logged."
+
+
+def reorder_criteria(card):
+    card["plan"]["acceptance_criteria"].reverse()
+
+
+CRITERIA_EDITS = {
+    "one criterion deleted": drop_last_criterion,
+    "one criterion's text changed": change_one_criterion_text,
+    "criteria reordered": reorder_criteria,
+}
+CARD_PLAN_EDITS = {"plan revision changed": bump_plan_revision, **CRITERIA_EDITS}
+PLAN_DIFFERS = "the card's plan is not plan revision 1 with this pass's acceptance criteria in order"
+
+
+@pytest.mark.parametrize("edit", CARD_PLAN_EDITS.values(), ids=CARD_PLAN_EDITS.keys())
+def test_a_card_plan_edited_after_the_review_does_not_record_an_outward_go(tmp_path, edit):
+    store = concrete_store(tmp_path)
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    edit_card(store, edit)
+    with pytest.raises(ticket.StoreUnavailable, match="no outward go was recorded") as refused:
+        session.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    assert PLAN_DIFFERS in str(refused.value)
+    assert [item["effect"] for item in store.read_card()["decisions"]] == [plan_go_effect(1, session.pass_id)]
+
+
+@pytest.mark.parametrize("edit", CARD_PLAN_EDITS.values(), ids=CARD_PLAN_EDITS.keys())
+def test_a_card_plan_edited_after_the_review_does_not_authorize_outward_actions(tmp_path, edit):
+    store = concrete_store(tmp_path)
+    session = approved_for_close(store)
+    session.require_outward_go()
+    edit_card(store, edit)
+    with pytest.raises(ticket.StoreUnavailable, match="no outward action is allowed") as refused:
+        session.require_outward_go()
+    assert PLAN_DIFFERS in str(refused.value)
+
+
+@pytest.mark.parametrize("edit", CARD_PLAN_EDITS.values(), ids=CARD_PLAN_EDITS.keys())
+def test_a_card_plan_edited_after_the_review_does_not_close(tmp_path, edit):
+    store = concrete_store(tmp_path)
+    session = approved_for_close(store)
+    edit_card(store, edit)
+    with pytest.raises(ticket.StoreUnavailable, match="close refused") as refused:
+        session.close("Done.", refs=("example/repo#14",))
+    assert PLAN_DIFFERS in str(refused.value)
+    card = store.read_card()
+    assert card["status"] == "open"
+    assert [stamp["phase"] for stamp in card["stamps"]] == ["plan", "review"]
+
+
+@pytest.mark.parametrize("edit", CRITERIA_EDITS.values(), ids=CRITERIA_EDITS.keys())
+def test_a_closed_card_whose_criteria_were_edited_does_not_resume_as_closed(tmp_path, edit):
+    store = closed_markdown_store(tmp_path)
+    edit_card(store, edit)
+    resumed = resume(store)
+    assert resumed.phase != "closed"
+    flags = "\n".join(resumed.reconciliation)
+    assert "the store is marked closed but the close does not validate" in flags
+    assert PLAN_DIFFERS in flags
