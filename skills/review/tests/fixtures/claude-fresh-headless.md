@@ -6,3 +6,5 @@ FINDINGS:
 
 ANALYSIS:
 - the change is small and the tests cover the happy path
+
+INTERVAL: none

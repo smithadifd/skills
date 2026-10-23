@@ -26,7 +26,12 @@ finding across several bullets.
   `- [BUG] skills/example/tool.py:41 — the retry loop drops the last item on
   a short read. Add a length check before the final iteration.`
 - If nothing found: "No bugs or security issues found."
-- Any verdict that relies on a measured interval carries an `INTERVAL:` line: `INTERVAL: from <start event>, <start source> to <end event>, <end source> = <duration>` (every part non-empty).
+- End the review with an `INTERVAL:` line, the last line of the reply:
+  `INTERVAL: none`, or one measured record per interval the verdict relies on
+  (`INTERVAL: from <start event>, <start source> to <end event>, <end source> = <duration>`,
+  every part non-empty, the duration a number then `ms`, `s`, `m`, `h` or `d`,
+  like `41m`). Only that line is read for time; durations elsewhere are never
+  read.
 
 Phase artifacts (optional, when a caller wants the structured result): Python 3
 is needed. Write the review to a file and run `python3 ${CLAUDE_SKILL_DIR}/review_phase.py --from-text <file>
@@ -34,7 +39,10 @@ is needed. Write the review to a file and run `python3 ${CLAUDE_SKILL_DIR}/revie
 whose `artifacts["findings.json"]` validates against `skills/review/findings.schema.json`
 (`--validate <findings.json>` re-checks one); the one-line bullet shape above,
 tag and `file:line` exact, is what its `claude-fresh` adapter parses — the
-worked example above is the shape it expects, verbatim.
+worked example above is the shape it expects, verbatim. The closing
+`INTERVAL:` line is required there too: a review without it fails with
+`review_interval_missing`. The grammar and every refusal are in
+`references/structured-interval.md`.
 
 `REVIEW_PHASE_JEV_SHADOW=1` enables an advisory TypeSafe pass on parse-success
 returns. It sends only `jev_client.trim_payload`'s FINDINGS/VERDICT payload and
