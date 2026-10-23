@@ -51,6 +51,12 @@ REVIEWER_AGENT = SKILL_DIR.parent.parent / "agents" / "reviewer.md"
 ENVELOPE_KEYS = ("repo/ref", "inputs", "constraints", "harness_root", "adapters", "budget")
 
 
+def _claims(text: str) -> bool:
+    """Whether the scan reads a duration claim in `text`, an adapter having
+    consumed none of its lines (so every closed span and fence is quoted)."""
+    return review_phase._has_duration_claim(text, [None] * len(text.splitlines()))
+
+
 def _envelope(backend: str, return_text: str, **inputs_extra) -> dict:
     inputs = {
         "target": "example/repo#1",
@@ -946,7 +952,6 @@ def test_section_and_file_references_are_not_duration_claims(body):
         "It took 3 days/run.",
         "It took 3 hours/day/week.",
         'The caller waits "3d/foo.py" before retrying.',
-        "The caller waits `3d/foo.py` before retrying.",
         "The caller waits _3d/foo.py_ before retrying.",
         "The caller waits *3d/foo.py* before retrying.",
         "The caller waits __3d/foo.py__ before retrying.",
@@ -981,11 +986,10 @@ def test_real_duration_claims_still_require_an_interval(body):
     [
         pytest.param("it waited 3d/foo.py:12 before failing", id="plain"),
         pytest.param("it waited _3d/foo.py:12_ before failing", id="underscore-wrapped"),
-        pytest.param("it waited `3d/foo.py:12` before failing", id="backtick-wrapped"),
     ],
 )
 def test_file_line_reference_with_a_duration_first_component_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
+    assert _claims(text) is True, (
         "a file:line reference whose first path component is a duration must "
         "stay visible to the scan"
     )
@@ -1001,7 +1005,7 @@ def test_file_line_reference_with_a_duration_first_component_is_a_claim(text):
     ],
 )
 def test_file_line_reference_without_a_duration_first_component_is_not_a_claim(text):
-    assert review_phase._has_duration_claim(text) is False, (
+    assert _claims(text) is False, (
         "a file:line reference whose first path component is not a duration "
         "must stay a non-claim"
     )
@@ -1019,7 +1023,7 @@ def test_file_line_reference_without_a_duration_first_component_is_not_a_claim(t
     ],
 )
 def test_delimiter_glued_duration_before_or_after_a_path_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
+    assert _claims(text) is True, (
         "a duration glued to a path by a colon, semicolon or comma must stay "
         "visible to the scan"
     )
@@ -1036,7 +1040,7 @@ def test_delimiter_glued_duration_before_or_after_a_path_is_a_claim(text):
     ],
 )
 def test_delimited_path_lists_without_a_duration_are_not_claims(text):
-    assert review_phase._has_duration_claim(text) is False, (
+    assert _claims(text) is False, (
         "delimited paths with no duration first component must stay non-claims"
     )
 
@@ -1050,7 +1054,7 @@ def test_delimited_path_lists_without_a_duration_are_not_claims(text):
     ],
 )
 def test_file_line_reference_followed_by_a_spaced_duration_unit_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
+    assert _claims(text) is True, (
         "a file:line reference followed by a spaced duration unit word is a "
         "claim, the same as a section id followed by one"
     )
@@ -1065,7 +1069,7 @@ def test_file_line_reference_followed_by_a_spaced_duration_unit_is_a_claim(text)
     ],
 )
 def test_file_line_reference_followed_by_other_words_is_not_a_claim(text):
-    assert review_phase._has_duration_claim(text) is False, (
+    assert _claims(text) is False, (
         "a file:line reference followed by ordinary words must stay a non-claim"
     )
 
@@ -1130,7 +1134,7 @@ def test_other_prose_under_issues_still_refuses(prose):
     ],
 )
 def test_url_wrapped_and_punctuated_references_are_not_claims(text):
-    assert review_phase._has_duration_claim(text) is False, (
+    assert _claims(text) is False, (
         "a URL, an autolink, an emphasised path, or a path before sentence "
         "punctuation is a reference, not a timing claim"
     )
@@ -1147,7 +1151,7 @@ def test_url_wrapped_and_punctuated_references_are_not_claims(text):
     ],
 )
 def test_same_reference_forms_with_a_duration_first_component_are_claims(text):
-    assert review_phase._has_duration_claim(text) is True, (
+    assert _claims(text) is True, (
         "a duration-shaped first component keeps the token visible to the "
         "scan however the reference is wrapped or punctuated"
     )
@@ -1180,7 +1184,6 @@ def test_run_phase_accepts_an_autolink_and_refuses_its_duration_first_variant():
 
 WRAPPED_FIRST_COMPONENT_CLAIMS = [
     pytest.param("The caller waits **3h**/a.py before retrying.", id="bold"),
-    pytest.param("The caller waits `41m`/x.md before retrying.", id="backtick"),
     pytest.param('The caller waits "3h"/a.py before retrying.', id="double-quote"),
     pytest.param("The caller waits '3h'/a.py before retrying.", id="single-quote"),
     pytest.param("The caller waits *3h*/a.py before retrying.", id="star"),
@@ -1214,7 +1217,7 @@ WRAPPED_FIRST_COMPONENT_REFERENCES = [
 
 def _assert_not_quoted_input(text: str) -> None:
     lines = text.splitlines()
-    assert review_phase._blank_quoted_inputs(lines) == lines, (
+    assert review_phase._blank_quoted_inputs(lines, [None] * len(lines)) == lines, (
         "the text must reach the reference scan as written, outside any quoted span"
     )
 
@@ -1222,7 +1225,7 @@ def _assert_not_quoted_input(text: str) -> None:
 @pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_CLAIMS)
 def test_wrapped_duration_first_component_is_a_claim(text):
     _assert_not_quoted_input(text)
-    assert review_phase._has_duration_claim(text) is True, (
+    assert _claims(text) is True, (
         "a duration-shaped first path component is a claim whatever formatting "
         "wraps it, on either side or both"
     )
@@ -1230,8 +1233,9 @@ def test_wrapped_duration_first_component_is_a_claim(text):
 
 @pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_REFERENCES)
 def test_wrapped_non_duration_first_component_is_still_a_reference(text):
-    _assert_not_quoted_input(text)
-    assert review_phase._has_duration_claim(text) is False, (
+    if "`" not in text:
+        _assert_not_quoted_input(text)
+    assert _claims(text) is False, (
         "a path whose first component is not a duration stays a reference "
         "however that component is wrapped"
     )
@@ -1249,8 +1253,14 @@ def test_run_phase_refuses_a_bold_wrapped_duration_first_component():
     _assert_summary_claim_refused("The caller waits **3h**/a.py before retrying.")
 
 
-def test_run_phase_refuses_a_backtick_wrapped_duration_first_component():
-    _assert_summary_claim_refused("The caller waits `41m`/x.md before retrying.")
+def test_run_phase_reads_a_backtick_wrapped_duration_first_component_as_quoted():
+    # A code span is quoted input wherever it sits; the claim is only the
+    # unwrapped token.
+    _assert_quoted_parses(_claude_approve_with("The caller waits `41m`/x.md before retrying."))
+
+
+def test_run_phase_refuses_an_unclosed_backtick_before_a_duration_first_component():
+    _assert_summary_claim_refused("The caller waits `41m/x.md before retrying.")
 
 
 # Composed wrappers: any mix or nesting of the formatting wrappers around a
@@ -1475,7 +1485,6 @@ SHIELD_BLANKS_LATER_COMPONENTS = [
 # component with the wrappers stripped too.
 SHIELD_KEEPS_CLAIMS += [
     pytest.param("It waited **3h**/(a.py here.", id="bold-first-component-unpaired-opener"),
-    pytest.param("It waited `3h`/(a.py here.", id="backtick-first-component-unpaired-opener"),
     pytest.param('It waited "3h"/(a.py here.', id="double-quote-first-component-unpaired-opener"),
     pytest.param("It waited '3h'/(a.py here.", id="single-quote-first-component-unpaired-opener"),
     pytest.param("It waited _3h_/(a.py here.", id="underscore-first-component-unpaired-opener"),
@@ -1766,21 +1775,53 @@ def _reference_table(kinds: dict) -> list:
 @pytest.mark.parametrize("reference", _reference_table(REFERENCE_KINDS))
 def test_wrapped_and_suffixed_reference_is_not_a_claim(reference):
     text = f"Only touches {reference} and nothing else."
-    assert review_phase._has_duration_claim(text) is False, (
+    assert _claims(text) is False, (
         "an explicit path, a URI or a relative path with an extension is a "
         "reference however it is wrapped, suffixed or punctuated"
     )
 
 
-@pytest.mark.parametrize("reference", _reference_table(DURATION_FIRST_KINDS))
+def _reference_table_without(kinds: dict, skipped: str) -> list:
+    return [
+        param
+        for param in _reference_table(kinds)
+        if not param.id.startswith(f"{skipped}-")
+    ]
+
+
+@pytest.mark.parametrize(
+    "reference", _reference_table_without(DURATION_FIRST_KINDS, "backtick")
+)
 def test_wrapped_and_suffixed_reference_with_a_duration_first_component_is_a_claim(
     reference,
 ):
     text = f"The caller waits {reference} before retrying."
-    assert review_phase._has_duration_claim(text) is True, (
+    assert _claims(text) is True, (
         "a duration-shaped first component stays a claim however the token is "
         "wrapped, suffixed or punctuated"
     )
+
+
+def _backtick_table(kinds: dict) -> list:
+    return [
+        param for param in _reference_table(kinds) if param.id.startswith("backtick-")
+    ]
+
+
+@pytest.mark.parametrize("reference", _backtick_table(DURATION_FIRST_KINDS))
+def test_backtick_wrapped_reference_with_a_duration_first_component_is_quoted(reference):
+    # A closed code span is quoted input, so a reference wrapped in one is not
+    # a claim even when its first component is a duration.
+    text = f"The caller waits {reference} before retrying."
+    assert _claims(text) is False
+
+
+@pytest.mark.parametrize("reference", list(DURATION_FIRST_KINDS.values()))
+def test_unclosed_backtick_before_a_duration_first_component_reference_is_a_claim(reference):
+    # The span never closes, so it is read as prose and the reference scan
+    # decides: the same token is a claim.
+    text = f"The caller waits `{reference} before retrying."
+    assert _claims(text) is True
 
 
 # --- (b) prose under a findings section -------------------------------------
@@ -1982,9 +2023,15 @@ LONG_TOKENS = {
     "dotted-run": lambda length: "a." * (length // 2),
     "closer-separated-paths": lambda length: ("a/b.md)" * length)[:length],
     "unpaired-openers": lambda length: ("a/(" * length)[:length],
+    "long-backtick-run": lambda length: "`" * length,
+    "backtick-run-then-duration": lambda length: "`" * length + " took 2h",
+    "many-unbalanced-backticks": lambda length: ("`x``x```x" * length)[:length] + " `",
+    "many-fence-like-lines": lambda length: "```\nit took 2h\n" * (length // 16),
+    "many-unclosed-fence-openers": lambda length: "```x\nit took 2h\n" * (length // 17),
+    "many-spans-on-one-line": lambda length: "`a` it took 2h " * (length // 15),
 }
 REFERENCE_SCANS = {
-    "has-duration-claim": lambda text: review_phase._has_duration_claim(text),
+    "has-duration-claim": lambda text: _claims(text),
     "blank-references": lambda text: review_phase._blank_references(text),
 }
 
@@ -2074,7 +2121,7 @@ def test_bound_exemption_finishes_a_100kb_line_within_a_second():
     line = chunk * (100_000 // len(chunk) + 1)
     assert len(line) >= 100_000
     start = time.perf_counter()
-    claimed = review_phase._has_duration_claim(line)
+    claimed = _claims(line)
     elapsed = time.perf_counter() - start
     assert claimed is False, "a 100 KB line of configured bounds is not a claim"
     assert elapsed <= REDOS_LIMIT_SECONDS, (
@@ -2082,7 +2129,7 @@ def test_bound_exemption_finishes_a_100kb_line_within_a_second():
     )
     mixed = line[:100_000] + " took 120 seconds before the timeout"
     start = time.perf_counter()
-    claimed = review_phase._has_duration_claim(mixed)
+    claimed = _claims(mixed)
     elapsed = time.perf_counter() - start
     assert claimed is True, "a measured interval after 100 KB of bounds is still a claim"
     assert elapsed <= REDOS_LIMIT_SECONDS, (
@@ -2105,7 +2152,7 @@ def test_bound_exemption_finishes_a_100kb_line_within_a_second():
     ],
 )
 def test_link_target_as_a_pure_reference_is_not_a_claim(text):
-    assert review_phase._has_duration_claim(text) is False, (
+    assert _claims(text) is False, (
         "a Markdown link target is a reference, never a timing claim"
     )
 
@@ -2121,7 +2168,7 @@ def test_link_target_as_a_pure_reference_is_not_a_claim(text):
     ],
 )
 def test_link_target_beside_a_real_claim_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
+    assert _claims(text) is True, (
         "a real claim beside a link target, in its label, or after an "
         "unclosed target stays a claim"
     )
@@ -2364,14 +2411,13 @@ def test_verdict_forms_keep_main_words(name, line, word):
     assert (None if matched is None else matched.group(1)) == word
 
 
-# --- quoted duration inputs in Evidence and Minor notes ----------------------
+# --- quoted duration inputs in code spans and fences -------------------------
 #
 # A review of the duration scanner has to quote its probe inputs. A
-# duration-shaped token inside a backtick code span (inline or fenced) in a
-# `### Evidence` or `### Minor notes` section is a quoted input, not the
-# reviewer's own timing claim, so it needs no INTERVAL record. Prose stays in
-# scope everywhere, and so do Issues, every heading line, any other heading
-# form, and any markup that does not close where it opens.
+# duration-shaped token inside a backtick code span (inline or fenced) is a
+# quoted input, not the reviewer's own timing claim, so it needs no INTERVAL
+# record, in any section. Bare prose stays in scope, and so do every heading
+# line, every verdict line, and any markup that does not close where it opens.
 
 
 def _quoted_approve(evidence: str, issues: str = "- none", minor: str | None = None) -> str:
@@ -2414,9 +2460,6 @@ QUOTED_DURATION_INPUTS = {
     "minor-notes-inline": _quoted_approve(
         "- Ran: checks passed", minor="- the probe `41m?x/y.md` reads as a claim"
     ),
-    "minor-notes-indented-fence": _quoted_approve(
-        "- Ran: checks passed", minor="- the probes:\n  ```\n  it took 2h\n  ```"
-    ),
     "bold-evidence-heading": _quoted_approve("- Probe: `it took 2h`").replace(
         "### Evidence", "### **Evidence**"
     ),
@@ -2425,6 +2468,13 @@ QUOTED_DURATION_INPUTS = {
     ),
     "closed-evidence-heading": _quoted_approve("- Probe: `it took 2h`").replace(
         "### Evidence", "### Evidence ###"
+    ),
+    "heading-like-line-inside-fence": _quoted_approve("```\n# probe\nit took 2h\n```"),
+    "tagged-bullet-in-evidence": _quoted_approve(
+        "- [BUG] `a.py:3` — the probe `it took 2h` passes"
+    ),
+    "after-tagged-bullet": _quoted_approve(
+        "- [BUG] `a.py:3` — wrong\n- probe `it took 2h`"
     ),
 }
 
@@ -2438,14 +2488,6 @@ def test_quoted_duration_input_in_evidence_or_minor_notes_parses_without_an_inte
 
 def test_same_token_unquoted_in_evidence_still_refuses():
     _assert_claim_refused(_quoted_approve("- Probe: waits 3d/foo.py is refused as a claim"))
-
-
-def test_quoted_duration_in_issues_still_refuses():
-    _assert_claim_refused(
-        "## Verdict: REQUEST CHANGES\n\n"
-        "### Issues\n- `a.py:3` — the probe `waits 3d` is accepted\n\n"
-        "### Evidence\n- Ran: checks passed\n"
-    )
 
 
 @pytest.mark.parametrize(
@@ -2497,9 +2539,6 @@ MALFORMED_QUOTES_IN_EVIDENCE = {
     "backtick-in-backtick-fence-info": "```x`\nit took 2h\n```",
     "fence-info-string": "~~~ `2h`\nok\n~~~",
     "fence-opener-number-joins-first-line": "```text 3\nhours of retries\n```",
-    "comment-heading-inside-fence": "```\n# probe\nit took 2h\n```",
-    "tagged-bullet-in-evidence": "- [BUG] `a.py:3` — the probe `it took 2h` passes",
-    "after-tagged-bullet": "- [BUG] `a.py:3` — wrong\n- probe `it took 2h`",
 }
 
 
@@ -2508,7 +2547,7 @@ MALFORMED_QUOTES_IN_EVIDENCE = {
     list(MALFORMED_QUOTES_IN_EVIDENCE.values()),
     ids=list(MALFORMED_QUOTES_IN_EVIDENCE),
 )
-def test_malformed_or_finding_markup_in_evidence_stays_in_scope(evidence):
+def test_malformed_markup_in_evidence_stays_in_scope(evidence):
     _assert_claim_refused(_quoted_approve(evidence))
 
 
@@ -2516,16 +2555,16 @@ def test_malformed_or_finding_markup_in_evidence_stays_in_scope(evidence):
     "title",
     ["Minor issues", "Evidence (extra)", "Evidence and timing", "Summary", "Notes"],
 )
-def test_quoted_duration_under_any_other_section_title_still_refuses(title):
+def test_quoted_duration_under_any_other_section_title_parses(title):
     text = _quoted_approve("- Ran: checks passed", minor="- the probe `it took 2h`").replace(
         "### Minor notes", f"### {title}"
     )
-    _assert_claim_refused(text)
+    _assert_quoted_parses(text)
 
 
 # Each heading line replaces `### Evidence` or `### Minor notes`, and the
-# section under it quotes a duration-shaped input in a backtick span. Only the
-# level-three hash heading with a space after the hashes is exempt.
+# section under it quotes a duration-shaped input in a backtick span. The span
+# is quoted whatever the heading form is.
 OTHER_HEADING_FORMS = {
     "level-one-evidence": ("evidence", "# Evidence"),
     "level-two-evidence": ("evidence", "## Evidence"),
@@ -2548,19 +2587,17 @@ OTHER_HEADING_FORMS = {
 @pytest.mark.parametrize(
     ("section", "heading"), list(OTHER_HEADING_FORMS.values()), ids=list(OTHER_HEADING_FORMS)
 )
-def test_quoted_duration_under_another_heading_form_still_refuses(section, heading):
+def test_quoted_duration_under_another_heading_form_parses(section, heading):
     if section == "evidence":
         text = _quoted_approve("- Probe: `it took 2h`").replace("### Evidence", heading)
     else:
         text = _quoted_approve("- Ran: checks passed", minor="- the probe `it took 2h`")
         text = text.replace("### Minor notes", heading)
-    _assert_claim_refused(text)
+    _assert_quoted_parses(text)
 
 
-def test_quoted_duration_under_a_bare_evidence_label_still_refuses():
-    # `Evidence:` is not a heading at all, so the line and what follows it stay
-    # in the section above, here the verdict's.
-    _assert_claim_refused(
+def test_quoted_duration_under_a_bare_evidence_label_parses():
+    _assert_quoted_parses(
         "## Verdict: APPROVE\n\nEvidence:\n- Probe: `it took 2h`\n\n### Issues\n- none\n"
     )
 
@@ -2606,15 +2643,25 @@ def _forced_jev_fallback(monkeypatch, evidence: str) -> dict:
     return result
 
 
-def test_jev_fallback_quoting_a_duration_input_in_evidence_parses_without_an_interval(
-    monkeypatch,
-):
+def test_jev_fallback_scans_a_span_quoted_duration_as_prose_and_refuses(monkeypatch):
+    # No adapter parsed the return, so no line is known to be quoted.
     result = _forced_jev_fallback(
         monkeypatch, "- Probe: `waits 3d/foo.py` is refused as a claim"
     )
+    assert result["status"] == "failure", "a span-quoted duration passed a JEV decision"
+    assert "review_interval_endpoints_missing" in result["reason"], result["reason"]
+
+
+def test_jev_fallback_scans_a_fenced_duration_as_prose_and_refuses(monkeypatch):
+    result = _forced_jev_fallback(monkeypatch, "```\nit took 2h\n```")
+    assert result["status"] == "failure"
+    assert "review_interval_endpoints_missing" in result["reason"], result["reason"]
+
+
+def test_jev_fallback_with_no_duration_still_succeeds(monkeypatch):
+    result = _forced_jev_fallback(monkeypatch, "- Probe: ran the suite, all green")
     assert result["status"] == "success", result["reason"]
     assert result["verdict_source"] == "jev"
-    assert "intervals" not in result
 
 
 def test_jev_fallback_with_the_same_token_unquoted_in_evidence_still_refuses(monkeypatch):
@@ -2630,12 +2677,26 @@ QUOTED_INPUT_SCAN_SHAPES = {
     + " x",
     "many-fences": lambda n: "### Evidence\n" + "```\nit took 2h\n```\n" * (n // 4),
     "unclosed-fences": lambda n: "### Evidence\n" + "```x\n" * (n // 4),
+    # Shapes that make the adapter report many consumed lines and ranges.
+    "many-sections-one-bullet-each": lambda n: "### Issues\n- `a` it took 2h\n" * (n // 2),
+    "many-consumed-bullets": lambda n: "### Issues\n" + "- `a` it took 2h\n  more\n" * (n // 2),
+    "many-fenced-tagged-bullets": lambda n: "```\n- [BUG] x `a` took 2h\n```\n" * (n // 3),
+    "one-tagged-bullet-then-many-lines": lambda n: "- [BUG] x\n" + "- later `a`\n  more\n" * (n // 2),
 }
+
+
+def _adapter_scan(text: str) -> bool:
+    """The scan as `run_phase` runs it: parse first, then scan with the marks."""
+    try:
+        _, _, consumed = review_phase._read_claude_fresh(text)
+    except review_phase.ParseError:
+        consumed = [None] * len(text.splitlines())
+    return review_phase._has_duration_claim(text, consumed)
 
 
 @pytest.mark.parametrize("shape", list(QUOTED_INPUT_SCAN_SHAPES))
 def test_quoted_input_scan_time_grows_linearly(shape):
-    scan = review_phase._has_duration_claim
+    scan = _adapter_scan
     shorter = _best_seconds_per_call(scan, QUOTED_INPUT_SCAN_SHAPES[shape](4000))
     assert shorter <= REDOS_LIMIT_SECONDS, (
         f"the duration scan took {shorter:.2f}s on the 4000-unit {shape} review"
@@ -2648,6 +2709,269 @@ def test_quoted_input_scan_time_grows_linearly(shape):
         f"the duration scan on {shape}: doubling 4000 to 8000 units took "
         f"{shorter * 1e3:.3f}ms to {longer * 1e3:.3f}ms, more than three times"
     )
+
+
+# --- the same rule in the summary prose and in findings ----------------------
+#
+# The summary prose under the verdict heading is as likely to quote a probe
+# input as the Evidence is, and a finding may name one.
+
+
+def _summary_approve(summary: str) -> str:
+    return "\n".join(
+        ["## Verdict: APPROVE", "", summary, "", "### Issues", "- none", ""]
+    )
+
+
+QUOTED_IN_PROSE = {
+    "summary-inline-spans": "Short inputs like `41m`, `2h` and `10000000ms` are handled.",
+    "summary-took-in-span": "The input `took 2d` is read as a duration.",
+    "summary-fenced-500ms": "Probes:\n```\n500ms\n```\nall passed.",
+    "summary-tilde-fence": "Probes:\n~~~\n500ms\n~~~",
+    "summary-double-backtick-span": "The probe ``a ` then 41m`` is refused.",
+}
+
+
+@pytest.mark.parametrize(
+    "summary", list(QUOTED_IN_PROSE.values()), ids=list(QUOTED_IN_PROSE)
+)
+def test_code_span_or_fence_in_summary_prose_parses_without_an_interval(summary):
+    _assert_quoted_parses(_summary_approve(summary))
+
+
+def test_evidence_with_backticked_durations_and_a_fenced_500ms_parses():
+    _assert_quoted_parses(
+        _quoted_approve("- Probes `41m` and `2h`:\n```\n500ms\n```")
+    )
+
+
+def test_code_span_in_an_issues_bullet_parses_without_an_interval():
+    _assert_quoted_parses(
+        "## Verdict: REQUEST CHANGES\n\n"
+        "### Issues\n- [BUG] `a.py:3` — the probe `waits 3d` is accepted\n"
+    )
+
+
+def test_code_span_under_a_non_evidence_heading_parses_without_an_interval():
+    _assert_quoted_parses(
+        "## Verdict: APPROVE\n\n### Issues\n- none\n\n### Notes\n- the probe `it took 2h`\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        pytest.param("The run took 41m.", id="bare-in-prose"),
+        pytest.param("It took _3h_ to run.", id="emphasised"),
+        pytest.param('It took "41 seconds" to run.', id="double-quoted"),
+        pytest.param("The probe `a` took 41m.", id="beside-a-span"),
+        pytest.param("The probe `41m` took 41m.", id="same-token-both-sides"),
+        pytest.param("The probe `it took 2h and more", id="unterminated-backtick"),
+        pytest.param("The probe ``it took 2h` and more", id="mismatched-run-lengths"),
+        pytest.param("Probes:\n```\nit took 2h\n", id="unterminated-fence"),
+        pytest.param("Probes:\n~~~\nit took 2h\n```", id="fence-closed-by-other-marker"),
+        pytest.param("Probes:\n```\nit took 2h\n``", id="fence-closed-too-short"),
+        pytest.param("```x`\nit took 2h\n```", id="backtick-in-fence-info"),
+        pytest.param("The probe \\`it took 2h\\` passed", id="escaped-backtick"),
+        pytest.param("The `probe\nit took 2h` passed", id="span-across-lines"),
+    ],
+)
+def test_duration_outside_a_closed_span_or_fence_in_prose_still_refuses(summary):
+    _assert_claim_refused(_summary_approve(summary))
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        pytest.param("## Notes about it, took 2h", id="heading-line"),
+        pytest.param("### Probe took 2h", id="level-three-heading"),
+        pytest.param("VERDICT: APPROVE - it took 2h", id="verdict-label"),
+        pytest.param("## Verdict: APPROVE it took 2h", id="verdict-heading"),
+        pytest.param("- [BUG] a.py:3 - CI took 41m after the merge", id="tagged-bug-bullet"),
+        pytest.param("* [SECURITY] a.py:3 - CI took 41m after it", id="tagged-security-bullet"),
+        pytest.param("  1. [bug] a.py:3 - CI took 41m after it", id="indented-numbered-tagged"),
+    ],
+)
+def test_heading_or_verdict_line_inside_a_closed_fence_stays_in_scope(inner):
+    _assert_claim_refused(_summary_approve(f"Probes:\n```\n{inner}\n```"))
+    _assert_claim_refused(_quoted_approve(f"- Probes:\n```\n{inner}\n```"))
+
+
+def test_tagged_bullet_in_a_fence_with_no_verdict_heading_still_refuses():
+    # The adapter reads the bullet as a finding and as the verdict.
+    _assert_claim_refused(
+        "Review:\n```\n- [BUG] a.py:3 - CI took 41m after the merge\n```\n"
+    )
+
+
+def test_later_untagged_bullet_and_continuation_after_a_fenced_tagged_bullet_refuse():
+    # The adapter collects every bullet after a tagged one up to the next
+    # heading, indented continuations included.
+    _assert_claim_refused(
+        "Review:\n```\n- [BUG] a.py:3 - bad\n- the CI took 41m\n```\n"
+    )
+    _assert_claim_refused(
+        "Review:\n```\n- [BUG] a.py:3 - bad\n  and then the CI took 41m\n```\n"
+    )
+
+
+def test_grok_fenced_bullet_under_a_claude_only_section_parses():
+    # `### Issues` is a Claude section; the grok adapter collects nothing there.
+    _assert_quoted_parses(
+        "## FINDINGS\n- none\n\n## VERDICT\ncleared - fine\n\n"
+        "### Issues\n```\n- the probe took 41m\n```\n",
+        "grok-notools",
+    )
+
+
+def test_grok_findings_bullet_with_a_bare_claim_refuses():
+    _assert_claim_refused(
+        "## FINDINGS\n- [a.py:3] the CI took 41m\n\n## VERDICT\nflagged - bad\n",
+        "grok-notools",
+    )
+
+
+def test_span_on_a_minor_notes_bullet_parses():
+    _assert_quoted_parses(_quoted_approve("- Ran: ok", minor="- the probe `took 41m` is read"))
+
+
+# Paired cases for a line the adapter consumed as a finding: a closed span is
+# quoted, a bare claim is not, and a fence around the line does not quote it.
+FINDING_LINE = "- [BUG] a.py:3 - the CI {} after the merge"
+
+
+def test_quoted_span_on_a_consumed_finding_line_parses():
+    _assert_quoted_parses(
+        "## Verdict: REQUEST CHANGES\n\n### Issues\n"
+        + FINDING_LINE.format("`took 41m`")
+        + "\n"
+    )
+
+
+def test_bare_claim_on_a_consumed_finding_line_refuses():
+    _assert_claim_refused(
+        "## Verdict: REQUEST CHANGES\n\n### Issues\n" + FINDING_LINE.format("took 41m") + "\n"
+    )
+
+
+def test_fenced_claim_on_a_consumed_finding_line_refuses():
+    _assert_claim_refused(
+        "Review:\n```\n" + FINDING_LINE.format("took 41m") + "\n```\n"
+    )
+
+
+def test_fenced_block_inside_a_minor_notes_bullet_refuses():
+    # The block is a continuation of the bullet the adapter collected.
+    _assert_claim_refused(
+        _quoted_approve(
+            "- Ran: checks passed", minor="- the probes:\n  ```\n  it took 2h\n  ```"
+        )
+    )
+
+
+def test_span_on_a_verdict_line_refuses():
+    _assert_claim_refused("## Verdict: APPROVE the probe `took 41m`\n\n### Issues\n- none\n")
+
+
+# What each adapter reports it consumed.
+def test_claude_adapter_reports_the_lines_it_read():
+    text = (
+        "## Verdict: REQUEST CHANGES\n"  # 0 decision
+        "\n"
+        "summary prose\n"  # 2 ignored
+        "### Issues\n"  # 3 decision
+        "- [BUG] a.py:3 - bad\n"  # 4 finding
+        "  continued\n"  # 5 finding
+        "### Evidence\n"  # 6 decision
+        "- ran it\n"  # 7 ignored
+    )
+    _, _, consumed = review_phase._read_claude_fresh(text)
+    assert consumed == [
+        review_phase.DECISION, None, None, review_phase.DECISION,
+        review_phase.FINDING, review_phase.FINDING, review_phase.DECISION, None,
+    ]
+
+
+def test_grok_adapter_reports_the_lines_it_read():
+    text = (
+        "## FINDINGS\n"  # 0 decision
+        "- [a.py:3] bad\n"  # 1 finding
+        "\n"  # 2 finding (inside the section)
+        "## VERDICT\n"  # 3 decision
+        "\n"  # 4 ignored
+        "  flagged - bad\n"  # 5 decision
+        "### Issues\n"  # 6 decision
+        "- not collected\n"  # 7 ignored
+    )
+    _, _, consumed = review_phase._read_grok_notools(text)
+    assert consumed == [
+        review_phase.DECISION, review_phase.FINDING, review_phase.FINDING,
+        review_phase.DECISION, None, review_phase.DECISION, review_phase.DECISION, None,
+    ]
+
+
+def test_tagged_bullet_in_a_fence_quoting_only_in_a_span_parses():
+    _assert_quoted_parses(
+        "Review:\n```\n- [BUG] a.py:3 - the probe `took 41m` is mishandled\n```\n"
+    )
+
+
+def test_tagged_bullet_outside_a_fence_with_a_span_quote_still_refuses():
+    _assert_claim_refused(
+        "Review:\n- [BUG] a.py:3 - `x` then CI took 41m after the merge\n"
+    )
+
+
+def test_fenced_bullet_in_a_findings_section_is_refused_or_in_scope():
+    for section in ("### Issues", "### Minor notes"):
+        _assert_claim_refused(
+            f"## Verdict: APPROVE\n\n{section}\n- ok\n  ```\n  - it took 41m\n  ```\n"
+        )
+
+
+# Every verdict form the adapters accept stays in scope when it is indented,
+# because the adapters strip or skip leading whitespace before they match.
+INDENTED_VERDICTS = {
+    "grok-value-line": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n   cleared - the probe `waits 3d` passed\n",
+    ),
+    "grok-value-line-tab": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n\tcleared - the probe `waits 3d` passed\n",
+    ),
+    "grok-value-line-backtick": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n  `cleared - the probe `waits 3d` passed\n",
+    ),
+    "grok-label": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n  VERDICT: cleared - the probe `waits 3d`\n",
+    ),
+    "claude-label": (
+        "claude-fresh",
+        "### Evidence\n- Ran: `checks`\n   VERDICT: APPROVE - the probe `waits 3d` passed\n",
+    ),
+    "claude-heading": (
+        "claude-fresh",
+        "  ## Verdict: APPROVE `3d`\n\n### Evidence\n- Ran: checks passed\n",
+    ),
+    "claude-bold-heading": (
+        "claude-fresh",
+        "  ## **Verdict**: APPROVE `3d`\n\n### Evidence\n- Ran: checks passed\n",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("backend", "text"), list(INDENTED_VERDICTS.values()), ids=list(INDENTED_VERDICTS)
+)
+def test_indented_verdict_line_quoting_a_duration_still_refuses(backend, text):
+    _assert_claim_refused(text, backend)
+
+
+def test_unterminated_fence_keeps_later_spans_in_scope_too():
+    _assert_claim_refused(_summary_approve("```\nopen\n\nlater `it took 2h` here"))
 
 
 # --- EOR47: quoted duration examples are not claims; refusals name the line --
@@ -2737,7 +3061,7 @@ def test_quoted_example_scan_finishes_a_100kb_line_within_a_second():
     line = ('x "ran for 120 seconds" y ' * 4000)[:100_000]
     text = _claude_approve_with(line)
     start = time.perf_counter()
-    claimed = review_phase._has_duration_claim(text)
+    claimed = _claims(text)
     elapsed = time.perf_counter() - start
     assert claimed is False
     assert elapsed <= REDOS_LIMIT_SECONDS, f"quoted-example scan took {elapsed:.2f}s"
@@ -2747,7 +3071,7 @@ def test_quoted_example_scan_finishes_a_100kb_unmatched_quote_within_a_second():
     line = '"' + ("x" * 99_999)
     text = _claude_approve_with(line)
     start = time.perf_counter()
-    review_phase._has_duration_claim(text)
+    _claims(text)
     elapsed = time.perf_counter() - start
     assert elapsed <= REDOS_LIMIT_SECONDS, f"unmatched-quote scan took {elapsed:.2f}s"
 

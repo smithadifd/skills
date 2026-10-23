@@ -246,9 +246,32 @@ _GROK_VERDICT_LABEL = re.compile(
 )
 
 
+# The lines an adapter read, one mark per line of `text.splitlines()`: None
+# (ignored), DECISION (a verdict line or a section heading) or FINDING (a
+# collected bullet with its continuations). The interval scan reads these
+# marks instead of re-deriving the parsing rules; see
+# references/interval-scope.md.
+DECISION = "decision"
+FINDING = "finding"
+Consumed = list
+
+
+def _mark(consumed: Consumed, start: int, stop: int, kind: str) -> None:
+    """Mark `lines[start:stop]` as read; a decision mark is never downgraded."""
+    for index in range(start, min(stop, len(consumed))):
+        if kind == DECISION or consumed[index] is None:
+            consumed[index] = kind
+
+
 def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     """`## FINDINGS` bullets + `## VERDICT <cleared|flagged> — <sentence>`."""
+    verdict, findings, _ = _read_grok_notools(text)
+    return verdict, findings
+
+
+def _read_grok_notools(text: str) -> tuple[str, list[dict], Consumed]:
     lines = text.splitlines()
+    consumed: Consumed = [None] * len(lines)
     bullets: list[str] | None = None
     unparsed = False
     verdict: str | None = None
@@ -258,18 +281,22 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
         if not heading:
             i += 1
             continue
+        consumed[i] = DECISION
         title = _strip_marks(_heading_title(heading)).upper()
         if title.startswith("FINDINGS"):
-            bullets, unparsed, i = _bullets(lines, i + 1)
+            bullets, unparsed, end = _bullets(lines, i + 1)
+            _mark(consumed, i + 1, end, FINDING)
+            i = end
             continue
         if title.startswith("VERDICT"):
             inline = _GROK_VERDICT_LABEL.match(lines[i])
             if inline:
                 verdict = inline.group(1).lower()
             else:
-                for candidate in lines[i + 1:]:
-                    if candidate.strip():
-                        matched = _GROK_VERDICT.match(candidate.strip())
+                for index in range(i + 1, len(lines)):
+                    if lines[index].strip():
+                        consumed[index] = DECISION
+                        matched = _GROK_VERDICT.match(lines[index].strip())
                         if matched:
                             verdict = matched.group(1).lower()
                         break
@@ -285,7 +312,7 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
         raise ParseError("no `## VERDICT` line reading cleared or flagged")
     outcome = CHANGES_REQUESTED if verdict == "flagged" else APPROVED
     severity = "error" if outcome == CHANGES_REQUESTED else "warning"
-    return outcome, [_finding(b, "finding", severity) for b in bullets]
+    return outcome, [_finding(b, "finding", severity) for b in bullets], consumed
 
 
 # These run on every line of a review. The whitespace after the colon and the
@@ -311,14 +338,22 @@ _CLAUDE_SECTIONS = (
 def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     """The reviewer agent's block, the headless `VERDICT:` shape, or the
     `review` skill's tagged bullets."""
+    verdict, findings, _ = _read_claude_fresh(text)
+    return verdict, findings
+
+
+def _read_claude_fresh(text: str) -> tuple[str, list[dict], Consumed]:
     lines = text.splitlines()
+    consumed: Consumed = [None] * len(lines)
     verdict: str | None = None
-    for line in lines:
+    for index, line in enumerate(lines):
         matched = _CLAUDE_VERDICT_HEADING.match(line) or _CLAUDE_VERDICT_LABEL.match(line)
         if matched:
+            consumed[index] = DECISION
             token = matched.group(1).upper()
             verdict = CHANGES_REQUESTED if token.startswith("REQUEST") else APPROVED
         elif _CLEAN_SENTINEL.match(line):
+            consumed[index] = DECISION
             verdict = verdict or APPROVED
 
     collected: list[tuple[str, str]] = []  # (rule, bullet text)
@@ -327,10 +362,13 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     while i < len(lines):
         heading = _HEADING.match(lines[i])
         if heading:
+            consumed[i] = DECISION
             title = _strip_marks(_heading_title(heading)).upper()
             rule = next((r for prefix, r in _CLAUDE_SECTIONS if title.startswith(prefix)), None)
             if rule:
-                bullets, unparsed, i = _bullets(lines, i + 1)
+                bullets, unparsed, end = _bullets(lines, i + 1)
+                _mark(consumed, i + 1, end, FINDING)
+                i = end
                 if unparsed:
                     unparsed_sections.append(title)
                 collected.extend((rule, b) for b in bullets)
@@ -339,7 +377,9 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
             continue
         matched = _BULLET.match(lines[i])
         if matched and _TAG.match(matched.group(1)):
-            bullets, _, i = _bullets(lines, i)
+            bullets, _, end = _bullets(lines, i)
+            _mark(consumed, i, end, FINDING)
+            i = end
             collected.extend(("tagged", b) for b in bullets)
             continue
         i += 1
@@ -375,12 +415,12 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
         else:
             severity = "warning"
         shaped.append(_finding(bullet, rule, severity))
-    return verdict, shaped
+    return verdict, shaped, consumed
 
 
 ADAPTERS = {
-    "claude-fresh": parse_claude_fresh,
-    "grok-notools": parse_grok_notools,
+    "claude-fresh": _read_claude_fresh,
+    "grok-notools": _read_grok_notools,
 }
 
 
@@ -930,28 +970,19 @@ def _strip_references(line: str) -> str:
     return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
 
 
-# --- quoted inputs in the Evidence and Minor notes sections ------------------
+# --- quoted inputs: code spans and fenced blocks ----------------------------
 #
-# Evidence and Minor notes record what the reviewer ran and fed to it, so a
-# duration-shaped token there may be a quoted probe input, not the reviewer's
-# own timing claim. Only the inside of a well-formed backtick code span, or of
-# a fenced block that closes inside the section, counts as quoted, and only in
-# those two sections. Everything else stays in scope: prose in every section,
-# every heading line (so every verdict line), the Issues section quoted or not,
-# and any markup that does not close where it opens.
+# A review of duration-handling code has to quote its probe inputs, in the
+# summary under the verdict, in a finding, or in the Evidence. A duration-shaped
+# token inside a well-formed backtick code span, or inside a fenced block that
+# closes, is a quoted input, not the reviewer's own timing claim, wherever in
+# the review it sits. Everything else stays in scope: bare prose, emphasis,
+# double quotes, every heading line and verdict line (so a verdict never hides
+# a claim in a span), and any markup that does not close where it opens (an
+# unterminated backtick run or fence is read as prose).
 #
-# A section is one of the two only under the documented level-three heading:
-# `### Evidence` or `### Minor notes` (bold allowed, as in `### **Evidence**`).
-# Other levels, `###Evidence` with no space, a `#` run glued to the title, and
-# the bare `MINOR NOTES:` label all stay in scope.
-#
-# Sections are found with `_HEADING`, the pattern the adapters split sections
-# with, so the scan and the parser never disagree on where a section ends. That
-# pattern does not know about fences: a `# comment` inside a fenced block is a
-# heading to the parser, so it ends the section here too.
-_QUOTED_INPUT_SECTIONS = frozenset({"EVIDENCE", "MINOR NOTES"})
-# Exactly three `#` (up to three spaces before them), then at least one space.
-_QUOTED_INPUT_HEADING = re.compile(r"^ {0,3}### +")
+# The walk reads each line once, left to right, and a fence is closed by one
+# forward search that is never repeated, so the scan stays linear.
 # A fence line: up to three spaces, three or more backticks or tildes, then the
 # rest of the line (an opener's info string; a closer allows only whitespace).
 _FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -959,23 +990,6 @@ _BACKTICK_RUN = re.compile(r"`+")
 # A number at the end of a fence opener, bounded the way `_DURATION_CLAIM`
 # bounds one, so `\s+` across the newline would join it to a unit below.
 _NUMBER_AT_END = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*$")
-
-
-def _is_quoted_input_section(line: str, heading: re.Match[str]) -> bool:
-    if _QUOTED_INPUT_HEADING.match(line) is None:
-        return False
-    if _strip_marks(_heading_title(heading)).upper() not in _QUOTED_INPUT_SECTIONS:
-        return False
-    # A closing `#` run counts only when a space or tab sets it apart from the
-    # title (`### Evidence ###`); `### Evidence#` is not the documented heading.
-    line = line.rstrip()
-    title_end = line.rstrip("#")
-    return title_end == line or title_end.endswith((" ", "\t"))
-
-
-def _is_tagged_bullet(line: str) -> bool:
-    bullet = _BULLET.match(line)
-    return bool(bullet and _TAG.match(bullet.group(1)))
 
 
 def _fence_opener(line: str) -> str | None:
@@ -1035,11 +1049,29 @@ def _blank_code_spans(line: str) -> str:
     return "".join(pieces)
 
 
-def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: int) -> None:
-    """Blank the quoted inputs of `lines[start:stop]` into `out`."""
-    i = start
+def _blank_quoted_inputs(lines: list[str], consumed: Consumed | None) -> list[str]:
+    """`lines` with the quoted inputs blanked, given what the adapter consumed.
+
+    `consumed` holds one mark per line (see `DECISION` / `FINDING`). A decision
+    line (a verdict line or heading) is never blanked, inside a fence or out. A
+    finding line has only its own closed code spans blanked, wherever it sits:
+    a fence around it does not quote it. Every other line has its closed spans
+    blanked, and a closed fence has its interior blanked.
+
+    `consumed=None` means no adapter decided (the JEV fallback reads free
+    prose), so no line is known to be quoted: nothing is blanked.
+    """
+    if consumed is None:
+        return list(lines)
+    out = list(lines)
+    stop = len(lines)
+    i = 0
     while i < stop:
-        marker = _fence_opener(lines[i])
+        mark = consumed[i]
+        if mark == DECISION:
+            i += 1
+            continue
+        marker = _fence_opener(lines[i]) if mark is None else None
         if marker is None:
             out[i] = _blank_code_spans(lines[i])
             i += 1
@@ -1049,8 +1081,8 @@ def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: in
             close += 1
         if close == stop:
             # Fail closed: an unclosed fence leaves its own line and every
-            # later line of the section in scope, as written.
-            return
+            # later line in scope, as written.
+            return out
         if _NUMBER_AT_END.search(lines[i]):
             # The opener ends in a number that the scan reads as a claim
             # together with the block's first line ("3", then "hours"), so the
@@ -1059,31 +1091,10 @@ def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: in
             continue
         # The fence lines stay as written; only the lines between are quoted.
         for inner in range(i + 1, close):
-            out[inner] = ""
+            if consumed[inner] == DECISION:
+                continue
+            out[inner] = _blank_code_spans(lines[inner]) if consumed[inner] else ""
         i = close + 1
-
-
-def _blank_quoted_inputs(lines: list[str]) -> list[str]:
-    """`lines` with the quoted inputs of Evidence and Minor notes blanked."""
-    out = list(lines)
-    i = 0
-    while i < len(lines):
-        heading = _HEADING.match(lines[i])
-        line = lines[i]
-        i += 1
-        if heading is None or not _is_quoted_input_section(line, heading):
-            continue
-        end = i
-        while end < len(lines) and not _HEADING.match(lines[end]):
-            end += 1
-        # A `[BUG]` / `[SECURITY]` bullet is a finding wherever it sits (the
-        # adapter collects it, and in Evidence every bullet after it), so the
-        # section's quoting ends at the first one.
-        stop = i
-        while stop < end and not _is_tagged_bullet(lines[stop]):
-            stop += 1
-        _blank_quoted_section(lines, out, i, stop)
-        i = end
     return out
 
 
@@ -1097,24 +1108,14 @@ def _blank_quoted_inputs(lines: list[str]) -> list[str]:
 # example; `"41 seconds"` and `"3d/foo.py"` stay claims (`took "41 seconds"`
 # still needs INTERVAL endpoints). Unmatched quotes, interiors longer than
 # 200, heading lines, and grok `cleared`/`flagged` verdict-value lines fail
-# closed (stay in scope). Backtick spans stay the Evidence / Minor notes
-# rule above; a backtick-wrapped `"…"` is handled here.
+# closed (stay in scope). Backtick spans and fences are the quoted-input rule
+# above, applied first; a backtick-wrapped `"…"` is handled here.
 #
 # The walk is left-to-right str.find of `"`. No regex, no nested
 # quantifiers; a 100 KB adversarial line stays linear.
 
 _QUOTED_EXAMPLE_MAX = 200
 _REFUSAL_LINE_MAX = 200
-
-
-def _is_verdict_or_heading_line(line: str) -> bool:
-    return bool(
-        _HEADING.match(line)
-        or _GROK_VERDICT.match(line)
-        or _GROK_VERDICT_LABEL.match(line)
-        or _CLAUDE_VERDICT_HEADING.match(line)
-        or _CLAUDE_VERDICT_LABEL.match(line)
-    )
 
 
 def _is_quoted_example(interior: str) -> bool:
@@ -1164,30 +1165,27 @@ def _blank_double_quoted_examples(line: str) -> str:
     return "".join(pieces)
 
 
-def _blank_quoted_examples(original: str, scanned: str) -> str:
-    if _is_verdict_or_heading_line(original):
-        return scanned
-    return _blank_double_quoted_examples(scanned)
-
-
-def _scan_line(original: str, quoted_blanked: str) -> str:
-    scanned = _blank_quoted_examples(original, quoted_blanked)
+def _scan_line(quoted_blanked: str, as_written: bool) -> str:
+    # A decision line (and every line, when no adapter decided) keeps its
+    # double-quoted examples too.
+    scanned = quoted_blanked if as_written else _blank_double_quoted_examples(quoted_blanked)
     return _EMPHASISED_DURATION.sub(
         _unwrap_emphasised_duration, _strip_references(scanned)
     )
 
 
-def _iter_scanned_lines(text: str):
+def _iter_scanned_lines(text: str, consumed: Consumed | None):
     lines = text.splitlines()
-    quoted = _blank_quoted_inputs(lines)
-    for number, (original, blanked) in enumerate(zip(lines, quoted), start=1):
-        yield number, original, _scan_line(original, blanked)
+    quoted = _blank_quoted_inputs(lines, consumed)
+    for index, (original, blanked) in enumerate(zip(lines, quoted)):
+        as_written = consumed is None or consumed[index] == DECISION
+        yield index + 1, original, _scan_line(blanked, as_written)
 
 
-def _text_for_duration_scan(text: str) -> str:
+def _text_for_duration_scan(text: str, consumed: Consumed | None) -> str:
     return "\n".join(
         scanned
-        for _, original, scanned in _iter_scanned_lines(text)
+        for _, original, scanned in _iter_scanned_lines(text, consumed)
         if not _INTERVAL_LINE.match(original)
     )
 
@@ -1197,7 +1195,9 @@ def _named_refusal(rule: str, line_number: int, line: str) -> str:
     return f"{rule}: line {line_number}: {shown}"
 
 
-def _first_duration_claim_line(text: str) -> tuple[int, str] | None:
+def _first_duration_claim_line(
+    text: str, consumed: Consumed | None
+) -> tuple[int, str] | None:
     """The first original line that participates in a duration claim.
 
     The claim is found on the joined scan text, the same string
@@ -1207,7 +1207,7 @@ def _first_duration_claim_line(text: str) -> tuple[int, str] | None:
     """
     pairs = [
         (number, original, scanned)
-        for number, original, scanned in _iter_scanned_lines(text)
+        for number, original, scanned in _iter_scanned_lines(text, consumed)
         if not _INTERVAL_LINE.match(original)
     ]
     if not pairs:
@@ -1232,8 +1232,8 @@ def _first_incomplete_interval_line(text: str) -> tuple[int, str] | None:
     return None
 
 
-def _has_duration_claim(text: str) -> bool:
-    return _DURATION_CLAIM.search(_text_for_duration_scan(text)) is not None
+def _has_duration_claim(text: str, consumed: Consumed | None) -> bool:
+    return _DURATION_CLAIM.search(_text_for_duration_scan(text, consumed)) is not None
 
 
 def _parse_interval_body(body: str) -> tuple[dict | None, list[str]]:
@@ -1279,9 +1279,9 @@ def _collect_intervals(text: str) -> tuple[list[dict], list[list[str]]]:
     return complete, incomplete
 
 
-def _require_intervals(text: str) -> list[dict]:
+def _require_intervals(text: str, consumed: Consumed | None) -> list[dict]:
     complete, incomplete = _collect_intervals(text)
-    claim = _first_duration_claim_line(text)
+    claim = _first_duration_claim_line(text, consumed)
     if claim is None:
         return complete
     if complete:
@@ -1353,16 +1353,16 @@ def run_phase(envelope: object) -> dict:
         )
     selected = ADAPTERS[backend]
     try:
-        verdict, findings = selected(text)
+        verdict, findings, consumed = selected(text)
     except ParseError as exc:
         if not _jev_fallback_enabled(envelope):
             return _result("failure", f"{backend}: {exc}", text, None)
         parsed = _try_other_adapters(backend, text)
         if parsed is None:
             return _consult_jev(backend, text)
-        verdict, findings = parsed
+        verdict, findings, consumed = parsed
     try:
-        intervals = _require_intervals(text)
+        intervals = _require_intervals(text, consumed)
     except ParseError as exc:
         return _result("failure", f"{backend}: {exc}", text, None)
     source = "regex" if _jev_fallback_enabled(envelope) else None
@@ -1378,7 +1378,7 @@ def _jev_fallback_enabled(envelope: dict) -> bool:
     return isinstance(adapters, dict) and adapters.get("jev_fallback") is True
 
 
-def _try_other_adapters(backend: str, text: str) -> tuple[str, list[dict]] | None:
+def _try_other_adapters(backend: str, text: str) -> tuple[str, list[dict], Consumed] | None:
     for name, adapter in ADAPTERS.items():
         if name == backend:
             continue
@@ -1475,7 +1475,8 @@ def _consult_jev(backend: str, text: str) -> dict:
     except Exception:
         return _result("failure", "jev: request failed", text, None)
     try:
-        intervals = _require_intervals(text)
+        # No adapter parsed the return, so no line is known to be quoted.
+        intervals = _require_intervals(text, None)
     except ParseError as exc:
         return _result("failure", f"{backend}: {exc}", text, None)
     result = _finish(backend, verdict, [], text, source="jev", confidence=confidence)

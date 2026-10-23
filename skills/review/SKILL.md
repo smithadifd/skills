@@ -26,7 +26,7 @@ finding across several bullets.
   `- [BUG] skills/example/tool.py:41 — the retry loop drops the last item on
   a short read. Add a length check before the final iteration.`
 - If nothing found: "No bugs or security issues found."
-- Any verdict that relies on a measured interval carries an `INTERVAL:` line: `INTERVAL: from <start event>, <start source> to <end event>, <end source> = <duration>` (every part non-empty).
+- Any verdict that relies on a measured interval carries an `INTERVAL:` line: `INTERVAL: from <start event>, <start source> to <end event>, <end source> = <duration>` (every part non-empty). A duration quoted in a closed inline code span, or inside a closed fenced block, is a quoted input, not a measured interval, and needs no `INTERVAL:` line. The exceptions still need one: a bare, emphasised or double-quoted duration; a duration beside an unclosed backtick or fence; a duration on a verdict line or a heading, even inside a span; and a duration inside a fenced block on a line the parser reads as a finding (a bullet under an Issues, Minor notes or Findings heading, or a `[BUG]` / `[SECURITY]` bullet and what follows it). The parser decides which lines those are; see `references/interval-scope.md`. When no parser could read the review, nothing counts as quoted.
 
 Phase artifacts (optional, when a caller wants the structured result): Python 3
 is needed. Write the review to a file and run `python3 ${CLAUDE_SKILL_DIR}/review_phase.py --from-text <file>
