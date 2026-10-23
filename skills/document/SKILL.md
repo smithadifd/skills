@@ -19,7 +19,7 @@ agents so the heavy reading and drafting stay out of the main conversation:
 | Agent | Role |
 | --- | --- |
 | `doc-researcher` | Surveys the target and returns a brief of about 500 words. |
-| `doc-writer` | Drafts one page from the brief, writes it to disk, returns a summary and a claims list. |
+| `doc-writer` | Drafts one page from the brief and returns the full page text and a claims list. Under this skill it never writes. |
 | `doc-verifier` | Checks each claim against the code and returns confirmed and flagged lists. |
 
 ## 1. Find where files may be written
@@ -31,9 +31,9 @@ Writes go only under one folder, the output root. Settle it before anything else
 3. If there is no docs folder, propose `docs/` and wait for a yes before creating it.
 4. Edit a `README.md` only when the person asked for the README. The README is then the one file allowed outside the output root, and nothing else is.
 
-Every writer is handed an explicit output path under the output root (or the README path when asked), and writes nowhere else. Never write, edit or delete anything else: no source files, no config, no files outside the repository. If a page would belong elsewhere, refuse that path, say so in the report and leave it unwritten.
+Every writer is handed an explicit output path under the output root (or the README path when asked), as the page's intended destination. Writers never write: every `doc-writer` prompt, first draft or fix, says "return-only" so it returns the full page text and its claims list and does not call Write or Edit. Only the parent writes, and it does so in the same step as the path check, immediately after it, to a path it just checked. Never write, edit or delete anything else: no source files, no config, no files outside the repository. If a page would belong elsewhere, refuse that path, say so in the report and leave it unwritten.
 
-**Path check.** A path that merely starts with `docs/` is not enough, because a symlink can redirect a write elsewhere. Before spawning each writer and before each write, run this check and refuse on any failure:
+**Path check.** A path that merely starts with `docs/` is not enough, because a symlink can redirect a write elsewhere. Before each write (and before spawning each writer, to fail early), run this check and refuse on any failure. Check again right before every write, including fix passes, because a path can change after an earlier check:
 
 1. No component of the output root, the destination directory or the destination file (including any existing page or README) is a symlink.
 2. The canonical path (for example from `realpath`) of the output root is inside the canonical repository root.
@@ -54,16 +54,16 @@ Decide these and state them back in one line before starting, so the person can 
 Use one of each agent, with no outline gate.
 
 1. Spawn `doc-researcher` with the target and audience. If its coverage notes say the target is too large or too vague, ask the person to narrow it and stop.
-2. Run the path check, then spawn one `doc-writer` with the brief, page scope, audience, output path and mode.
-3. Spawn `doc-verifier` with the writer's claims list. Send flagged claims back to the writer to fix in place, then verify them again. Make at most two fix passes; report any claim still flagged after that.
+2. Spawn one `doc-writer` in return-only mode with the brief, page scope, audience, intended output path and mode. Then run the path check and, in the same step, write the returned text to the checked path.
+3. Spawn `doc-verifier` with the writer's claims list. Send flagged claims back to the writer (return-only) for revised page text, then run the path check and write it in the same step, and verify the claims again. Make at most two fix passes; report any claim still flagged after that.
 4. Report the path written, what it covers, the verification counts and anything skipped.
 
 ## 4. App-wide
 
 1. **Research.** Spawn `doc-researcher` with the target and audience. If its coverage notes say the target is too large or too vague, ask the person to narrow it and stop.
 2. **Plan and gate.** From the brief's suggested outline, list each page with its path, one-line purpose and audience, plus the output root. Show the list and wait for approval. This is the only gate; after it, write without further questions. Apply requested changes to the list and show it again if they were large.
-3. **Write.** Run the path check for each page, then spawn one `doc-writer` per approved page, giving it the relevant slice of the brief, the page scope, audience, output path and mode. Run writers in parallel for pages that do not depend on each other. Write a page first if later pages link back to it. If a writer reports gaps, either go back to the researcher or record the gap in the final report.
-4. **Verify.** Gather every writer's claims list and spawn `doc-verifier` with it. For flagged claims, send the writer of that page the claims and reasons in one batch to fix in place, then run `doc-verifier` again on those claims. Make at most two fix passes; list any claim still flagged in the report.
+3. **Write.** Spawn one return-only `doc-writer` per approved page, giving it the relevant slice of the brief, the page scope, audience, intended output path and mode. As each page comes back, run the path check and write the returned text in the same step. Run writers in parallel for pages that do not depend on each other. Write a page first if later pages link back to it. If a writer reports gaps, either go back to the researcher or record the gap in the final report.
+4. **Verify.** Gather every writer's claims list and spawn `doc-verifier` with it. For flagged claims, send the writer of that page the claims and reasons in one batch (return-only) for revised page text, then run the path check and write it in the same step, then run `doc-verifier` again on those claims. Make at most two fix passes; list any claim still flagged in the report.
 5. **Report.**
 
 ```
@@ -73,7 +73,7 @@ Verification: <confirmed> confirmed, <flagged> flagged and fixed, <skipped> skip
 Gaps: <pages that shipped with known gaps, or none>
 ```
 
-For updates, run the researcher first, since the code may have moved. Writers change only the stale sections and use Edit, so untouched content stays as it was. Finish with a short summary of what changed and what was preserved.
+For updates, run the researcher first, since the code may have moved. Writers read the existing page and return the full revised text with only the stale sections changed, so untouched content stays as it was. Finish with a short summary of what changed and what was preserved.
 
 ## Writing rules
 

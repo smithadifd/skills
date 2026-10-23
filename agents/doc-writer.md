@@ -66,7 +66,7 @@ Collect these as a list. Skip prose claims that can't be verified mechanically (
 
 **6. Write the file**
 
-Use Write for create mode, Edit for update mode. Write to the exact output path given.
+Use Write for create mode, Edit for update mode. Write to the exact output path given. When the prompt says return-only, do not call Write or Edit: return the full page text instead, followed by the claims list.
 
 ## Output format
 
