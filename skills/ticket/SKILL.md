@@ -160,9 +160,11 @@ session out.
    step for a new plan card and a new plan go; a criterion whose `passes` is not
    backed by a recorded review round is reset to false. A resume re-enters plan
    go or outward go only when the store holds that stop's stamp for the plan
-   revision or review round; otherwise it resumes at plan or build and flags
-   why. An unconfirmed close stamp is flagged and the ticket stays open. State
-   every flagged difference before reusing the plan, and read the card's
+   revision or review round. Without the plan go stamp it resumes at plan;
+   without the outward go or round-cap stamp it resumes in a state whose only
+   step writes that stamp (see Build and review). It flags why. An
+   unconfirmed close stamp is flagged and the ticket stays open. State every
+   flagged difference before reusing the plan, and read the card's
    referenced paths or ids.
 5. Identify assumptions and focused research questions. Do not start building.
 
@@ -234,7 +236,13 @@ After plan go:
    The cap stops the pass only once its stop stamp is stored. If a session
    ended after round three was stored but before that stamp, a resume reports
    `cap stop not recorded` and the pass stays live with one allowed step:
-   `record_cap_stop()`, which writes the stamp and ends the pass.
+   `record_cap_stop()`, which writes the stamp and ends the pass. A passing
+   round works the same way: it reaches outward go only once its outward go
+   stop stamp is stored. If a session ended after the passing round was
+   stored but before that stamp (or before the plan snapshot that marks the
+   round), a resume reports `outward stop not recorded`, and the one allowed
+   step is `record_outward_stop()`. It brings the plan snapshot up to that
+   round, writes the stamp, and waits at outward go.
 
 ## 6. Outward go — hard stop
 

@@ -1105,8 +1105,8 @@ class TicketPass:
         self._pass_id: str | None = None
         # The pass that presented the current plan revision.
         self._plan_pass: str | None = None
-        # The last review's evidence, kept for a round-cap stop a resume found missing.
-        self._cap_evidence: str | None = None
+        # The last stored review, kept for a stop stamp a resume found missing.
+        self._last_review: Mapping[str, Any] | None = None
         self._ended = False
 
     @classmethod
@@ -1261,26 +1261,40 @@ class TicketPass:
                 self._phase = "plan_go"
             return
         last = reviews[-1] if reviews else None
+        self._last_review = last
         passed = (
             last is not None
             and last.get("verdict") == "pass"
             and all(item.passes and item.review_round == last.get("round") for item in plan.acceptance_criteria)
         )
-        if passed and not _has_stamp(card, _outward_go_point(last.get("round")), "review"):
-            self.reconciliation += (
-                f"no outward go stop stamp for review round {last.get('round')}; resuming at build",
-            )
-            passed = False
-        if passed:
+        stamped = last is not None and _has_stamp(card, _outward_go_point(last.get("round")), "review")
+        if passed and stamped:
             self._phase = "outward_go"
+        elif last is not None and last.get("verdict") == "pass" and not stamped:
+            # A passing round reaches outward go only once its stop stamp is
+            # stored. A process that died after storing the round, before the
+            # plan snapshot or the stamp, leaves the pass able to finish that
+            # write, and nothing else.
+            self.reconciliation += (
+                f"outward stop not recorded: review round {last.get('round')} passed and is stored without "
+                "its outward go stop stamp; record_outward_stop() writes it",
+            )
+            self._phase = "outward_stop"
         elif self._rounds >= MAX_REVIEW_ROUNDS:
             # The cap stops the pass only once its stop stamp is stored. A
             # process that died between storing the last round and writing
             # that stamp leaves the pass able to write it, and nothing else.
             if _has_stamp(card, _CAP_POINT, "review"):
                 self._phase = "stopped"
+            elif last is not None and last.get("verdict") == "pass":
+                # Only an edited card holds a stamped passing round whose plan
+                # card does not carry it; it is not a non-converged review.
+                self.reconciliation += (
+                    f"review round {last.get('round')} passed with its outward go stop stamp, but the plan "
+                    "card does not carry that round; a person reconciles the card",
+                )
+                self._phase = "stopped"
             else:
-                self._cap_evidence = last.get("evidence") if last else None
                 self.reconciliation += (
                     f"cap stop not recorded: review round {self._rounds} is stored without its stop stamp; "
                     "record_cap_stop() writes it",
@@ -1391,7 +1405,7 @@ class TicketPass:
 
     @_ends_on_failure
     def record_tried(self, what: str, *, outcome: str | None = None, evidence: str | None = None) -> None:
-        self._refuse_at_cap_stop()
+        self._refuse_at_pending_stop()
         self.store.record_tried(TriedRecord(what, self._store_phase(), outcome, evidence))
 
     @_ends_on_failure
@@ -1452,16 +1466,8 @@ class TicketPass:
         self._plan._criteria = tuple(criteria)
         self._plan_ref = self.store.record_plan(self._snapshot(self._plan, self._revision))
 
-        if verdict == "pass":
-            self.store.write_stamp(
-                _outward_go_point(review.round),
-                "review",
-                ("ticket",),
-                (self._plan_ref, evidence),
-            )
-            self._phase = "outward_go"
-        elif review.round == MAX_REVIEW_ROUNDS:
-            self._write_cap_stop(evidence)
+        if verdict == "pass" or review.round == MAX_REVIEW_ROUNDS:
+            self._write_review_stop(verdict == "pass", review.round, evidence)
         else:
             self._phase = "build"
 
@@ -1470,10 +1476,45 @@ class TicketPass:
         """Write the round-cap stop stamp a resume found missing, then end the pass."""
 
         self._require_phase("cap_stop")
-        self._write_cap_stop(self._cap_evidence)
+        last = self._last_review or {}
+        self._write_review_stop(False, int(last.get("round") or self._rounds), last.get("evidence"))
 
-    def _write_cap_stop(self, evidence: str | None) -> None:
+    @_ends_on_failure
+    def record_outward_stop(self) -> None:
+        """Finish a passing review a resume found without its outward go stop stamp.
+
+        The passing round is in the store, and a passing review gives evidence
+        for every criterion, so the plan snapshot is brought up to that round
+        when it lags, then the stop stamp is written and the pass waits at
+        outward go.
+        """
+
+        self._require_phase("outward_stop")
+        last = self._last_review or {}
+        review_round, evidence = last.get("round"), last.get("evidence")
+        if self._plan is None or last.get("verdict") != "pass" or type(review_round) is not int:
+            raise TicketError("no passing review round is stored to finish")
+        rounds = _recorded_rounds(self.store.read_card().get("reviews") or [])
+        criteria = tuple(Criterion(item.text, True, evidence, review_round) for item in self._plan.acceptance_criteria)
+        if not all(_verified(item, rounds) for item in criteria):
+            raise StoreUnavailable(f"review round {review_round} does not carry this evidence")
+        if criteria != self._plan.acceptance_criteria:
+            self._plan._criteria = criteria
+            self._plan_ref = self.store.record_plan(self._snapshot(self._plan, self._revision))
+        self._write_review_stop(True, review_round, evidence)
+
+    def _write_review_stop(self, passed: bool, review_round: int, evidence: str | None) -> None:
+        """Write the stop stamp that ends a review round, then move to its phase.
+
+        A passing round stops at outward go. A round that did not pass writes a
+        stop only as the last allowed round: the round cap, which ends the pass.
+        """
+
         refs = tuple(ref for ref in (self._plan_ref, evidence) if ref)
+        if passed:
+            self.store.write_stamp(_outward_go_point(review_round), "review", ("ticket",), refs)
+            self._phase = "outward_go"
+            return
         self.store.write_stamp(_CAP_POINT, "review", _CAP_NEXT_SKILLS, refs)
         self._phase = "stopped"
         self.end("review did not converge after round three")
@@ -1528,7 +1569,7 @@ class TicketPass:
 
     @_ends_on_failure
     def more_info(self, destination: str, question: str, *, role: str | None = None) -> MoreInfoExit:
-        self._refuse_at_cap_stop()
+        self._refuse_at_pending_stop()
         if destination not in INFO_EXITS:
             raise TicketError(f"unknown more-info exit: {destination}")
         question = question.strip()
@@ -1566,9 +1607,13 @@ class TicketPass:
         if self._phase != expected:
             raise TicketError(f"expected phase {expected}, found {self._phase}")
 
-    def _refuse_at_cap_stop(self) -> None:
+    def _refuse_at_pending_stop(self) -> None:
         if self._phase == "cap_stop":
             raise TicketError("the round-cap stop is not recorded yet; record_cap_stop() is the only step allowed")
+        if self._phase == "outward_stop":
+            raise TicketError(
+                "the outward go stop is not recorded yet; record_outward_stop() is the only step allowed"
+            )
 
 
 __all__ = [

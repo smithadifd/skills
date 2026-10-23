@@ -262,8 +262,9 @@ def test_resume_enters_a_hard_stop_only_when_its_stamp_is_stored():
         session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
     assert len(store.card["reviews"]) == 1
     resumed = resume(store)
-    assert (session.phase, resumed.phase) == ("build", "build")
-    assert "no outward go stop stamp for review round 1; resuming at build" in resumed.reconciliation
+    # The passing round stays recorded; the pass resumes to write its stop, not to build again.
+    assert (session.phase, resumed.phase) == ("build", "outward_stop")
+    assert any(line.startswith("outward stop not recorded: review round 1") for line in resumed.reconciliation)
     with pytest.raises(ticket.TicketError):
         resumed.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
 
@@ -1507,3 +1508,112 @@ def test_record_cap_stop_is_refused_outside_the_cap_stop_state():
     session = to_build(MemoryStore())
     with pytest.raises(ticket.TicketError, match="expected phase cap_stop"):
         session.record_cap_stop()
+
+
+# A passing review reaches outward go only once its outward stop stamp is
+# stored. Each crash window inside a passing review resumes to write it.
+
+OUTWARD_POINT = "Waiting at outward go after review round {}."
+
+
+class LosesTheOutwardStamp:
+    """The process dies after a passing round is stored and before its outward stop stamp."""
+
+    lose = True
+
+    def write_stamp(self, point, phase, next_skills=(), refs=()):
+        if self.lose and point.startswith("Waiting at outward go"):
+            raise RuntimeError("the process died before the outward stop stamp")
+        super().write_stamp(point, phase, next_skills, refs)
+
+
+class LosesThePlanSnapshotAfterAPassingReview:
+    """The process dies after a passing round is stored and before the plan snapshot that marks it."""
+
+    lose = False
+
+    def record_plan(self, plan):
+        if self.lose:
+            raise RuntimeError("the process died before the plan snapshot")
+        return super().record_plan(plan)
+
+
+def check_the_outward_stop_retry(store, resumed, review_round, evidence):
+    """The resumed pass may only write the outward stop, then continues to close."""
+
+    assert resumed.phase == "outward_stop"
+    assert resumed.live
+    assert any(
+        line.startswith(f"outward stop not recorded: review round {review_round}") for line in resumed.reconciliation
+    )
+    with pytest.raises(ticket.TicketError):
+        resumed.record_review("pass", evidence="reviews/again", passed_criteria=(0, 1))
+    with pytest.raises(ticket.TicketError):
+        resumed.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    with pytest.raises(ticket.TicketError):
+        resumed.more_info("person", "Which API owns retries?")
+    with pytest.raises(ticket.TicketError):
+        resumed.record_tried("Retry in the client.")
+    with pytest.raises(ticket.TicketError):
+        resumed.record_cap_stop()
+    assert len(store.read_card()["reviews"]) == review_round
+
+    resumed.record_outward_stop()
+    assert (resumed.phase, resumed.live) == ("outward_go", True)
+    card = store.read_card()
+    stamp = card["stamps"][-1]
+    assert (stamp["point"], stamp["phase"], stamp["next_skills"]) == (OUTWARD_POINT.format(review_round), "review", ["ticket"])
+    assert stamp["refs"] == [".ticket/EK-14.md", evidence]
+    assert [(item["passes"], item["review_round"], item["review_evidence"]) for item in card["plan"]["acceptance_criteria"]] == [
+        (True, review_round, evidence)
+    ] * 2
+    resumed.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    resumed.close("Done.", refs=("example/repo#14",))
+    assert resume(store).phase == "closed"
+
+
+def test_a_lost_outward_stamp_after_a_passing_round_three_resumes_to_write_it(tmp_path):
+    store = concrete_store(tmp_path, LosesTheOutwardStamp)
+    session = to_build(store)
+    session.record_review("changes", evidence="reviews/1")
+    session.record_review("changes", evidence="reviews/2")
+    with pytest.raises(RuntimeError, match="before the outward stop stamp"):
+        session.record_review("pass", evidence="reviews/3", passed_criteria=(0, 1))
+    assert store.read_card()["pass"] is None
+    store.lose = False
+    check_the_outward_stop_retry(store, resume(store), 3, "reviews/3")
+
+
+def test_a_lost_plan_snapshot_after_a_passing_review_resumes_to_write_the_outward_stop(tmp_path):
+    store = concrete_store(tmp_path, LosesThePlanSnapshotAfterAPassingReview)
+    session = to_build(store)
+    store.lose = True
+    with pytest.raises(RuntimeError, match="before the plan snapshot"):
+        session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    card = store.read_card()
+    assert [review["verdict"] for review in card["reviews"]] == ["pass"]
+    assert [item["passes"] for item in card["plan"]["acceptance_criteria"]] == [False, False]
+    store.lose = False
+    check_the_outward_stop_retry(store, resume(store), 1, "reviews/1")
+
+
+def test_a_stamped_passing_round_three_the_plan_card_lost_is_not_a_cap_stop():
+    store = MemoryStore()
+    session = to_build(store)
+    session.record_review("changes", evidence="reviews/1")
+    session.record_review("changes", evidence="reviews/2")
+    session.record_review("pass", evidence="reviews/3", passed_criteria=(0, 1))
+    session.end()
+    # Only an edit can leave the stamped passing round off the plan card.
+    for item in store.card["plan"]["acceptance_criteria"]:
+        item.update(passes=False, review_evidence=None, review_round=None)
+    resumed = resume(store)
+    assert resumed.phase == "stopped"
+    assert any("a person reconciles the card" in line for line in resumed.reconciliation)
+    assert CAP_POINT not in [stamp["point"] for stamp in store.card["stamps"]]
+
+
+def test_record_outward_stop_is_refused_outside_the_outward_stop_state():
+    session = to_build(MemoryStore())
+    with pytest.raises(ticket.TicketError, match="expected phase outward_stop"):
+        session.record_outward_stop()
