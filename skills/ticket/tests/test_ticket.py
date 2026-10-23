@@ -804,7 +804,7 @@ def fresh_handle(store, writer=None):
     """Another handle on the same ticket and store, as another process would open."""
 
     if isinstance(store, ticket.MarkdownStore):
-        return ticket.MarkdownStore(store.repo, KEY, TITLE, writer=writer)
+        return ticket.MarkdownStore(store.repo, KEY, TITLE)
     return ticket.LedgerStore(KEY, TITLE, cli=store.cli, db=store.db, writer=writer)
 
 
@@ -975,13 +975,13 @@ def test_a_closed_card_without_its_outward_go_does_not_resume_as_closed(tmp_path
     assert "the outward go decision is missing" in flags
 
 
-# One live writer per ticket. On the markdown store a separate process holds
-# the ticket through the store's own write lock, and this process is the
-# second writer. On the ledger store two passes pin the same revision, and
-# the one that writes second is refused by the first one's name.
+# Markdown: a separate process holds the ticket's lock file and this process
+# is the writer that has to wait. Ledger: two writers pin the same revision,
+# and the one that writes second is refused by the first one's name.
 
 FIRST_WRITER = r"""
 import importlib.util
+import os
 import select
 import sys
 
@@ -991,29 +991,22 @@ sys.modules[spec.name] = ticket
 spec.loader.exec_module(ticket)
 mode, kind, key, title, where, db = sys.argv[2:8]
 if kind == "markdown":
-    store = ticket.MarkdownStore(where, key, title, writer="first-writer")
+    store = ticket.MarkdownStore(where, key, title)
 else:
     store = ticket.LedgerStore(key, title, cli=where, db=db, writer="first-writer")
 if mode == "hold":
     with store._writing():
-        print(store.holder, flush=True)
+        print("locked", flush=True)
         # Hold until told to release, and never longer than 20 seconds.
         select.select([sys.stdin], [], [], 20)
 elif mode == "burst":
-    # Land ten stamps, retrying each one that another writer refuses.
-    landed = refused = 0
-    while landed < 10:
-        try:
-            store.write_stamp(f"Burst stamp {landed} from {store.holder}.", "build")
-        except ticket.TicketHeld as held:
-            assert held.holder.startswith("first-writer (pid "), held.holder
-            refused += 1
-        else:
-            landed += 1
-    print(refused, flush=True)
+    # Land ten stamps; each write waits for the lock when another writer has it.
+    for landed in range(10):
+        store.write_stamp(f"Burst stamp {landed} from {os.getpid()}.", "build")
+    print("burst", flush=True)
 else:
     store.write_stamp("Written by the first writer.", "build", ("ticket",))
-    print(store.holder, flush=True)
+    print(getattr(store, "holder", "markdown"), flush=True)
     print("written", flush=True)
 """
 
@@ -1028,115 +1021,67 @@ def first_writer(mode, kind, where, db=""):
     )
 
 
-def lock_dir_entries(repo):
-    return sorted(path.name for path in (repo / ".ticket").iterdir() if path.name.endswith((".lock", ".tmp")))
+def leftover_temp_files(repo):
+    return sorted(path.name for path in (repo / ".ticket").iterdir() if path.name.endswith(".tmp"))
 
 
-def test_markdown_store_refuses_a_second_live_writer_by_name(tmp_path):
+def test_markdown_write_waits_for_the_lock_file_and_lands_after_release(tmp_path):
     repo = init_ignored_repo(tmp_path)
-    store = ticket.MarkdownStore(repo, KEY, TITLE, writer="second-writer")
-    holder = first_writer("hold", "markdown", repo)
+    store = ticket.MarkdownStore(repo, KEY, TITLE)
+    store.write_stamp("Written before the lock was held.", "build", ("ticket",))
+    assert store.lock_path == repo / ".ticket" / f"{KEY}.lock"
+    card_before = store.path.read_bytes()
+    lock = os.open(store.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    writer = first_writer("write", "markdown", repo)
     try:
-        held_by = holder.stdout.readline().strip()
-        assert held_by.startswith("first-writer (pid "), holder.stderr.read()
-        started = time.monotonic()
-        with pytest.raises(ticket.TicketHeld) as refused:
-            store.write_stamp("Written by the second writer.", "build", ("ticket",))
-        assert time.monotonic() - started < 10
-        assert (refused.value.key, refused.value.holder) == (KEY, held_by)
-        assert f"ticket {KEY} already has a live writer: {held_by}" in str(refused.value)
-        assert refused.value.code == "held"
-        assert store.read_card()["stamps"] == []
+        # The writer is running and blocked: it has not written while the lock is held.
+        time.sleep(1.0)
+        assert writer.poll() is None
+        assert store.path.read_bytes() == card_before
     finally:
-        holder.stdin.close()
-        holder.wait(timeout=30)
-    assert holder.returncode == 0, holder.stderr.read()
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+    out, err = writer.communicate(timeout=30)
+    assert (writer.returncode, out.splitlines()[-1:]) == (0, ["written"]), err
+    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == [
+        "Written before the lock was held.",
+        "Written by the first writer.",
+    ]
+    assert leftover_temp_files(repo) == []
 
-    store.write_stamp("Written by the second writer.", "build", ("ticket",))
-    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == ["Written by the second writer."]
-    assert lock_dir_entries(repo) == []
 
-
-def test_a_markdown_close_confirm_is_refused_while_another_writer_holds_the_ticket(tmp_path):
+def test_markdown_close_confirm_waits_for_the_lock_and_rechecks_the_last_stamp(tmp_path):
     repo = init_ignored_repo(tmp_path)
-    store = ticket.MarkdownStore(repo, KEY, TITLE, writer="second-writer")
+    store = ticket.MarkdownStore(repo, KEY, TITLE)
     store.write_stamp("Done.", "close", ("ticket",))
-    holder = first_writer("hold", "markdown", repo)
-    try:
-        held_by = holder.stdout.readline().strip()
-        assert held_by.startswith("first-writer (pid "), holder.stderr.read()
-        with pytest.raises(ticket.TicketHeld) as refused:
-            store.confirm_close(0, "Done.")
-        assert refused.value.holder == held_by
-    finally:
-        holder.stdin.close()
-        holder.wait(timeout=30)
+    lock = os.open(store.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    # A stop lands from another process while this confirm is waiting its turn.
+    other = first_writer("write", "markdown", repo)
+    time.sleep(0.5)
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    os.close(lock)
+    out, err = other.communicate(timeout=30)
+    assert other.returncode == 0, err
+    with pytest.raises(ticket.StoreUnavailable, match="no longer the pending close"):
+        store.confirm_close(0, "Done.")
     card = store.read_card()
-    assert (card["status"], card["stamps"][-1]["close"]) == ("open", False)
-    store.confirm_close(0, "Done.")
-    card = store.read_card()
-    assert (card["status"], card["stamps"][-1]["close"]) == ("closed", True)
+    assert (card["status"], [stamp["close"] for stamp in card["stamps"]]) == ("open", [False, False])
 
 
-def test_markdown_lock_names_its_holder_from_the_moment_it_is_taken_until_it_is_released(tmp_path, monkeypatch):
-    # A contender writes at the two edges of the first writer's hold: right
-    # after the lock node is linked into place, and right before the first
-    # writer removes it. Both refusals must name the first writer.
-    repo = init_ignored_repo(tmp_path)
-    first = ticket.MarkdownStore(repo, KEY, TITLE, writer="first-writer")
-    contender = ticket.MarkdownStore(repo, KEY, TITLE, writer="contender")
-    lock_name = first.lock_path.name
-    real_link, real_unlink = os.link, os.unlink
-    refusals = {}
-
-    def contend(edge):
-        if edge in refusals:
-            return
-        refusals[edge] = None
-        try:
-            contender.write_stamp("Written by the contender.", "build")
-        except ticket.TicketHeld as refused:
-            refusals[edge] = refused.holder
-
-    def link(source, target, **kwargs):
-        real_link(source, target, **kwargs)
-        if target == lock_name:
-            contend("taken")
-
-    def unlink(path, **kwargs):
-        if path == lock_name:
-            contend("releasing")
-        real_unlink(path, **kwargs)
-
-    monkeypatch.setattr(ticket.os, "link", link)
-    monkeypatch.setattr(ticket.os, "unlink", unlink)
-    first.write_stamp("Written by the first writer.", "build")
-    monkeypatch.undo()
-
-    assert refusals == {"taken": first.holder, "releasing": first.holder}
-    assert [stamp["point"] for stamp in first.read_card()["stamps"]] == ["Written by the first writer."]
-    assert lock_dir_entries(repo) == []
-
-
-@pytest.mark.parametrize("planted", ("symlink", "hardlink"))
-def test_markdown_store_refuses_a_lock_node_it_did_not_make(planted, tmp_path):
+def test_markdown_store_refuses_a_lock_path_that_is_a_symlink(tmp_path):
     repo = init_ignored_repo(tmp_path)
     store = ticket.MarkdownStore(repo, KEY, TITLE)
     (repo / ".ticket").mkdir()
     sentinel = tmp_path / "sentinel.txt"
     sentinel.write_text("must survive\n", encoding="utf-8")
-    if planted == "symlink":
-        os.symlink(sentinel, store.lock_path)
-    else:
-        os.link(sentinel, store.lock_path)
+    os.symlink(sentinel, store.lock_path)
 
-    with pytest.raises(ticket.StoreUnavailable, match="it was not used as a lock and nothing was written") as refused:
+    with pytest.raises(ticket.StoreUnavailable, match="cannot open the write lock"):
         store.write_stamp("Never lands.", "build")
-    assert refused.value.code == "unsafe_lock"
     assert sentinel.read_text(encoding="utf-8") == "must survive\n"
     assert not store.path.exists()
-    assert os.path.samefile(store.lock_path, sentinel)
-    assert lock_dir_entries(repo) == [store.lock_path.name]
 
 
 def test_markdown_writers_in_parallel_lose_no_write(tmp_path):
@@ -1147,24 +1092,20 @@ def test_markdown_writers_in_parallel_lose_no_write(tmp_path):
     stamps = ticket.MarkdownStore(repo, KEY, TITLE).read_card()["stamps"]
     assert len(stamps) == 60
     assert len({stamp["point"] for stamp in stamps}) == 60
-    # The writers did contend: some writes were refused by name and retried.
-    assert sum(int(out) for out, _ in results) > 0
-    assert lock_dir_entries(repo) == []
+    assert [out.strip() for out, _ in results] == ["burst"] * 6
+    assert leftover_temp_files(repo) == []
 
 
-def test_markdown_lock_left_by_a_killed_writer_is_replaced(tmp_path):
+def test_markdown_lock_held_by_a_dead_writer_is_released_by_the_system(tmp_path):
     repo = init_ignored_repo(tmp_path)
     holder = first_writer("hold", "markdown", repo)
-    held_by = holder.stdout.readline().strip()
-    assert held_by.startswith("first-writer (pid "), holder.stderr.read()
+    assert holder.stdout.readline().strip() == "locked", holder.stderr.read()
     holder.kill()
     holder.wait(timeout=30)
     store = ticket.MarkdownStore(repo, KEY, TITLE)
-    assert store.lock_path.read_text(encoding="utf-8") == held_by
 
-    store.write_stamp("Written after the killed writer.", "build")
-    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == ["Written after the killed writer."]
-    assert lock_dir_entries(repo) == []
+    store.write_stamp("Written after the dead writer.", "build")
+    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == ["Written after the dead writer."]
 
 
 class FailsMidWrite:
@@ -1179,10 +1120,10 @@ class FailsMidWrite:
 
 def test_markdown_lock_is_released_when_a_write_raises(tmp_path):
     repo = init_ignored_repo(tmp_path)
-    failing = type("Store", (FailsMidWrite, ticket.MarkdownStore), {})(repo, KEY, TITLE, writer="failing-writer")
+    failing = type("Store", (FailsMidWrite, ticket.MarkdownStore), {})(repo, KEY, TITLE)
     with pytest.raises(RuntimeError, match="mid-write"):
         failing.write_stamp("Never lands.", "build")
-    assert lock_dir_entries(repo) == []
+    assert leftover_temp_files(repo) == []
 
     other = first_writer("write", "markdown", repo)
     out, err = other.communicate(timeout=30)
@@ -1216,6 +1157,24 @@ def latest_state(cli):
     return {name: value for name, value in states[-1].items() if name != "source"} if states else None
 
 
+CLAIM_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+
+
+def claim_of(card, pass_id):
+    """The live-session claim on a card: session id, host and started-at, nothing else."""
+
+    claim = card["pass"]
+    assert set(claim) == {"id", "host", "started_at"}
+    assert claim["id"] == pass_id
+    assert claim["host"] and not any(ch.isspace() for ch in claim["host"])
+    assert CLAIM_TIME.fullmatch(claim["started_at"])
+    return claim
+
+
+def named(claim):
+    return f"session {claim['id']}, host {claim['host']}, started {claim['started_at']}"
+
+
 def check_a_pass_holds_the_ticket_across_processes(make_store):
     """The reviewers' window: pass A stops at plan go, its process exits, pass B opens.
 
@@ -1231,26 +1190,25 @@ def check_a_pass_holds_the_ticket_across_processes(make_store):
     assert pass_a
     # Process 1 of pass A ends at the plan go stop; its pass record stays.
     del first
-    assert make_store("reader").read_card()["pass"] == {"id": pass_a, "holder": a_store.holder}
+    claim = claim_of(make_store("reader").read_card(), pass_a)
 
     # Pass B opens a fresh handle while A waits for the person's go.
     b_store = make_store("pass-b")
     with pytest.raises(ticket.TicketHeld) as refused:
         ticket.TicketPass.open(KEY, source(), b_store, resume=True)
-    assert (refused.value.key, refused.value.holder) == (KEY, a_store.holder)
-    assert f"ticket {KEY} already has a live writer: {a_store.holder}" in str(refused.value)
-    assert f"Its pass {pass_a} is live" in str(refused.value)
-    assert f"python3 ticket.py release-pass {KEY} {pass_a}" in str(refused.value)
+    assert (refused.value.key, refused.value.holder) == (KEY, named(claim))
+    assert f"ticket {KEY} already has a live writer: {named(claim)}" in str(refused.value)
+    assert f"python3 ticket.py release {KEY} {pass_a}" in str(refused.value)
     # B's handle, outside any pass, is refused by A's name too.
     with pytest.raises(ticket.TicketHeld) as refused:
         b_store.write_stamp("Plan B, never shown to the person.", "plan")
-    assert refused.value.holder == a_store.holder
+    assert refused.value.holder == named(claim)
     # So is a pass id that is not the live pass's.
     with pytest.raises(ticket.TicketHeld) as refused:
         ticket.TicketPass.open(KEY, source(), make_store("pass-b"), pass_id="0123456789abcdef")
-    assert refused.value.holder == a_store.holder
+    assert refused.value.holder == named(claim)
     card = make_store("reader").read_card()
-    assert card["pass"] == {"id": pass_a, "holder": a_store.holder}
+    assert card["pass"] == claim
     assert [stamp["point"] for stamp in card["stamps"]] == ["Waiting at plan go for plan revision 1."]
 
     # Process 2 of pass A: the person said go, and A continues with its pass id.
@@ -1288,7 +1246,7 @@ def check_the_pass_record_is_released_on_every_exit_path(make_store):
     with pytest.raises(ticket.TicketError):
         session.record_review("pass", evidence="reviews/1")
     assert session.live
-    assert live() == {"id": session.pass_id, "holder": session.store.holder}
+    claim_of({"pass": live()}, session.pass_id)
     session.end()
     assert live() is None
 
@@ -1310,7 +1268,7 @@ def check_the_pass_record_is_released_on_every_exit_path(make_store):
     # Error exit: an exception leaves a with block over the pass.
     with pytest.raises(RuntimeError, match="left the block"):
         with ticket.TicketPass.open(KEY, source(), make_store("with-block")) as session:
-            assert live() == {"id": session.pass_id, "holder": session.store.holder}
+            claim_of({"pass": live()}, session.pass_id)
             raise RuntimeError("left the block")
     assert (session.live, live()) == (False, None)
 
@@ -1319,13 +1277,13 @@ def check_the_pass_record_is_released_on_every_exit_path(make_store):
     # ends, and A's ending leaves B's record alone.
     a = ticket.TicketPass.open(KEY, source(), make_store("pass-a"))
     make_store("person").clear_pass(a.pass_id)
-    b_store = make_store("pass-b")
-    b = ticket.TicketPass.open(KEY, source(), b_store)
+    b = ticket.TicketPass.open(KEY, source(), make_store("pass-b"))
+    b_claim = claim_of({"pass": live()}, b.pass_id)
     with pytest.raises(ticket.TicketHeld) as refused:
         a.record_tried("Retry in the client.")
-    assert refused.value.holder == b_store.holder
+    assert refused.value.holder == named(b_claim)
     assert not a.live
-    assert live() == {"id": b.pass_id, "holder": b_store.holder}
+    assert live() == b_claim
     with pytest.raises(ticket.TicketHeld):
         make_store("person").clear_pass(a.pass_id)
     b.end()
@@ -1337,7 +1295,7 @@ def markdown_harness(tmp_path):
     repo = init_ignored_repo(tmp_path)
 
     def make_store(writer=None):
-        return ticket.MarkdownStore(repo, KEY, TITLE, writer=writer)
+        return ticket.MarkdownStore(repo, KEY, TITLE)
 
     return make_store
 
@@ -1348,28 +1306,6 @@ def test_markdown_pass_holds_the_ticket_across_processes(tmp_path):
 
 def test_markdown_pass_record_is_released_on_every_exit_path(tmp_path):
     check_the_pass_record_is_released_on_every_exit_path(markdown_harness(tmp_path))
-
-
-def test_markdown_pass_is_released_when_its_write_is_refused_by_the_lock(tmp_path):
-    make_store = markdown_harness(tmp_path)
-
-    class ContendedOnce(ticket.MarkdownStore):
-        contend = False
-
-        def _acquire(self, directory):
-            if self.contend:
-                self.contend = False
-                raise ticket.TicketHeld(KEY, "a writer mid-write (pid 1, handle abcdef)")
-            return super()._acquire(directory)
-
-    store = ContendedOnce(make_store().repo, KEY, TITLE, writer="contended")
-    session = ticket.TicketPass.open(KEY, source(), store)
-    store.contend = True
-    with pytest.raises(ticket.TicketHeld, match="a writer mid-write"):
-        session.more_info("person", "Which API owns retries?")
-    assert not session.live
-    assert make_store().read_card()["pass"] is None
-    assert make_store().read_card()["stamps"] == []
 
 
 def test_a_plan_go_counts_only_for_the_pass_that_presented_the_plan():
@@ -1397,7 +1333,7 @@ def test_a_plan_go_counts_only_for_the_pass_that_presented_the_plan():
     # Pass A crashed at plan go and a person cleared it. Pass C resumes at
     # plan, not at plan go, so the person's go always follows the plan the
     # pass that asked for it presented.
-    store.card["pass"] = {"id": pass_a, "holder": "crashed"}
+    store.card["pass"] = {"id": pass_a, "host": "crashed-host", "started_at": "2026-10-18T00:00:00Z"}
     store.clear_pass(pass_a)
     resumed = resume(store)
     assert resumed.phase == "plan"
@@ -1411,59 +1347,9 @@ def test_a_plan_go_counts_only_for_the_pass_that_presented_the_plan():
     assert store.card["decisions"][-1]["effect"] == plan_go_effect(2, resumed.pass_id)
 
 
-STALE_DIRECTORY_WRITER = r"""
-import importlib.util
-import sys
-
-spec = importlib.util.spec_from_file_location("ticket_stale_writer", sys.argv[1])
-ticket = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = ticket
-spec.loader.exec_module(ticket)
-try:
-    ticket.MarkdownStore(sys.argv[2], sys.argv[3], "T", writer="child").write_stamp("x", "build")
-except ticket.TicketHeld as held:
-    print(held.holder, flush=True)
-else:
-    print("written", flush=True)
-"""
-
-
-def test_stale_lock_replacement_refuses_while_another_process_holds_the_directory_lock(tmp_path):
-    repo = init_ignored_repo(tmp_path)
-    store = ticket.MarkdownStore(repo, KEY, TITLE, writer="contender")
-    store._ensure_directory()
-    store.lock_path.write_text("dead-writer (pid 1, handle abcdef)", encoding="utf-8")
-    directory = os.open(store.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    fcntl.flock(directory, fcntl.LOCK_EX)
-    try:
-        started = time.monotonic()
-        child = subprocess.Popen(
-            [sys.executable, "-c", STALE_DIRECTORY_WRITER, str(SKILL_DIR / "ticket.py"), str(repo), KEY],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            out, err = child.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.communicate(timeout=10)
-            pytest.fail("the writer blocked on the directory lock instead of refusing")
-        elapsed = time.monotonic() - started
-    finally:
-        fcntl.flock(directory, fcntl.LOCK_UN)
-        os.close(directory)
-    assert child.returncode == 0, err
-    assert out.strip() == "another writer replacing the stale lock left by dead-writer (pid 1, handle abcdef)"
-    assert elapsed < 5
-    assert store.read_card()["stamps"] == []
-    store.write_stamp("Written once the directory lock is free.", "build")
-    assert [stamp["point"] for stamp in store.read_card()["stamps"]] == ["Written once the directory lock is free."]
-
-
 def release_command(key, pass_id, *extra, env):
     return subprocess.run(
-        [sys.executable, str(SKILL_DIR / "ticket.py"), "release-pass", key, pass_id, *extra],
+        [sys.executable, str(SKILL_DIR / "ticket.py"), "release", key, pass_id, *extra],
         capture_output=True,
         text=True,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **env},
@@ -1483,22 +1369,22 @@ def test_a_person_clears_a_crashed_pass_with_the_documented_command(kind, tmp_pa
             return ticket.LedgerStore(KEY, TITLE, cli=fake, db=db, writer=writer)
 
         extra, env = (), {"TICKET_LEDGER_CLI": str(fake), "LEDGER_DB": str(db)}
-    crashed_store = make_store("crashed-pass")
-    crashed = ticket.TicketPass.open(KEY, source(), crashed_store)
+    crashed = ticket.TicketPass.open(KEY, source(), make_store("crashed-pass"))
     pass_id = crashed.pass_id
     del crashed  # its process died without ending the pass
+    claim = claim_of(make_store().read_card(), pass_id)
 
     with pytest.raises(ticket.TicketHeld) as refused:
         ticket.TicketPass.open(KEY, source(), make_store("next-pass"), resume=True)
-    assert refused.value.holder == crashed_store.holder
+    assert refused.value.holder == named(claim)
 
     wrong = release_command(KEY, "0123456789abcdef", *extra, env=env)
     assert wrong.returncode == 1
-    assert crashed_store.holder in wrong.stderr
-    assert make_store().read_card()["pass"] == {"id": pass_id, "holder": crashed_store.holder}
+    assert named(claim) in wrong.stderr
+    assert make_store().read_card()["pass"] == claim
 
     cleared = release_command(KEY, pass_id, *extra, env=env)
-    assert (cleared.returncode, cleared.stdout.strip()) == (0, f"released pass {pass_id} on ticket {KEY}"), cleared.stderr
+    assert (cleared.returncode, cleared.stdout.strip()) == (0, f"released session {pass_id} on ticket {KEY}"), cleared.stderr
     assert make_store().read_card()["pass"] is None
     nxt = ticket.TicketPass.open(KEY, source(), make_store("next-pass"), resume=True)
     assert nxt.live
@@ -1782,3 +1668,39 @@ def test_real_ledger_cli_adapter_when_configured(tmp_path):
     other = ticket.LedgerStore("EK-15", "Second ticket", cli=configured, db=db)
     other.write_stamp("waiting on person: Which API owns retries?", "orient", ("ticket",))
     assert other.read_card()["stamps"][0]["point"] == "waiting on person: Which API owns retries?"
+
+
+def test_ledger_second_session_is_refused_by_the_live_claim_until_it_is_released(tmp_path, monkeypatch):
+    cli, make_store = fake_ledger_harness(tmp_path, monkeypatch)
+    first = ticket.TicketPass.open(KEY, source(), make_store("first"))
+    first.record_tried("Retry in the client.")
+
+    # The claim is the first event the store wrote for the ticket.
+    events = cli("export-item", KEY)["events"]
+    claims = [event for event in events if event["kind"] == "session.opened"]
+    assert len(claims) == 1
+    assert events[0]["id"] == claims[0]["id"]
+    claim = claim_of(make_store("reader").read_card(), first.pass_id)
+    assert f"host={claim['host']} started={claim['started_at']}" in claims[0]["payload"]["purpose"]
+
+    # A second session finds the live claim, is refused, and the refusal names all three facts.
+    with pytest.raises(ticket.TicketHeld) as refused:
+        ticket.TicketPass.open(KEY, source(), make_store("second"))
+    message = str(refused.value)
+    assert f"session {claim['id']}, host {claim['host']}, started {claim['started_at']}" in message
+    assert [item["what"] for item in make_store("reader").read_card()["tried"]] == ["Retry in the client."]
+
+    # No claim expires by elapsed time: a later attempt is refused the same way.
+    with pytest.raises(ticket.TicketHeld, match=claim["id"]):
+        ticket.TicketPass.open(KEY, source(), make_store("second"))
+
+    # The person's release lets the next session proceed.
+    result = release_command(
+        KEY,
+        claim["id"],
+        env={"TICKET_LEDGER_CLI": str(make_store().cli), "LEDGER_DB": str(make_store().db)},
+    )
+    assert result.returncode == 0, result.stderr
+    second = ticket.TicketPass.open(KEY, source(), make_store("second"))
+    assert second.live and second.pass_id != first.pass_id
+    second.end()

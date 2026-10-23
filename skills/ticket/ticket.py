@@ -102,23 +102,37 @@ def _writer_name(writer: str | None) -> str:
     return f"{label} (pid {os.getpid()}, handle {secrets.token_hex(3)})"
 
 
-# One live pass per ticket. A pass takes the ticket's pass record when it
-# starts and keeps it, across processes, until it ends. The record names the
-# pass and the writer that started it; it is not the ticket's work claim.
+# One live session (a "pass") per ticket. A pass writes a claim record first,
+# naming its session id, host and start time, and keeps it, across processes,
+# until the ticket is closed or a person releases it. No claim expires by
+# elapsed time.
 _PASS_PREFIX = "ticket-pass/v1 "
+_CLAIM_FIELDS = re.compile(r"^(?P<id>\S+) host=(?P<host>\S+) started=(?P<started>\S+)$")
+
+
+def _host() -> str:
+    return "".join(socket.gethostname().split()) or "unknown"
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _claim_text(claim: Mapping[str, Any]) -> str:
+    return f"session {claim['id']}, host {claim['host']}, started {claim['started_at']}"
 
 
 def _release_command(key: str, pass_id: str) -> str:
-    return f"python3 ticket.py release-pass {key} {pass_id}"
+    return f"python3 ticket.py release {key} {pass_id}"
 
 
 def _held_by_pass(key: str, live: Mapping[str, Any]) -> TicketHeld:
     return TicketHeld(
         key,
-        str(live["holder"]),
+        _claim_text(live),
         detail=(
-            f"Its pass {live['id']} is live, so this write was refused, not queued; retry after that "
-            "pass ends. If that pass crashed, a person clears its record with "
+            "That session is live, so this write was refused. It ends when the ticket is closed. "
+            "If that session is gone, a person releases it with "
             f"`{_release_command(key, str(live['id']))}` (add `--repo <path>` for a markdown card)."
         ),
     )
@@ -563,22 +577,17 @@ def _blank_card(key: str, title: str) -> dict[str, Any]:
 class MarkdownStore:
     """Ignored ``.ticket/<key>.md`` fallback with embedded structured data.
 
-    Every write holds ``.ticket/<key>.md.lock`` for the whole read, change and
-    replace. A writer prepares a new file that already holds its name and its
-    exclusive ``flock``, then links it into place: owning the lock and naming
-    the owner happen in one step. The node keeps that name until the owner
-    removes it at release, so every refusal names the live holder. Nothing is
-    ever written through the lock path, and a node there that is not a
-    regular, singly-linked file is refused. The lock is taken without
-    waiting. If the holding process dies, the operating system drops its
-    ``flock`` and the next writer replaces the stale node.
+    Every write holds an exclusive advisory lock on ``.ticket/<key>.lock``
+    across the load, the precondition check and the save. The save writes a
+    temporary file beside the card and renames it into place, so a reader
+    never sees half a card.
 
-    The card's ``pass`` field is the ticket's pass record: the live pass's id
-    and the writer that started it. It is read and changed under the same
-    lock as every other write, and every write checks it first.
+    The card's ``pass`` field is the ticket's live-session record: the
+    session id, the host and the start time. It is read and changed under the
+    same lock as every other write, and every write checks it first.
     """
 
-    def __init__(self, repo: str | Path, key: str, title: str, *, writer: str | None = None):
+    def __init__(self, repo: str | Path, key: str, title: str):
         if not _KEY.fullmatch(key):
             raise TicketError(f"unsafe ticket key: {key!r}")
         self.repo = Path(repo).resolve()
@@ -586,8 +595,7 @@ class MarkdownStore:
         self.title = title
         self.relative_path = Path(".ticket") / f"{key}.md"
         self.path = self.repo / self.relative_path
-        self.lock_path = self.path.with_name(f"{key}.md.lock")
-        self.holder = _writer_name(writer)
+        self.lock_path = self.path.with_name(f"{key}.lock")
         self._depth = 0
         # The pass this handle writes for, and the pass it ended, if any.
         self._pass: str | None = None
@@ -595,7 +603,12 @@ class MarkdownStore:
 
     @contextlib.contextmanager
     def _writing(self) -> Iterator[None]:
-        """Hold this ticket's write lock for one write; refuse if it is held."""
+        """Hold this ticket's exclusive lock for one write, then drop it.
+
+        The lock is an advisory ``flock`` on ``.ticket/<key>.lock``. A second
+        writer waits for it; the operating system drops it if its holder dies,
+        so nothing is left to clean up.
+        """
 
         if self._depth:
             self._depth += 1
@@ -611,144 +624,32 @@ class MarkdownStore:
         except OSError as exc:
             raise StoreUnavailable(f"cannot open .ticket as a directory for ticket {self.key}: {exc}") from exc
         try:
-            fd = self._acquire(directory)
             try:
+                fd = os.open(
+                    self.lock_path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory,
+                )
+            except OSError as exc:
+                raise StoreUnavailable(f"cannot open the write lock for ticket {self.key}: {exc}") from exc
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise StoreUnavailable(
+                        f"{self.relative_path.with_suffix('.lock').as_posix()} is not a regular file, so it "
+                        "was not used as a lock and nothing was written."
+                    )
+                fcntl.flock(fd, fcntl.LOCK_EX)
                 self._depth = 1
-                yield
+                try:
+                    yield
+                finally:
+                    self._depth = 0
             finally:
-                self._depth = 0
-                self._release(directory, fd)
+                os.close(fd)
         finally:
             os.close(directory)
 
-    def _acquire(self, directory: int) -> int:
-        """Link a named, locked node into place as the lock; return its descriptor."""
-
-        name = self.lock_path.name
-        temporary = f".{name}.{secrets.token_hex(8)}.tmp"
-        try:
-            fd = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=directory,
-            )
-        except OSError as exc:
-            raise StoreUnavailable(f"cannot create the write lock for ticket {self.key}: {exc}") from exc
-        placed = False
-        try:
-            os.write(fd, self.holder.encode("utf-8"))
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # A bounded number of tries: each retry means the node changed under
-            # this writer (released, or replaced as stale) between two calls.
-            for _ in range(8):
-                try:
-                    os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
-                except FileExistsError:
-                    placed = self._replace_stale(directory, temporary, name)
-                else:
-                    placed = True
-                if placed:
-                    return fd
-            raise StoreUnavailable(
-                f"the write lock for ticket {self.key} kept changing while it was being taken; retry"
-            )
-        except OSError as exc:
-            raise StoreUnavailable(f"cannot take the write lock for ticket {self.key}: {exc}") from exc
-        finally:
-            # After a link the temporary name is a second link to the lock;
-            # after a replace it no longer exists. Either way it goes.
-            with contextlib.suppress(OSError):
-                os.unlink(temporary, dir_fd=directory)
-            if not placed:
-                os.close(fd)
-
-    def _replace_stale(self, directory: int, temporary: str, name: str) -> bool:
-        """Refuse a live or unsafe lock node; replace a stale one. False means retry."""
-
-        try:
-            other = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        except FileNotFoundError:
-            return False
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise self._unsafe_node("a symbolic link") from None
-            raise
-        try:
-            node = os.fstat(other)
-            if not stat.S_ISREG(node.st_mode):
-                raise self._unsafe_node("not a regular file")
-            try:
-                fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            except OSError as exc:
-                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
-                    # Only the owner ever holds this node's exclusive lock, and
-                    # the node carried the owner's name before it was linked.
-                    raise TicketHeld(self.key, _lock_holder(other)) from None
-                raise
-            node = os.fstat(other)
-            if node.st_nlink == 0:
-                # Its owner removed it at release after this writer opened it.
-                return False
-            if node.st_nlink != 1:
-                raise self._unsafe_node(f"linked {node.st_nlink} times")
-            # No live owner: the writer that left this node has exited. Replace
-            # it under the directory's own lock, held only for the check and
-            # the rename, so two writers cannot both replace the same node.
-            # That lock is taken without waiting, like the ticket's own.
-            self._lock_directory(directory, other)
-            try:
-                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                if (current.st_dev, current.st_ino) != (node.st_dev, node.st_ino):
-                    return False
-                os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
-                return True
-            except FileNotFoundError:
-                return False
-            finally:
-                fcntl.flock(directory, fcntl.LOCK_UN)
-        finally:
-            os.close(other)
-
-    def _lock_directory(self, directory: int, stale: int) -> None:
-        """Take the directory's lock without waiting; refuse after a few quick tries."""
-
-        for attempt in range(_DIRECTORY_LOCK_TRIES):
-            try:
-                fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return
-            except OSError as exc:
-                if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
-                    raise
-            if attempt + 1 < _DIRECTORY_LOCK_TRIES:
-                time.sleep(_LOCK_PAUSE)
-        raise TicketHeld(
-            self.key,
-            f"another writer replacing the stale lock left by {_lock_holder(stale)}",
-            detail="This write was refused, not queued; retry after that writer finishes.",
-        )
-
-    def _unsafe_node(self, what: str) -> StoreUnavailable:
-        return StoreUnavailable(
-            f"{self.relative_path.as_posix()}.lock is {what}, so it was not used as a lock and nothing "
-            "was written. Check what it points at, remove it, and retry.",
-            code="unsafe_lock",
-        )
-
-    def _release(self, directory: int, fd: int) -> None:
-        """Remove the lock node while still holding it, then drop the hold."""
-
-        try:
-            mine = os.fstat(fd)
-            current = os.stat(self.lock_path.name, dir_fd=directory, follow_symlinks=False)
-            if (current.st_dev, current.st_ino) == (mine.st_dev, mine.st_ino):
-                os.unlink(self.lock_path.name, dir_fd=directory)
-        except OSError:
-            # A node left behind is unlocked once fd closes, so the next
-            # writer replaces it as stale.
-            pass
-        finally:
-            os.close(fd)
 
     def _ensure_directory(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -882,7 +783,7 @@ class MarkdownStore:
             card = self._load()
             _check_pass(self.key, card.get("pass"), None, None)
             pass_id = _new_pass_id()
-            card["pass"] = {"id": pass_id, "holder": self.holder}
+            card["pass"] = {"id": pass_id, "host": _host(), "started_at": _now()}
             self._save(card)
         self._pass, self._ended = pass_id, None
         return pass_id
@@ -902,43 +803,18 @@ class MarkdownStore:
         if pass_id is None:
             return
         self._pass, self._ended = None, pass_id
-        # A refused writer holds the lock only for its own check, so a release
-        # that meets one tries again a few times; it never waits on a lock.
-        for attempt in range(_RELEASE_TRIES):
-            try:
-                with self._writing():
-                    card = self._load()
-                    live = card.get("pass")
-                    if live is not None and live.get("id") == pass_id:
-                        card["pass"] = None
-                        self._save(card)
-                return
-            except TicketHeld:
-                if attempt + 1 == _RELEASE_TRIES:
-                    raise
-                time.sleep(_LOCK_PAUSE)
+        with self._writing():
+            card = self._load()
+            live = card.get("pass")
+            if live is not None and live.get("id") == pass_id:
+                card["pass"] = None
+                self._save(card)
 
     def clear_pass(self, pass_id: str) -> None:
         """A person's recovery: release the named pass, refusing unless it is the live one."""
 
         self.join_pass(pass_id)
         self.release_pass("cleared by a person")
-
-
-# Quick, bounded tries: the directory lock and a release never wait longer.
-_DIRECTORY_LOCK_TRIES = 10
-_RELEASE_TRIES = 20
-_LOCK_PAUSE = 0.01
-
-
-def _lock_holder(fd: int) -> str:
-    """The name the lock holder wrote into its node before linking it into place."""
-
-    try:
-        name = os.pread(fd, 4096, 0).decode("utf-8", "replace").strip()
-    except OSError:
-        name = ""
-    return name or "a writer whose lock file carries no name"
 
 
 def _inline(value: Any) -> str:
@@ -956,7 +832,10 @@ def _render_markdown_card(card: Mapping[str, Any]) -> str:
     ]
     live = card.get("pass")
     if live:
-        lines.append(f"Live pass: {_inline(live['id'])}, started by {_inline(live['holder'])}")
+        lines.append(
+            f"Live session: {_inline(live['id'])}, host {_inline(live['host'])}, "
+            f"started {_inline(live['started_at'])}"
+        )
     lines.extend(("", "## Stop and close stamps"))
     if card["stamps"]:
         for stamp in card["stamps"]:
@@ -1154,21 +1033,24 @@ class LedgerStore:
         events = self._events()
         if self._seen is None:
             self._seen = _revision(events)
-        newer = [event for event in events if int(event["id"]) > self._seen]
-        if newer:
-            raise self._stale(newer[-1])
+        # The live claim comes first: a refused session is told who holds the ticket.
         live = _live_pass(events)
         if taking:
             _check_pass(self.key, live, None, None)
         else:
             _check_pass(self.key, live, self._pass, self._ended)
+        newer = [event for event in events if int(event["id"]) > self._seen]
+        if newer:
+            raise self._stale(newer[-1])
         return events
 
     def take_pass(self) -> str:
         """Start a pass: append its pass record, or refuse by the live pass's holder."""
 
         pass_id = _new_pass_id()
-        self._append("session.opened", {"purpose": f"{_PASS_PREFIX}{pass_id}"}, taking=True)
+        claim = {"id": pass_id, "host": _host(), "started_at": _now()}
+        text = f"{_PASS_PREFIX}{pass_id} host={claim['host']} started={claim['started_at']}"
+        self._append("session.opened", {"purpose": text}, taking=True)
         self._pass, self._ended = pass_id, None
         return pass_id
 
@@ -1383,9 +1265,12 @@ def _open_passes(events: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
         payload = event.get("payload") or {}
         if event.get("kind") == "session.opened":
             text = str(payload.get("purpose") or "")
-            if text.startswith(_PASS_PREFIX) and text[len(_PASS_PREFIX) :].strip():
-                pass_id = text[len(_PASS_PREFIX) :].strip()
-                open_.setdefault(pass_id, {"id": pass_id, "holder": _event_writer(event)})
+            fields = _CLAIM_FIELDS.match(text[len(_PASS_PREFIX) :].strip()) if text.startswith(_PASS_PREFIX) else None
+            if fields:
+                open_.setdefault(
+                    fields["id"],
+                    {"id": fields["id"], "host": fields["host"], "started_at": fields["started"]},
+                )
         elif event.get("kind") == "session.closed":
             text = str(payload.get("outcome") or "")
             if text.startswith(_PASS_PREFIX) and text[len(_PASS_PREFIX) :].split():
@@ -1507,7 +1392,7 @@ def choose_store(
 
     ledger = LedgerStore(key, title, cli=cli, db=db, writer=writer)
     if not ledger.is_installed():
-        return MarkdownStore(repo, key, title, writer=writer)
+        return MarkdownStore(repo, key, title)
     try:
         ledger.doctor()
     except StoreUnavailable as exc:
@@ -1771,7 +1656,7 @@ class TicketPass:
     def _end_quietly(self, reason: str) -> None:
         # On a failure path the original error wins. A release that fails too
         # leaves the record in place: the ticket stays refused until a person
-        # clears it with the release-pass command, which fails closed.
+        # clears it with the release command, which fails closed.
         with contextlib.suppress(Exception):
             self.end(reason)
 
@@ -2192,20 +2077,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ticket.py", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     release = commands.add_parser(
-        "release-pass",
-        help="release a ticket's live pass record, named by its pass id, after that pass crashed",
+        "release",
+        help="release a ticket's live session claim, named by its session id, after that session is gone",
     )
     release.add_argument("key", help="the ticket key")
-    release.add_argument("pass_id", help="the pass id the refusal named")
+    release.add_argument("pass_id", help="the session id the refusal named")
     release.add_argument("--repo", default=".", help="the target repository (markdown card only)")
     args = parser.parse_args(argv)
     try:
-        store = choose_store(args.repo, args.key, args.key, writer="release-pass")
+        store = choose_store(args.repo, args.key, args.key, writer="release")
         store.clear_pass(args.pass_id)
     except (StoreUnavailable, TicketError) as exc:
         print(f"ticket.py: {exc}", file=sys.stderr)
         return 1
-    print(f"released pass {args.pass_id} on ticket {args.key}")
+    print(f"released session {args.pass_id} on ticket {args.key}")
     return 0
 
 
