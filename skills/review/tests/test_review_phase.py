@@ -2929,6 +2929,47 @@ def test_fenced_bullet_in_a_findings_section_is_refused_or_in_scope():
         )
 
 
+# A fenced continuation of a finding holds a `# comment` line, which ends the
+# finding's range. The closing fence then lies outside the range, and a later
+# bare fence must not pair with it and blank the prose between the two blocks.
+FENCE_PARITY_TAIL = (
+    "The rerun took 5m before it failed.\n"
+    "\n"
+    "```\n"
+    "second block\n"
+    "```\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("verdict", "bullet"),
+    [
+        pytest.param("APPROVE", "- ok", id="issues-bullet"),
+        pytest.param("REQUEST CHANGES", "- [BUG] a.py:3 - bad parse", id="bug-tagged-bullet"),
+    ],
+)
+def test_comment_line_in_a_findings_fence_does_not_blank_the_prose_after_it(verdict, bullet):
+    _assert_claim_refused(
+        f"## Verdict: {verdict}\n\n### Issues\n{bullet}\n"
+        "  ```\n  # comment\n  x = 1\n  ```\n" + FENCE_PARITY_TAIL
+    )
+
+
+# A decision line inside a closed fence is never blanked, so a span-quoted
+# duration on a fenced verdict heading is still a claim.
+def test_span_quoted_duration_on_a_fenced_verdict_heading_refuses():
+    _assert_claim_refused(
+        _summary_approve("Probes:\n```\n## Verdict: APPROVE the probe `took 41m`\n```")
+    )
+
+
+# A decision line keeps its double-quoted examples as written.
+def test_double_quoted_example_on_a_verdict_heading_refuses():
+    _assert_claim_refused(
+        '## Verdict: APPROVE the probe "ran for 120 seconds" passed\n\n### Issues\n- none\n'
+    )
+
+
 # Every verdict form the adapters accept stays in scope when it is indented,
 # because the adapters strip or skip leading whitespace before they match.
 INDENTED_VERDICTS = {

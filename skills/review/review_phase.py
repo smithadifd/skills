@@ -1071,7 +1071,9 @@ def _blank_quoted_inputs(lines: list[str], consumed: Consumed | None) -> list[st
         if mark == DECISION:
             i += 1
             continue
-        marker = _fence_opener(lines[i]) if mark is None else None
+        # Fences pair by content on every line, consumed or not, so a closer
+        # outside a finding's range is not read as a new opener.
+        marker = _fence_opener(lines[i])
         if marker is None:
             out[i] = _blank_code_spans(lines[i])
             i += 1
