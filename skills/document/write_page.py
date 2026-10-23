@@ -254,7 +254,8 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
             if mode == "create":
                 _unlink_quietly(tmp, fd)
         except OSError as exc:
-            first_failure = Published(f"removing the temporary file {tmp}", exc.strerror)
+            leftover = os.path.join(*rel_parts[:-1], tmp)
+            first_failure = Published(f"removing the temporary file {leftover}", exc.strerror)
         try:
             os.fsync(fd)
         except OSError as exc:

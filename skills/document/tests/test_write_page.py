@@ -271,12 +271,14 @@ def test_a_directory_sync_failure_after_publication_is_not_reported_as_unchanged
 def _dir_close_failing(monkeypatch):
     """Make closing a directory descriptor fail, after really closing it."""
     real_close = os.close
+    failures = []
 
     def close_failing_on_directories(fd):
         is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
         real_close(fd)
         if is_dir:
-            raise OSError(5, "Input/output error")
+            failures.append(fd)
+            raise OSError(5, f"close failure {len(failures)}")
 
     monkeypatch.setattr(write_page.os, "close", close_failing_on_directories)
 
@@ -315,7 +317,8 @@ def test_a_directory_close_failure_after_publication_is_not_reported_as_unchange
     assert len(opened) >= 3
     assert set(opened) <= set(closed)
     assert code == 1
-    assert "written, but closing a directory failed" in err
+    # The first failure is the one reported.
+    assert "written, but closing a directory failed: close failure 1" in err
     assert "unchanged" not in err
     assert page.read_bytes() == b"new\n"
     assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
@@ -346,12 +349,42 @@ def test_a_temporary_file_cleanup_failure_after_publication_is_not_reported_as_u
     leftovers = [p.name for p in (repo / "docs").iterdir() if p.name != "page.md"]
     assert code == 1
     assert len(leftovers) == 1
-    # The message names the file a person has to delete.
-    assert f"written, but removing the temporary file {leftovers[0]} failed" in err
+    # The message names the file a person has to delete, relative to the repository.
+    assert f"written, but removing the temporary file docs/{leftovers[0]} failed" in err
+    assert str(repo) not in err
     assert "unchanged" not in err
     assert page.read_bytes() == b"new\n"
     # The directory is still synced after the cleanup failure.
     assert len(directory_syncs) == 1
+    for name in leftovers:
+        real_unlink(repo / "docs" / name)
+
+
+def test_a_sync_failure_after_a_cleanup_failure_still_names_the_leftover(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    real_unlink = os.unlink
+    real_fsync = os.fsync
+
+    def unlink_failing(path, **kwargs):
+        raise OSError(13, "Permission denied")
+
+    def fsync_failing_on_directories(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(5, "Input/output error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(write_page.os, "unlink", unlink_failing)
+    monkeypatch.setattr(write_page.os, "fsync", fsync_failing_on_directories)
+    code = _main_with_stdin(monkeypatch, repo, page, "create", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    leftovers = [p.name for p in (repo / "docs").iterdir() if p.name != "page.md"]
+    assert code == 1
+    assert len(leftovers) == 1
+    assert f"written, but removing the temporary file docs/{leftovers[0]} failed" in err
+    assert "syncing the directory" not in err
     for name in leftovers:
         real_unlink(repo / "docs" / name)
 
