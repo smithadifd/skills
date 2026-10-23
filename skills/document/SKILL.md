@@ -33,6 +33,13 @@ Writes go only under one folder, the output root. Settle it before anything else
 
 Every writer is handed an explicit output path under the output root (or the README path when asked), and writes nowhere else. Never write, edit or delete anything else: no source files, no config, no files outside the repository. If a page would belong elsewhere, refuse that path, say so in the report and leave it unwritten.
 
+**Path check.** A path that merely starts with `docs/` is not enough, because a symlink can redirect a write elsewhere. Before spawning each writer and before each write, run this check and refuse on any failure:
+
+1. No component of the output root, the destination directory or the destination file (including any existing page or README) is a symlink.
+2. The canonical path (for example from `realpath`) of the output root is inside the canonical repository root.
+3. The canonical destination is inside the canonical output root. Check the nearest existing parent when the file does not exist yet.
+4. The root `README.md`, when the person asked for it, gets the same checks against the canonical repository root.
+
 ## 2. Read the request
 
 Decide these and state them back in one line before starting, so the person can correct course cheaply: "Writing docs for X, audience Y, create mode, output root Z."
@@ -44,17 +51,18 @@ Decide these and state them back in one line before starting, so the person can 
 
 ## 3. Single page
 
-1. Read the target directly (one file or a handful).
-2. Draft the page yourself using the writing rules below.
-3. Use Edit to update an existing page and Write to create one, inside the output root.
-4. Report the path written, what it covers and anything skipped.
-5. Run `doc-verifier` on the claims in the page if it states signatures, flags, endpoints or defaults. Fix what it flags, then verify the fixed claims once more. Make at most two fix passes; report any claim still flagged after that.
+Use one of each agent, with no outline gate.
+
+1. Spawn `doc-researcher` with the target and audience. If its coverage notes say the target is too large or too vague, ask the person to narrow it and stop.
+2. Run the path check, then spawn one `doc-writer` with the brief, page scope, audience, output path and mode.
+3. Spawn `doc-verifier` with the writer's claims list. Send flagged claims back to the writer to fix in place, then verify them again. Make at most two fix passes; report any claim still flagged after that.
+4. Report the path written, what it covers, the verification counts and anything skipped.
 
 ## 4. App-wide
 
 1. **Research.** Spawn `doc-researcher` with the target and audience. If its coverage notes say the target is too large or too vague, ask the person to narrow it and stop.
 2. **Plan and gate.** From the brief's suggested outline, list each page with its path, one-line purpose and audience, plus the output root. Show the list and wait for approval. This is the only gate; after it, write without further questions. Apply requested changes to the list and show it again if they were large.
-3. **Write.** Spawn one `doc-writer` per approved page, giving it the relevant slice of the brief, the page scope, audience, output path and mode. Run writers in parallel for pages that do not depend on each other. Write a page first if later pages link back to it. If a writer reports gaps, either go back to the researcher or record the gap in the final report.
+3. **Write.** Run the path check for each page, then spawn one `doc-writer` per approved page, giving it the relevant slice of the brief, the page scope, audience, output path and mode. Run writers in parallel for pages that do not depend on each other. Write a page first if later pages link back to it. If a writer reports gaps, either go back to the researcher or record the gap in the final report.
 4. **Verify.** Gather every writer's claims list and spawn `doc-verifier` with it. For flagged claims, send the writer of that page the claims and reasons in one batch to fix in place, then run `doc-verifier` again on those claims. Make at most two fix passes; list any claim still flagged in the report.
 5. **Report.**
 
