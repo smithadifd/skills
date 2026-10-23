@@ -49,7 +49,7 @@ provided local ticket file.
 ### Store
 
 Both stores implement exactly eleven calls, seven for the card and four for
-the pass record (see "One writer per ticket"):
+the session claim (see "One concurrency rule per store"):
 
 - `write_stamp(point, phase, next_skills, refs)` — a stop, or a pending close.
   Each ref is a path, a PR or issue id (`owner/repo#N` or `#N`),
@@ -67,14 +67,14 @@ the pass record (see "One writer per ticket"):
   returns the ref the store keeps it under, which the stop stamps cite;
 - `record_tried(tried)` — what was tried, its outcome, phase, and evidence;
 - `read_card()` — the ticket's resume card: stamps, decisions, reviews, the
-  plan snapshot and its ref, what was tried, and the live pass (`pass`: its
-  id and holder, or none);
-- `take_pass()` — starts a pass: writes the pass record and returns its id,
+  plan snapshot and its ref, what was tried, and the live session claim (`pass`: its
+  session id, host and started-at, or none);
+- `take_pass()` — starts a pass: writes the claim and returns its id,
   or refuses with `TicketHeld` while another pass is live;
 - `join_pass(pass_id)` — continues that live pass from a new handle, and
   refuses unless it is the live pass;
-- `release_pass(reason)` — ends this handle's pass and releases its record;
-- `clear_pass(pass_id)` — a person's recovery for a crashed pass (below).
+- `release_pass(reason)` — ends this handle's pass and releases its claim;
+- `clear_pass(pass_id)` — a person's `release` for a crashed session (below).
 
 The plan card is a dedicated store record rather than a file a stamp points
 at, so the store alone decides what a resume trusts: a file outside the store
@@ -97,37 +97,50 @@ starts the session), then retry.
 
 With no ledger CLI installed, the card lives at `<target-repo>/.ticket/<key>.md`,
 in the repository's ignored scratch, next to its lock file
-`.ticket/<key>.md.lock`. Before every write, the markdown adapter runs
+`.ticket/<key>.lock`. Before every write, the markdown adapter runs
 `git check-ignore` for both files. If either is not ignored, stop and say: add
 `.ticket/` to the target repository's ignore rules, then retry. Do not edit an
 ignore file silently. Never stage or commit `.ticket/`.
 
-### One writer per ticket
+### One concurrency rule per store
 
-A ticket has at most one live writer at a time, whichever store holds it. A
-second writer is refused with `TicketHeld`, which names the ticket and the
-writer that holds it or wrote first (`writer` label, process id, and handle),
-and nothing of the refused write is stored. Nothing waits for a lock. Pass
-`writer=` to the store or to `choose_store` to label this session; the default
-is `user@host`.
+**Markdown.** Every write to the card takes an exclusive advisory lock on
+`.ticket/<key>.lock` and holds it across the load, the precondition check and
+the save. A second writer waits its turn. The save writes a temporary file
+beside the card and renames it into place, and `confirm_close(position,
+point)` re-checks inside the lock that the stamp at `position` is still the
+pending close and still the last stamp. The operating system drops the lock
+if its holder dies, so a crashed writer leaves nothing to clean up. A lock
+path that is a symbolic link is refused untouched.
+
+**Ledger.** A ticket has one live session. The first thing a session writes
+is a claim record holding its session id, host and started-at time, and the
+store releases it when the close is confirmed or when a person runs
+`release`. A second session that finds a live claim is refused with
+`TicketHeld`, which prints the claim's session id, host and started-at time,
+and nothing of the refused write is stored. No claim expires by elapsed time.
+
+The markdown card keeps the same claim in its `pass` field (session id, host,
+started-at), read and changed under the same lock, so both stores refuse a
+second session the same way.
 
 **One live pass.** A pass outlives any one process: the plan go and outward
 go stops end the turn, and every later step runs in a new process with a new
-store handle. So the ticket carries a pass record, separate from any work
-claim, naming the live pass's id and the writer that started it.
+store handle. So the ticket's claim, not a process, is what keeps a second
+session out.
 
-- `TicketPass.open(key, source, store)` starts a pass and takes the record.
-  While another pass is live it is refused by that pass's holder, along with
-  the pass id and the command that clears it. Read `session.pass_id` and keep
-  it in the conversation; report it at every stop.
+- `TicketPass.open(key, source, store)` starts a pass and writes the claim.
+  While another pass is live it is refused with that claim's session id, host
+  and started-at time, along with the command that releases it. Read
+  `session.pass_id` and keep it in the conversation; report it at every stop.
 - Every later step of the same pass, in a new process, calls
   `TicketPass.open(key, source, store, resume=True, pass_id=<that id>)`. It is
-  refused, by the live holder's name, unless that pass is still the live one.
+  refused, naming the live claim, unless that pass is still the live one.
   Never take a pass id from the card or a refusal to continue a pass you did
   not start; the id is a handle for the pass, not a password.
-- Every write checks the record first. A store handle outside any pass writes
+- Every write checks the claim first. A store handle outside any pass writes
   only while no pass is live.
-- The pass ends, and releases its record, when `close` confirms the close, at
+- The pass ends, and releases its claim, when `close` confirms the close, at
   a more-information exit, at the review-round cap, when any store call fails
   or a write is refused, when an exception leaves a `with` block over the pass
   (`with TicketPass.open(...) as session:`), or on `session.end()`. A
@@ -135,42 +148,30 @@ claim, naming the live pass's id and the writer that started it.
   nothing and leaves the pass live. After it ends, the pass writes nothing; a
   new pass starts with `TicketPass.open(..., resume=True)` and rebuilds from
   the card.
-- A pass whose process crashed leaves its record, and the ticket stays
-  refused: that is deliberate. A person who has confirmed the pass is dead
-  clears it with `python3 ticket.py release-pass <key> <pass-id>` (add
+- A session whose process crashed leaves its claim, and the ticket stays
+  refused: that is deliberate. A person who has confirmed the session is gone
+  releases it with `python3 ticket.py release <key> <session-id>` (add
   `--repo <target-repo>` for a markdown card). The command refuses unless that
-  pass id is the live one.
+  session id is the live one.
 
-- **markdown** — every write holds `.ticket/<key>.md.lock` across the whole
-  read, change and replace of the card, and releases it on every exit path,
-  including an exception. The writer prepares a new file that already carries
-  its name and its exclusive lock, then links it into place, so the lock file
-  names its holder from the moment it exists until the holder removes it.
-  When a writer is refused, retry after the named writer finishes. If the
-  holding process dies, the next writer replaces the lock file it left. A lock
-  path that is a symbolic link, is not a regular file, or has more than one
-  link is refused untouched: check what it points at, remove it, and retry.
-  The pass record is the card's `pass` field, read and changed under that
-  same lock. Replacing a lock file left by a dead writer takes the `.ticket`
-  directory's own lock without waiting, and refuses after a few quick tries.
-- **ledger** — the pass record is a `session.opened` event naming the pass,
-  and a `session.closed` event naming it when the pass ends. Within one
-  process the precondition is also the ticket's revision, the newest ledger
-  event of the ticket a store handle has accounted for: opening or continuing
-  a pass pins it, and the handle's own writes move it. A write is refused when
-  the ticket holds a newer event, naming whoever wrote it, and each append
-  carries an idempotency key built from the revision, so of two skill writers
-  that read the same revision only the first append lands. The ledger CLI
-  cannot make the check and the append one step: it has no expected-revision
-  option. A write through another verb (for example `ledger state`) that lands
-  between them is accepted by the CLI, and the skill's event lands after it.
-  The adapter therefore reads the events again after every append and, when
-  anything landed in between, refuses by that writer's name and says its own
-  event landed after it and was not undone; check both with the person. The
-  adapter claims nothing. It never changes the ticket's status, owner, claim
-  or blocked-by fields, except that a confirmed close sets the status to
-  `closed` and keeps the other three. A ticket someone has claimed for work
-  stays claimed and can still be written.
+On the ledger the claim is a `session.opened` event naming the session, host
+and start time, and a `session.closed` event naming it when the pass ends.
+Within one process the precondition is also the ticket's revision, the newest
+ledger event of the ticket a store handle has accounted for: opening or
+continuing a pass pins it, and the handle's own writes move it. A write is
+refused when the ticket holds a newer event, naming whoever wrote it, and each
+append carries an idempotency key built from the revision, so of two skill
+writers that read the same revision only the first append lands. The ledger
+CLI cannot make the check and the append one step: it has no
+expected-revision option. A write through another verb (for example `ledger
+state`) that lands between them is accepted by the CLI, and the skill's event
+lands after it. The adapter therefore reads the events again after every
+append and, when anything landed in between, refuses by that writer's name and
+says its own event landed after it and was not undone; check both with the
+person. The adapter never changes the ticket's status, owner, claim or
+blocked-by fields, except that a confirmed close sets the status to `closed`
+and keeps the other three. A ticket someone has claimed for work stays claimed
+and can still be written.
 
 ## 1. Orient
 
