@@ -1,74 +1,90 @@
 # Authorization redaction: the simple rule
 
-DESIGN: after a quoted Authorization header value, keep the rest of the line only when the closing quote ends cleanly and that rest holds no quote character at all; otherwise redact to the end of the line. Over-redact, never leak.
+DESIGN: after an Authorization credential (quoted or unquoted header value), always redact to the end of the logical line, where a logical line continues through a trailing backslash and through the line holding the closing quote of an unterminated quoted value, and runs to the end of the input section if no closing quote appears; over-redact, never leak, and no condition keeps a suffix.
 
-Why this rule: a credential that survives the closing quote has to be built by more code, and in every leak found so far (shell concatenation, Python implicit concatenation, `"safe" if False else "secret"`, `<` read as a comparison) that code contained a second string literal. A string literal needs a quote character, so "no quote in the rest of the line" closes the whole class without parsing shell or Python. Everything is per line; nothing crosses a newline.
+Why: every leak found so far (shell concatenation, Python implicit concatenation, `"safe" if False else "secret"`, `<` read as a comparison, `)tail` after a command substitution, a Perl `. q(tail)` literal, a value continued on the next line) lets the rest of the line, or the next line, carry part of the credential. Deciding which suffixes are harmless needs a shell, Python and Perl grammar, and each grammar attempt was wrong on one more form. Dropping the suffix exception needs no grammar.
 
-## 1. Where the value starts
+## 1. Where a credential starts
 
-A credential starts after an `Authorization` key (case-insensitive, at a word boundary, so `Proxy-Authorization` counts), optionally quoted or bracketed (`"Authorization":`, `h['Authorization'] =`), then optional whitespace, `:` or `=`, optional whitespace. The scheme word (`Basic`, `Bearer`, `Digest`, none) is part of the value.
+An `Authorization` key (case-insensitive, at a word boundary, so `Proxy-Authorization` counts), optionally quoted or bracketed (`"Authorization":`, `h['Authorization'] =`), then optional whitespace, `:` or `=`, optional whitespace. The scheme word (`Basic`, `Bearer`, `Digest`, none) is part of the credential. The credential begins at the separator's end.
 
-## 2. Quote characters
+## 2. Quotes and the end of the redaction
 
-These count as a quote, wherever they appear in the rest of the line, escaped or not: `"` `'` and the backtick, plus the typographic `‘` `’` `‚` `“` `”` `„`. A backslash before a quote does not exempt it. Typographic quotes are included although no shell or Python treats them as quotes: text pasted from a document or chat may carry them around a real header, and counting one only costs a suffix. Apostrophes in prose (`don't`) count too; that is an accepted cost. Other characters (guillemets, `«»`) are not counted.
+Quote characters: `"` `'` backtick, and the typographic `‘ ’ ‚ “ ” „`. Typographic ones are included because pasted text may wrap a real header in them; no other character is treated as a quote.
 
-## 3. Quoted value and clean end
+A value is quoted when its first character after the separator is a quote `q`, or when the key sits inside a string opened by a quote `q` just before `Authorization` and still open at the separator (`-H "Authorization: Bearer x"`). The first form wins. Typographic quotes close with any typographic quote. `q` closes at the next unescaped `q` (not preceded by an odd number of backslashes). Escaped quotes do not close.
 
-The value is quoted when the first character after the separator is a quote `q` (`"Authorization": "Bearer x"`), or when the key sits inside a string opened by a quote `q` just before `Authorization` and still open at the separator (`-H "Authorization: Bearer x"`). The first form wins when both could apply. The span ends at the first `q` not preceded by an odd number of backslashes.
+Redaction runs from the credential start to the end of the logical line:
 
-The closing quote ends cleanly when it exists and the next character is the end of the line, whitespace, or one of `;` `&` `|` `<` `>` `)`. Those end a shell word, so what follows is a new token (a redirect target, a pipe, the next command), not more of the value. Anything else directly after the closing quote (`,` `]` `}` `.` a letter, a digit, another quote) is not clean: shell and Python join it to the value, so the line is redacted to its end. No closing quote on the line is also not clean.
+- A physical line ends at a newline. A trailing backslash (after any trailing spaces are ignored) joins it to the next physical line, repeatedly: a chain of any length is one logical line.
+- Quoted value with a closing quote on the line: the logical line is that line plus its continuations. The closing quote and everything after it are redacted.
+- Quoted value with no closing quote on the line (unterminated): the logical line extends through the physical line that holds the next unescaped `q`, and through that line's own continuations. If no such quote appears before the end of the input section, redaction runs to the end of the section.
+- Unquoted value: the logical line (the line and its continuations).
 
-## 4. What is redacted
+Section boundary: `handoff.py` redacts each section body as one string (list items arrive as `- ` lines of that string), and the note header separately. The end of a section is the end of that string; redaction never reaches into the next section.
 
-- Clean end and no quote character in the rest of the line: the value is replaced and the suffix is kept. `"Authorization: [REDACTED]"` keeps both quotes.
-- Anything else: the value and the rest of the line to the newline are replaced by the marker `[REDACTED]`. The opening quote is kept; no closing quote is added.
-- Unquoted value (`Authorization: Digest username="u", response="x"`, `Authorization=Bearer x`): everything after the separator to the end of the line is replaced.
-- Multi-line: each line is judged alone. A value that continues on the next line (a backslash-continued command, a wrapped header) is not seen by this rule; the other `redact()` patterns (token shapes, `*_TOKEN=` assignments) still apply. Triple-quoted `"""` openers fall out of the rule: the second `"` closes an empty span and the third is a quote in the rest, so the line is redacted.
+## 3. The marker
 
-## 5. Required tests
+Everything redacted becomes one `[REDACTED]`, placed right after the separator and any opening quote, so `Authorization: [REDACTED]`, `"Authorization: [REDACTED]` and `"Authorization": "[REDACTED]`. No closing quote is added. The other `redact()` patterns (token shapes, `*_TOKEN=` assignments and the rest) still run on the whole text before and after, and are not weakened by this rule.
 
-The secret marker is `tailsecret`. Each case: the marker is absent from the note, and the stated suffix is present or absent as given.
+## 4. Required tests
 
-Leak cases (marker absent, rest of line redacted):
+Secret marker `tailsecret`: it must be absent from the note. Unless a case names kept text, the expected output is the text up to the separator, the marker, and nothing after it on the logical line. Lines after the logical line are unchanged.
+
+Carried from the earlier design:
 
 1. `curl -H "Authorization: Digest username="'"u", response="tailsecret"' https://x`
-2. `curl -H "Authorization: Digest a=","response=tailsecret" https://x` (shell concatenation)
+2. `curl -H "Authorization: Digest a=","response=tailsecret" https://x`
 3. `curl -H 'Authorization: Digest a=','response=tailsecret' https://x`
 4. `curl -H "Authorization: Bearer "}tailsecret https://x`
 5. `curl -H "Authorization: Bearer "]tailsecret https://x`
-6. `["Authorization: Bearer x" "tailsecret"]` (implicit concatenation after whitespace)
-7. `h = "Authorization: Bearer " + "tailsecret"`
-8. `"Authorization: Bearer x" f"tailsecret"`
-9. `h = "Authorization: Bearer safe" if False else "tailsecret"` (conditional selection)
-10. `h = "Authorization: Bearer x" or "tailsecret"` (boolean selection)
-11. `curl -H "Authorization: Bearer x" <"tailsecret"` and `curl -H "Authorization: Bearer x">"tailsecret"` (`<` `>` with a following literal)
+6. `headers = ["Authorization: Digest a=1, response=tailsecret"], retries = 3` gives `headers = ["Authorization: [REDACTED]`.
+7. `headers["Authorization"] = "Basic tailsecret"  # comment` gives `headers["Authorization"] = "[REDACTED]` (the comment is gone).
+8. `{"Authorization": "Bearer tailsecret", "Accept": "json"}` gives `{"Authorization": "[REDACTED]`.
+9. `Authorization: Digest username="u", response="tailsecret"`
+10. `curl -H "Authorization: Bearer tail\"secret" https://x`: no `secret` (the escaped quote does not close).
+11. `["Authorization: Bearer x","Accept: tailsecret"]`
 12. `curl -H "Authorization: Digest algorithm=MD5",username='"u"',nonce='"tailsecret"' https://x`
-13. `["Authorization: Bearer x","Accept: tailsecret"]` (over-redacted by design)
-14. `{"Authorization": "Bearer tailsecret", "Accept": "json"}`: no `tailsecret`; `"Accept": "json"` is gone (it holds quotes).
-15. `Authorization: Digest username="u", response="tailsecret"` (unquoted value)
-16. `curl -H "Authorization: Bearer tail\"secret" https://x`: no `secret`; the escaped quote does not close the span, and ` https://x` is kept (no quote in it).
-17. `curl -H "Authorization: Bearer tailsecret` (no closing quote)
-18. `curl -H "Authorization: Bearer tailsecret"'extra'`
-19. `` curl -H "Authorization: Bearer x" `echo tailsecret` `` and `curl -H "Authorization: Bearer x" “tailsecret”` (backtick and typographic quote)
+13. `curl -H "Authorization: Basic dGFpbHNlY3JldA==">response.txt`: no `dGFpbHNlY3JldA==`, no `>response.txt`.
+14. `["Authorization: Bearer x" "tailsecret"]`
+15. `h = "Authorization: Bearer " + "tailsecret"`
+16. `"Authorization: Bearer x" f"tailsecret"`
 
-Keep-the-suffix cases (marker absent, suffix kept exactly):
+Carried from the first version, plus the former keep cases, now redacted:
 
-20. `curl -H "Authorization: Bearer tailsecret" https://example.com` keeps ` https://example.com`.
-21. `curl -H "Authorization: Basic dGFpbHNlY3JldA==">response.txt` keeps `>response.txt`.
-22. `headers["Authorization"] = "Basic tailsecret"  # comment` keeps `  # comment`.
-23. `curl -s -H "Authorization: Bearer tailsecret" -X POST | jq .` keeps ` -X POST | jq .`.
-24. `echo $(curl -H "Authorization: Bearer tailsecret") done` keeps `) done`.
+17. `h = "Authorization: Bearer safe" if False else "tailsecret"`
+18. `h = "Authorization: Bearer x" or "tailsecret"`
+19. `curl -H "Authorization: Bearer x" <"tailsecret"` and `curl -H "Authorization: Bearer x">"tailsecret"`
+20. `curl -H "Authorization: Bearer x"'tailsecret'`
+21. `` curl -H "Authorization: Bearer x" `echo tailsecret` `` and `curl -H "Authorization: Bearer x" “tailsecret”`
+22. `curl -H "Authorization: Bearer x" https://example.com` gives `curl -H "Authorization: [REDACTED]`.
+23. `curl -s -H "Authorization: Bearer tailsecret" -X POST | jq .` gives `curl -s -H "Authorization: [REDACTED]`.
+24. `echo $(curl -H "Authorization: Bearer tailsecret") done` gives `echo $(curl -H "Authorization: [REDACTED]`.
 
-Each leak case is observed red against a mutation that keeps the suffix whenever the closing quote exists (no quote scan), and against a mutation that accepts any character after the closing quote as clean; the keep cases are red against "always redact to the end of the line". All are green after restoration.
+New from design review:
+
+25. `h=$(printf %s "Authorization: Bearer x")tailsecret`
+26. `h="Authorization: Bearer x"\` then a next line `tailsecret`: both lines redacted; a third line after it is kept.
+27. Perl: `$h = "Authorization: Bearer x" . q(tailsecret);`
+28. Unterminated multi-line: `curl -H "Authorization: Bearer x` / `tailsecret` / `more" https://x` / `echo kept`: the first three lines redacted, `echo kept` kept.
+29. Unterminated to the end of the section: `"Authorization: Bearer x` with `tailsecret` on later lines and no closing quote: all of them redacted, and the next section's body is unchanged.
+30. Continuation chain of 3 lines: `curl -H "Authorization: Bearer x" \`, `-d tailsecret \`, `tailsecret2`: all three redacted (the last has no backslash and ends the chain); a fourth line is kept.
+31. Unquoted continuation: `Authorization: Bearer x\` then `tailsecret`.
+32. No closing quote, one line: `curl -H "Authorization: Bearer tailsecret`.
+
+## 5. Mutations (suite-level kills)
+
+Each mutation is applied on a scratch copy and must turn the named tests red; restored, all are green.
+
+| Mutation | Killed by |
+|---|---|
+| Drop continuation handling (treat the physical line as the logical line) | 26, 30, 31 |
+| Drop unterminated-quote handling (stop at the end of the physical line when no closing quote) | 28, 29 |
+| Drop the unquoted-value case (only quoted values redact) | 9, 31 |
+| Re-introduce any suffix keep (for example keep text after a closing quote that ends a word, or keep it when it holds no quote) | 6, 7, 8, 13, 22, 23, 24, 25, 27, plus 4 and 5 |
 
 ## 6. Cost
 
-Over-redaction examples, all accepted:
+Lost: the benign suffix of a header line, for example `-X POST`, `https://example.com`, a trailing `# comment`, the other pairs of a JSON object, `})`, `], retries = 3`, and the first following lines of a backslash-continued curl command. A prose apostrophe after an opening quote can also pull following lines into an unterminated span, up to the end of the section.
 
-- `{"Authorization": "Bearer x", "Accept": "json"}`: the `Accept` pair is lost.
-- `requests.get(u, headers={"Authorization": "Bearer x"})`: `})` is lost (`}` is not a clean end).
-- `headers = ["Authorization: Bearer x"], retries = 3`: `], retries = 3` is lost.
-- `curl -H "Authorization: Bearer x" "https://host/path"`: the quoted URL is lost.
-- A comment such as `# don't reuse` after the value is lost.
-
-Each loses non-secret context from a resume note, which the reader can rebuild from the source; a leaked credential in a persisted note cannot be taken back. The rule also needs no shell or Python grammar, so no new expression form can reopen it: only a new string-literal delimiter could, and adding that character to § 2 is a one-line change.
+This is acceptable for a resume note: it records where the work stood, and the command can be rebuilt from the repository or shell history, while a credential persisted in a note cannot be taken back. The rule also names no grammar, so a new expression form cannot reopen it.
