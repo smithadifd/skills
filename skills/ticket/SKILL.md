@@ -1,10 +1,14 @@
 ---
 name: ticket
 kind: portable
+version: 1.0.0
 description: >
   Run one attended pass over a ticket: pull live context, research, present a
   plan card for approval, build and review for up to three rounds, stop for
-  approval before outward actions, and leave a durable resume card.
+  approval before outward actions, and leave a durable resume card. Use when
+  the person says "work this ticket", "take <key> through to a pull request",
+  or "resume the ticket". NOT for a change that has no ticket (use /tdd or
+  /debug), and NOT for a session resume note (use /handoff).
 ---
 
 # Ticket
@@ -48,8 +52,8 @@ provided local ticket file.
 
 ### Store
 
-Both stores implement exactly eleven calls, seven for the card and four for
-the session claim (see "One concurrency rule per store"):
+The store implements exactly eleven calls, seven for the card and four for
+the session claim (see "Concurrency"):
 
 - `write_stamp(point, phase, next_skills, refs)` — a stop, or a pending close.
   Each ref is a path, a PR or issue id (`owner/repo#N` or `#N`),
@@ -80,31 +84,20 @@ The plan card is a dedicated store record rather than a file a stamp points
 at, so the store alone decides what a resume trusts: a file outside the store
 could change or vanish without the store knowing.
 
-Use the event-ledger adapter when `ledger` is on `PATH`, or `TICKET_LEDGER_CLI`
-names the configured executable. Invoke only that CLI. Never import its Python
-package or read its database directly. `ledger doctor` must succeed for the
-configured database. When it fails, report the CLI's message and stop; do not
-fall back to the markdown card, which would split the ticket across two stores.
-A database that does not exist yet (`missing_db`) is initialised by creating
-this ticket's item once with the CLI's own `new` verb (`ledger --db <path> new
---id <key> --type ticket --title <title>`), then retrying.
+The store is a markdown card. `choose_store(repo, key, title)` returns it. The
+card lives at `<target-repo>/.ticket/<key>.md`, in the repository's ignored
+scratch, next to its lock file `.ticket/<key>.lock`. Before every write, the
+store runs `git check-ignore` for both files. If either is not ignored, stop
+and say: add `.ticket/` to the target repository's ignore rules, then retry.
+Do not edit an ignore file silently. Never stage or commit `.ticket/`.
 
-The ledger CLI may require a writer identity in its environment before it
-accepts writes. This skill never sets one. When a write is refused, the adapter
-raises `StoreUnavailable` with the CLI's message: tell the person to export the
-writer-identity variable that message names (in their shell or the wrapper that
-starts the session), then retry.
+A ledger-backed store is planned; today, setting `TICKET_LEDGER_CLI` selects
+it and is refused (`ticket: the ledger store is not supported yet; use the
+markdown store`, exit code 2) before anything is written.
 
-With no ledger CLI installed, the card lives at `<target-repo>/.ticket/<key>.md`,
-in the repository's ignored scratch, next to its lock file
-`.ticket/<key>.lock`. Before every write, the markdown adapter runs
-`git check-ignore` for both files. If either is not ignored, stop and say: add
-`.ticket/` to the target repository's ignore rules, then retry. Do not edit an
-ignore file silently. Never stage or commit `.ticket/`.
+### Concurrency
 
-### One concurrency rule per store
-
-**Markdown.** Every write to the card takes an exclusive advisory lock on
+Every write to the card takes an exclusive advisory lock on
 `.ticket/<key>.lock` and holds it across the load, the precondition check and
 the save. A second writer waits its turn. The save writes a temporary file
 beside the card and renames it into place, and `confirm_close(position,
@@ -113,16 +106,13 @@ pending close and still the last stamp. The operating system drops the lock
 if its holder dies, so a crashed writer leaves nothing to clean up. A lock
 path that is a symbolic link is refused untouched.
 
-**Ledger.** A ticket has one live session. The first thing a session writes
-is a claim record holding its session id, host and started-at time, and the
-store releases it when the close is confirmed or when a person runs
-`release`. A second session that finds a live claim is refused with
-`TicketHeld`, which prints the claim's session id, host and started-at time,
-and nothing of the refused write is stored. No claim expires by elapsed time.
-
-The markdown card keeps the same claim in its `pass` field (session id, host,
-started-at), read and changed under the same lock, so both stores refuse a
-second session the same way.
+A ticket has one live session. The first thing a session writes is a claim
+in the card's `pass` field holding its session id, host and started-at time,
+read and changed under the same lock, and the store releases it when the
+close is confirmed or when a person runs `release`. A second session that
+finds a live claim is refused with `TicketHeld`, which prints the claim's
+session id, host and started-at time, and nothing of the refused write is
+stored. No claim expires by elapsed time.
 
 **One live pass.** A pass outlives any one process: the plan go and outward
 go stops end the turn, and every later step runs in a new process with a new
@@ -151,35 +141,8 @@ session out.
 - A session whose process crashed leaves its claim, and the ticket stays
   refused: that is deliberate. A person who has confirmed the session is gone
   releases it with `python3 ticket.py release <key> <session-id>` (add
-  `--repo <target-repo>` for a markdown card). The command refuses unless that
-  session id is the live one.
-
-On the ledger the claim is a `session.opened` event naming the session, host
-and start time, and a `session.closed` event naming it when the pass ends.
-Within one process the precondition is also the ticket's revision, the newest
-ledger event of the ticket a store handle has accounted for: opening or
-continuing a pass pins it, and the handle's own writes move it. A write is
-refused when the ticket holds a newer event, naming whoever wrote it, and each
-append carries an idempotency key built from the revision, so of two skill
-writers that read the same revision only the first append lands. The ledger
-CLI cannot make the check and the append one step: it has no
-expected-revision option. A write through another verb (for example `ledger
-state`) that lands between them is accepted by the CLI, and the skill's event
-lands after it. The adapter therefore reads the events again after every
-append and, when anything landed in between, refuses by that writer's name and
-says its own event landed after it and was not undone; check both with the
-person. Two of those interleavings are handled before
-the refusal. A claim that landed is released with a matching `session.closed`.
-A close whose status write landed after an outside event is invalidated by a
-note: it is detected and never silently trusted, and resume reports the close
-as invalidated and not closed, naming the outside event, its writer and the
-fields it set. The ledger CLI has no compare-and-set, so the skill never
-writes ticket state as a repair and does not undo the outside write's
-overwrite; the person reconciles status, owner, claim and blocked-by from the
-printed line. The adapter never changes the ticket's status, owner, claim or
-blocked-by fields, except that a confirmed close sets the status to `closed`
-and keeps the other three. A ticket someone has claimed for work stays claimed
-and can still be written.
+  `--repo <target-repo>` when you run it from outside that repository). The
+  command refuses unless that session id is the live one.
 
 ## 1. Orient
 

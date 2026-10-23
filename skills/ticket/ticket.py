@@ -5,15 +5,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import errno
 import fcntl
 import functools
-import getpass
 import json
 import os
 import re
 import secrets
-import shutil
 import socket
 import stat
 import subprocess
@@ -35,12 +32,6 @@ _SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _JSON_START = "<!-- ticket-card:v1\n"
 _JSON_END = "\n-->"
-# A ledger note that carries a plan-card snapshot starts with this prefix.
-_PLAN_NOTE = "ticket-plan-card/v1 "
-# A ledger note that names the stop event confirmed as the close.
-_CLOSE_NOTE = "ticket-close/v1 event:"
-# A ledger note that invalidates the close naming that stop event.
-_VOID_NOTE = "ticket-close-void/v1 event:"
 # What a stamp may point at: a path (absolute, or relative with a directory or
 # an extension, optionally :line or :start-end), a PR or issue (owner/repo#N or
 # #N), a branch (branch:<name>), a commit SHA, or a store event (event:<N>).
@@ -86,30 +77,10 @@ class TicketHeld(StoreUnavailable):
         self.holder = holder
 
 
-def _writer_name(writer: str | None) -> str:
-    """Name a store handle so a refused second writer can be told who holds the ticket.
-
-    The name is the caller's writer label (``user@host`` by default) plus this
-    process and a per-handle token, so two handles never share a name.
-    """
-
-    label = (writer or "").strip()
-    if not label:
-        try:
-            user = getpass.getuser()
-        except (KeyError, OSError):
-            user = "unknown"
-        label = f"{user}@{socket.gethostname()}"
-    label = " ".join(label.split())[:120]
-    return f"{label} (pid {os.getpid()}, handle {secrets.token_hex(3)})"
-
-
 # One live session (a "pass") per ticket. A pass writes a claim record first,
 # naming its session id, host and start time, and keeps it, across processes,
 # until the ticket is closed or a person releases it. No claim expires by
 # elapsed time.
-_PASS_PREFIX = "ticket-pass/v1 "
-_CLAIM_FIELDS = re.compile(r"^(?P<id>\S+) host=(?P<host>\S+) started=(?P<started>\S+)$")
 
 
 def _host() -> str:
@@ -548,7 +519,7 @@ def _validate_tried(tried: TriedRecord) -> None:
 def _require_pending_close(stamps: Sequence[Mapping[str, Any]], position: int, point: str) -> None:
     """Refuse unless the stamp at ``position`` is still the last stamp and that close.
 
-    Stamps are only ever appended, so a position names one stamp in either store.
+    Stamps are only ever appended, so a position names one stamp.
     """
 
     if (
@@ -577,7 +548,7 @@ def _blank_card(key: str, title: str) -> dict[str, Any]:
 
 
 class MarkdownStore:
-    """Ignored ``.ticket/<key>.md`` fallback with embedded structured data.
+    """Ignored ``.ticket/<key>.md`` card with embedded structured data.
 
     Every write holds an exclusive advisory lock on ``.ticket/<key>.lock``
     across the load, the precondition check and the save. The save writes a
@@ -891,589 +862,26 @@ def _render_markdown_card(card: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-class LedgerStore:
-    """CLI-only adapter for an installed event ledger.
+# Naming an executable here used to select a ledger-backed store. That store
+# is not supported yet, so the setting is refused rather than ignored: a
+# person who asked for it is told, and nothing is written.
+LEDGER_SELECTOR = "TICKET_LEDGER_CLI"
+LEDGER_UNSUPPORTED = "the ledger store is not supported yet; use the markdown store"
 
-    The CLI may require a writer identity in its own environment for writes.
-    This adapter never supplies one: the person or their wrapper exports it,
-    and a refused write surfaces as ``StoreUnavailable`` with the CLI's message.
 
-    One writer per ticket rests on a precondition on the ticket's revision,
-    the newest ledger event of the ticket this handle has accounted for. The
-    handle's first read pins it (a pass reads the card when it opens), and
-    only the handle's own writes move it; later reads do not. Every write
-    first checks that the ticket holds no newer event, and refuses, naming
-    that event's writer, when it does. Every append then carries the
-    idempotency key ``ticket-write/<key>/after/<revision>``. The CLI stores a
-    key once and refuses a different event under it, so when two writers
-    passed the check from the same revision, only the first append lands and
-    the second is refused by the first one's name.
+class LedgerUnsupported(StoreUnavailable):
+    """The ledger store was selected; it is refused until a later release supports it."""
 
-    A pass spans processes, so a handle's revision cannot carry it. The
-    ticket's pass record does: a ``session.opened`` event whose purpose names
-    the pass, written when the pass starts, and a ``session.closed`` event
-    naming it when the pass ends. The check before every append also requires
-    that the live pass is this handle's (or, for a handle outside any pass,
-    that no pass is live).
+    def __init__(self) -> None:
+        super().__init__(LEDGER_UNSUPPORTED, code="ledger_unsupported")
 
-    The CLI cannot make that check and the append one step: it has no
-    expected-revision option, and the idempotency key only collides with
-    another append under the same key. A write made through some other verb
-    between the check and the append still lands. So after every append the
-    adapter reads the ticket's events again, and if any event landed between
-    the revision it checked and its own, it refuses, naming that event's
-    writer and saying that its own event landed after it.
 
-    The adapter claims nothing and never writes the ticket's status, owner,
-    claim or blocked-by fields, except to mark the ticket closed; that write
-    carries the owner, claim and blocked-by fields over unchanged.
-    """
+def choose_store(repo: str | Path, key: str, title: str) -> StoreAdapter:
+    """Return the markdown store, refusing a ledger selection before anything is written."""
 
-    def __init__(
-        self,
-        key: str,
-        title: str,
-        *,
-        cli: str | Path | None = None,
-        db: str | Path | None = None,
-        writer: str | None = None,
-    ):
-        configured = str(cli) if cli is not None else os.environ.get("TICKET_LEDGER_CLI")
-        self.cli = configured or shutil.which("ledger") or ""
-        self.db = str(db) if db is not None else os.environ.get("LEDGER_DB")
-        self.key = key
-        self.title = title
-        self.holder = _writer_name(writer)
-        self._ensured = False
-        # The ticket revision this handle has accounted for; None until it
-        # first reads or writes the ticket.
-        self._seen: int | None = None
-        # The pass this handle writes for, and the pass it ended, if any.
-        self._pass: str | None = None
-        self._ended: str | None = None
-
-    def is_installed(self) -> bool:
-        return bool(self.cli) and os.path.isfile(self.cli) and os.access(self.cli, os.X_OK)
-
-    def _invoke(self, *args: str) -> subprocess.CompletedProcess[str]:
-        if not self.cli:
-            raise StoreUnavailable("no ledger CLI is configured or available on PATH")
-        command = [self.cli, "--json"]
-        if self.db:
-            command.extend(("--db", self.db))
-        command.extend(args)
-        try:
-            return subprocess.run(command, capture_output=True, text=True, check=False)
-        except OSError as exc:
-            raise StoreUnavailable(f"cannot execute ledger CLI: {exc}") from exc
-
-    def _call(self, *args: str) -> tuple[int, dict[str, Any]]:
-        result = self._invoke(*args)
-        try:
-            envelope = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            message = result.stderr.strip() or result.stdout.strip() or "invalid JSON response"
-            raise StoreUnavailable(f"ledger CLI failed: {message}") from exc
-        if not isinstance(envelope, dict):
-            raise StoreUnavailable("ledger CLI returned a non-object envelope")
-        return result.returncode, envelope
-
-    def _run(self, *args: str) -> dict[str, Any]:
-        returncode, envelope = self._call(*args)
-        if returncode != 0 or not envelope.get("ok"):
-            error = envelope.get("error") or {}
-            raise StoreUnavailable(str(error.get("message") or "ledger error"), code=error.get("code"))
-        return envelope["data"]
-
-    def doctor(self) -> dict[str, Any]:
-        return self._run("doctor")
-
-    def is_available(self) -> bool:
-        try:
-            self.doctor()
-        except StoreUnavailable:
-            return False
-        return True
-
-    def _card_envelope(self) -> dict[str, Any] | None:
-        """The CLI's card for this item, or None when the item does not exist yet."""
-
-        returncode, envelope = self._call("card", self.key)
-        if returncode == 0 and envelope.get("ok"):
-            return envelope["data"]
-        error = envelope.get("error") or {}
-        if error.get("code") == "not_found":
-            return None
-        raise StoreUnavailable(str(error.get("message") or "ledger card failed"), code=error.get("code"))
-
-    def _events(self) -> list[dict[str, Any]]:
-        return self._run("export-item", self.key)["events"]
-
-    def _ensure_item(self) -> None:
-        if self._ensured:
-            return
-        if self._card_envelope() is None:
-            try:
-                created = self._run("new", "--id", self.key, "--type", "ticket", "--title", self.title)
-            except StoreUnavailable as exc:
-                # Another writer created the item since this handle looked; the
-                # revision check that follows refuses this write by its name.
-                if exc.code != "conflict":
-                    raise
-            else:
-                if not self._seen:
-                    self._seen = int((created.get("event") or {}).get("id") or 0)
-        self._ensured = True
-
-    def _current_events(self, *, taking: bool = False) -> list[dict[str, Any]]:
-        """The ticket's events, refusing a newer event or a pass this handle may not write under.
-
-        ``taking`` is the check for starting a pass: no pass may be live.
-        """
-
-        self._ensure_item()
-        events = self._events()
-        if self._seen is None:
-            self._seen = _revision(events)
-        # The live claim comes first: a refused session is told who holds the ticket.
-        live = _live_pass(events)
-        if taking:
-            _check_pass(self.key, live, None, None)
-        else:
-            _check_pass(self.key, live, self._pass, self._ended)
-        newer = [event for event in events if int(event["id"]) > self._seen]
-        if newer:
-            raise self._stale(newer[-1])
-        return events
-
-    def take_pass(self) -> str:
-        """Start a pass: append its pass record, or refuse by the live pass's holder."""
-
-        pass_id = _new_pass_id()
-        claim = {"id": pass_id, "host": _host(), "started_at": _now()}
-        text = f"{_PASS_PREFIX}{pass_id} host={claim['host']} started={claim['started_at']}"
-        try:
-            self._append("session.opened", {"purpose": text}, taking=True)
-        except TicketHeld:
-            # The claim may have landed before the read-back found an interleaved
-            # event. A claim this session never got to use would refuse every later
-            # session, so release it before refusing. A refusal that wrote no claim
-            # finds nothing to release.
-            with contextlib.suppress(StoreUnavailable):
-                self._pass = pass_id
-                self.release_pass("the claim landed after an interleaved write")
-            self._pass = self._ended = None
-            raise
-        self._pass, self._ended = pass_id, None
-        return pass_id
-
-    def join_pass(self, pass_id: str) -> None:
-        """Continue a live pass from this handle; refuse unless it is that pass.
-
-        The handle's revision is pinned here; the pass record, not the
-        revision, is what kept other passes out between this pass's processes.
-        """
-
-        _text(pass_id, "pass id")
-        events = self._events()
-        _check_pass(self.key, _live_pass(events), pass_id, None)
-        self._pass, self._ended = pass_id, None
-        self._seen = _revision(events)
-        self._ensured = True
-
-    def release_pass(self, reason: str) -> None:
-        """End this handle's pass: append the release while its record is still open.
-
-        The release carries its own idempotency key and no revision
-        precondition: ending a pass only gives up the ticket, so it is safe
-        whatever landed since.
-        """
-
-        pass_id = self._pass
-        if pass_id is None:
-            return
-        self._pass, self._ended, self._seen = None, pass_id, None
-        if not any(item["id"] == pass_id for item in _open_passes(self._events())):
-            return
-        body = {"outcome": f"{_PASS_PREFIX}{pass_id} released: {reason}", "source": self.holder}
-        self._run(
-            "append",
-            "--kind",
-            "session.closed",
-            "--item",
-            self.key,
-            "--idempotency-key",
-            f"ticket-pass/{self.key}/{pass_id}/released",
-            "--payload",
-            json.dumps(body, sort_keys=True, separators=(",", ":")),
-        )
-
-    def clear_pass(self, pass_id: str) -> None:
-        """A person's recovery: release the named pass, refusing unless it is the live one."""
-
-        self.join_pass(pass_id)
-        self.release_pass("cleared by a person")
-
-    def _stale(self, event: Mapping[str, Any] | None) -> TicketHeld:
-        if event is None:
-            return TicketHeld(self.key, "another writer the ledger did not name")
-        return TicketHeld(
-            self.key,
-            _event_writer(event),
-            detail=(
-                f"It wrote ledger event {int(event['id'])} after this pass read the ticket, so this "
-                "write was refused, not queued. Start a new pass, which reads that writer's "
-                "changes, before writing again."
-            ),
-        )
-
-    def write_stamp(
-        self,
-        point: str,
-        phase: str,
-        next_skills: Sequence[str] = (),
-        refs: Sequence[str] = (),
-    ) -> None:
-        _validate_stamp(point, phase, next_skills, refs)
-        payload: dict[str, Any] = {"point": point, "phase": phase}
-        if next_skills:
-            payload["skills"] = list(next_skills)
-        if refs:
-            payload["refs"] = list(refs)
-        self._append("item.stopped", payload)
-
-    def confirm_close(self, position: int, point: str) -> None:
-        """Name that pending close's stop event as the close, then mark the item closed.
-
-        Both appends follow the revision the check read, so a stop that lands
-        after the check refuses the close instead of following it.
-        """
-
-        events = self._current_events()
-        stops = [event for event in events if event["kind"] == "item.stopped"]
-        _require_pending_close([event["payload"] for event in stops], position, point)
-        self._append("item.note", {"text": f"{_CLOSE_NOTE}{int(stops[position]['id'])}"})
-        try:
-            self._append("item.state", {**_carried_state(events), "status": "closed"})
-        except TicketHeld:
-            self._void_close(int(stops[position]["id"]))
-            raise
-
-    def _void_close(self, stop_id: int) -> None:
-        """Invalidate a close whose status write landed after an interleaved event.
-
-        The closed status was built from a snapshot that missed that event, so
-        it may have overwritten the event's owner, claim, blocked-by or status.
-        The ledger CLI has no compare-and-set, so any state written here could
-        overwrite a newer outside write in turn. This therefore appends only a
-        note: it names the close and the interleaved event, and resume reads it
-        to refuse the close and tell the person what to reconcile by hand.
-        """
-
-        events = self._events()
-        note_text = f"{_CLOSE_NOTE}{stop_id}"
-        note = [e for e in events if e["kind"] == "item.note" and (e.get("payload") or {}).get("text") == note_text]
-        ours = [
-            e
-            for e in events
-            if e["kind"] == "item.state"
-            and (e.get("payload") or {}).get("status") == "closed"
-            and (e.get("payload") or {}).get("source") == self.holder
-        ]
-        if not note or not ours:
-            return
-        between = [e for e in events if int(note[-1]["id"]) < int(e["id"]) < int(ours[-1]["id"])]
-        detail = "an event this close missed"
-        if between:
-            event = between[-1]
-            fields = {k: v for k, v in (event.get("payload") or {}).items() if k != "source"}
-            detail = (
-                f"ledger event {int(event['id'])} by {_event_writer(event)} "
-                f"({event['kind']}: {json.dumps(fields, sort_keys=True, separators=(',', ':'))})"
-            )
-        body = {"text": f"{_VOID_NOTE}{stop_id} interleaved: {detail}", "source": self.holder}
-        self._run(
-            "append",
-            "--kind",
-            "item.note",
-            "--item",
-            self.key,
-            "--idempotency-key",
-            f"ticket-close-void/{self.key}/{stop_id}/{int(ours[-1]['id'])}",
-            "--payload",
-            json.dumps(body, sort_keys=True, separators=(",", ":")),
-        )
-
-    def record_decision(self, decision: DecisionRecord) -> None:
-        _validate_decision(decision)
-        source_data = self._append("outside.recorded", decision.source.as_dict())
-        source_event_id = int(source_data["event"]["id"])
-        payload = decision.as_dict()
-        payload.pop("source")
-        payload["source"] = decision.source.ref
-        payload["source_event_id"] = source_event_id
-        self._append("decision.recorded", payload)
-
-    def record_review(self, review: ReviewRecord) -> None:
-        _validate_review(review)
-        self._append("review.recorded", review.as_dict())
-
-    def record_plan(self, plan: Mapping[str, Any]) -> str:
-        _validate_plan(plan, self.key)
-        text = _PLAN_NOTE + json.dumps(plan, sort_keys=True, separators=(",", ":"))
-        data = self._append("item.note", {"text": text})
-        return f"event:{int(data['event']['id'])}"
-
-    def record_tried(self, tried: TriedRecord) -> None:
-        _validate_tried(tried)
-        self._append("item.tried", tried.as_dict())
-
-    def _append(self, kind: str, payload: Mapping[str, Any], *, taking: bool = False) -> dict[str, Any]:
-        """Append one event only if the ticket is still at this handle's revision and pass.
-
-        The check and the append are two CLI calls, so the append is followed
-        by a read that refuses when anything landed between them.
-        """
-
-        self._current_events(taking=taking)
-        seen = self._seen
-        body = dict(payload)
-        if kind in _NAMED_KINDS:
-            # The writer's name rides on the event, so a refused writer can be
-            # told who wrote first, and two writers never send the same event.
-            body["source"] = self.holder
-        idempotency_key = f"ticket-write/{self.key}/after/{seen}"
-        try:
-            data = self._run(
-                "append",
-                "--kind",
-                kind,
-                "--item",
-                self.key,
-                "--idempotency-key",
-                idempotency_key,
-                "--payload",
-                json.dumps(body, sort_keys=True, separators=(",", ":")),
-            )
-        except StoreUnavailable as exc:
-            if exc.code != "conflict":
-                raise
-            first = next(
-                (event for event in self._events() if event.get("idempotency_key") == idempotency_key),
-                None,
-            )
-            raise self._stale(first) from exc
-        landed = int(data["event"]["id"])
-        self._verify_landed(seen, landed)
-        self._seen = landed
-        return data
-
-    def _verify_landed(self, seen: int | None, landed: int) -> None:
-        """Refuse, by name, when another event landed between this write's check and its append."""
-
-        between = [event for event in self._events() if (seen or 0) < int(event["id"]) < landed]
-        if not between:
-            return
-        event = between[-1]
-        raise TicketHeld(
-            self.key,
-            _event_writer(event),
-            detail=(
-                f"It wrote ledger event {int(event['id'])} between this write's revision check and its "
-                f"append. The ledger CLI cannot make the two one step, so this write still landed after "
-                f"it, as ledger event {landed}, and was not undone. Start a new pass, which reads both, "
-                "and decide with the person whether either needs repairing."
-            ),
-        )
-
-    def read_card(self) -> dict[str, Any]:
-        card = self._card_envelope()
-        if card is None:
-            if self._seen is None:
-                self._seen = 0
-            return _blank_card(self.key, self.title)
-        events = self._events()
-        if self._seen is None:
-            self._seen = _revision(events)
-        return _normalize_ledger_card(card, events)
-
-
-# Event kinds whose payload may carry a ``source``; the adapter puts the
-# writer's name there. A decision's ``source`` is its outside event's ref.
-_NAMED_KINDS = frozenset(
-    (
-        "item.stopped",
-        "item.note",
-        "item.tried",
-        "item.state",
-        "review.recorded",
-        "outside.recorded",
-        "session.opened",
-        "session.closed",
-    )
-)
-_HOLDER = re.compile(r".+ \(pid \d+, handle [0-9a-f]{6}\)")
-
-
-def _revision(events: Sequence[Mapping[str, Any]]) -> int:
-    return max((int(event["id"]) for event in events), default=0)
-
-
-def _open_passes(events: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
-    """Pass records started and not yet released, oldest first."""
-
-    open_: dict[str, dict[str, str]] = {}
-    for event in events:
-        payload = event.get("payload") or {}
-        if event.get("kind") == "session.opened":
-            text = str(payload.get("purpose") or "")
-            fields = _CLAIM_FIELDS.match(text[len(_PASS_PREFIX) :].strip()) if text.startswith(_PASS_PREFIX) else None
-            if fields:
-                open_.setdefault(
-                    fields["id"],
-                    {"id": fields["id"], "host": fields["host"], "started_at": fields["started"]},
-                )
-        elif event.get("kind") == "session.closed":
-            text = str(payload.get("outcome") or "")
-            if text.startswith(_PASS_PREFIX) and text[len(_PASS_PREFIX) :].split():
-                open_.pop(text[len(_PASS_PREFIX) :].split()[0], None)
-    return list(open_.values())
-
-
-def _live_pass(events: Sequence[Mapping[str, Any]]) -> dict[str, str] | None:
-    """The ticket's live pass: the oldest pass record not yet released."""
-
-    passes = _open_passes(events)
-    return passes[0] if passes else None
-
-
-def _event_writer(event: Mapping[str, Any]) -> str:
-    """Name who wrote an event: the adapter's writer name, else the CLI's attribution."""
-
-    payload = event.get("payload") or {}
-    named = payload.get("source") if event.get("kind") in _NAMED_KINDS else None
-    if isinstance(named, str) and _HOLDER.fullmatch(named):
-        return named
-    who = event.get("actor") or event.get("harness") or event.get("session")
-    if who:
-        return f"{who} (ledger event {int(event['id'])})"
-    return f"the writer of ledger event {int(event['id'])}"
-
-
-def _carried_state(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """The owner, claim and blocked-by fields of the ticket's latest state event."""
-
-    latest: Mapping[str, Any] = {}
-    for event in events:
-        if event["kind"] == "item.state":
-            latest = event.get("payload") or {}
-    return {name: latest[name] for name in ("owner", "claim", "blocked_by") if latest.get(name)}
-
-
-def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    # The adapter's writer name rides in ``source``; it is not card content.
-    outside = {
-        int(event["id"]): {name: value for name, value in event["payload"].items() if name != "source"}
-        for event in events
-        if event["kind"] == "outside.recorded"
-    }
-    decisions: list[dict[str, Any]] = []
-    reviews: list[dict[str, Any]] = []
-    stamps: list[dict[str, Any]] = []
-    stop_ids: list[int] = []
-    close_id: int | None = None
-    voided = False
-    void_detail = ""
-    tried: list[dict[str, Any]] = []
-    plan: dict[str, Any] | None = None
-    plan_ref: str | None = None
-    for event in events:
-        payload = dict(event["payload"])
-        if event["kind"] == "decision.recorded":
-            source_id = payload.pop("source_event_id", None)
-            payload.pop("source", None)
-            payload["source"] = dict(outside.get(int(source_id), {})) if source_id else {}
-            decisions.append(payload)
-        elif event["kind"] == "review.recorded":
-            payload.pop("source", None)
-            payload.setdefault("findings", [])
-            reviews.append(payload)
-        elif event["kind"] == "item.stopped":
-            stamps.append(
-                {
-                    "point": payload["point"],
-                    "phase": payload["phase"],
-                    "next_skills": list(payload.get("skills") or ()),
-                    "refs": list(payload.get("refs") or ()),
-                    "close": False,
-                }
-            )
-            stop_ids.append(int(event["id"]))
-        elif event["kind"] == "item.tried":
-            payload.pop("source", None)
-            tried.append(payload)
-        elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_PLAN_NOTE):
-            try:
-                plan = json.loads(payload["text"][len(_PLAN_NOTE) :])
-            except json.JSONDecodeError as exc:
-                raise StoreUnavailable(f"ledger event {event['id']} holds an unreadable plan card") from exc
-            plan_ref = f"event:{int(event['id'])}"
-        elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_CLOSE_NOTE):
-            named = payload["text"][len(_CLOSE_NOTE) :]
-            close_id = int(named) if named.isdigit() else None
-            voided = False
-        elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_VOID_NOTE):
-            named, _, detail = payload["text"][len(_VOID_NOTE) :].partition(" interleaved: ")
-            if named.isdigit() and int(named) == close_id:
-                voided, void_detail = True, detail
-    status = card["status"]
-    # Only the stop the latest close note names is the close, and only while closed.
-    if status == "closed" and close_id in stop_ids and not voided:
-        stamps[stop_ids.index(close_id)]["close"] = True
-    return {
-        "key": card["item_id"],
-        "title": card["title"],
-        "status": status,
-        "stamps": stamps,
-        "decisions": decisions,
-        "reviews": reviews,
-        "plan": plan,
-        "plan_ref": plan_ref,
-        "tried": tried,
-        "pass": _live_pass(events),
-        **({"close_voided": True, "close_void_detail": void_detail} if voided else {}),
-    }
-
-
-def choose_store(
-    repo: str | Path,
-    key: str,
-    title: str,
-    *,
-    cli: str | Path | None = None,
-    db: str | Path | None = None,
-    writer: str | None = None,
-) -> StoreAdapter:
-    """Use the ledger when its CLI is installed; markdown only when it is not.
-
-    An installed CLI whose doctor check fails is reported, never replaced by the
-    markdown card: a silent fallback would split one ticket across two stores.
-    """
-
-    ledger = LedgerStore(key, title, cli=cli, db=db, writer=writer)
-    if not ledger.is_installed():
-        return MarkdownStore(repo, key, title)
-    try:
-        ledger.doctor()
-    except StoreUnavailable as exc:
-        if exc.code == "missing_db":
-            raise StoreUnavailable(
-                f"the ledger database does not exist yet ({exc}). Initialise it by "
-                "creating this ticket's item with the ledger CLI's `new` verb, then retry.",
-                code="missing_db",
-            ) from exc
-        raise
-    return ledger
+    if os.environ.get(LEDGER_SELECTOR):
+        raise LedgerUnsupported()
+    return MarkdownStore(repo, key, title)
 
 
 @dataclass(frozen=True)
@@ -1692,8 +1100,8 @@ class TicketPass:
             session._pass_id = pass_id
             resume = True
         try:
-            # Every open reads the card, which pins the store's view of the
-            # ticket for this process; a store refuses a write from an older view.
+            # Every open reads the card, so an unreadable card fails the open
+            # and releases the pass before any step runs.
             card = store.read_card()
             if resume:
                 session._resume(card)
@@ -1777,16 +1185,9 @@ class TicketPass:
             self._plan_pass = _plan_pass(card)
             self.reconciliation = tuple(flags)
         stamps = card.get("stamps") or ()
-        if card.get("close_voided"):
-            self.reconciliation += (
-                "the last close was invalidated because another writer's event landed while it was "
-                f"being confirmed ({card.get('close_void_detail') or 'no detail recorded'}); the "
-                "ticket is not closed, and the close's status write may have overwritten that event, "
-                "so reconcile the ticket's status, owner, claim and blocked-by by hand",
-            )
         # A closed status counts only when the final stamp is the confirmed close
         # and the card still validates; otherwise the pass resumes before close.
-        if card.get("status") == "closed" and not card.get("close_voided"):
+        if card.get("status") == "closed":
             problems = self._closed_problems(card, stored, reviews)
             if not problems:
                 self._phase = "closed"
@@ -2131,7 +1532,7 @@ __all__ = [
     "DecisionSource",
     "FileTicketSource",
     "GateRequired",
-    "LedgerStore",
+    "LedgerUnsupported",
     "MarkdownStore",
     "MoreInfoExit",
     "PlanCard",
@@ -2159,11 +1560,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     release.add_argument("key", help="the ticket key")
     release.add_argument("pass_id", help="the session id the refusal named")
-    release.add_argument("--repo", default=".", help="the target repository (markdown card only)")
+    release.add_argument("--repo", default=".", help="the target repository that holds the card")
     args = parser.parse_args(argv)
     try:
-        store = choose_store(args.repo, args.key, args.key, writer="release")
+        store = choose_store(args.repo, args.key, args.key)
         store.clear_pass(args.pass_id)
+    except LedgerUnsupported as exc:
+        print(f"ticket: {exc}", file=sys.stderr)
+        return 2
     except (StoreUnavailable, TicketError) as exc:
         print(f"ticket.py: {exc}", file=sys.stderr)
         return 1
