@@ -197,19 +197,13 @@ else
   # and any other word is scanned unchanged. Every stage reads bytes as text
   # (-a, the C locale, NUL turned into a space) so a tracked binary file is
   # scanned too. A file that cannot be read, or a failing stage, fails the step.
-  scan_tracked() {
-    local f rc=0
-    while IFS= read -r -d '' f; do
-      [ -d "$f" ] && continue
-      LC_ALL=C grep -naH -e '' -- "$f"
-      # Status 1 is an empty file; anything above is a read error.
-      [ "$?" -le 1 ] || rc=1
-    done < <(git ls-files -z -- ':!LICENSE*')
-    return "$rc"
-  }
+  # Each file is read on its own, so the file name never shares a record with
+  # grep output: grep -n gives "line:text" (the line number cannot contain a
+  # colon) and the name reaches awk through the environment, so a name with a
+  # colon or a backslash is carried as it is. A CR before the line end is part
+  # of the line end, not of the last word.
   scan_text() {
-    scan_tracked | LC_ALL=C tr '\000' ' ' |
-      LC_ALL=C awk -v owner="$OWNER" -v repo="$REPO" '
+    SCAN_FILE=$1 LC_ALL=C awk -v owner="$OWNER" -v repo="$REPO" '
         BEGIN {
           sq = "\047"
           o = tolower(owner)
@@ -282,11 +276,14 @@ else
           return w
         }
         {
-          pre = ""
           body = $0
-          if (match($0, /^[^:]*:[0-9]+:/)) {
-            pre = substr($0, 1, RLENGTH)
-            body = substr($0, RLENGTH + 1)
+          match(body, /^[0-9]+:/)
+          pre = ENVIRON["SCAN_FILE"] ":" substr(body, 1, RLENGTH)
+          body = substr(body, RLENGTH + 1)
+          cr = ""
+          if (substr(body, length(body), 1) == "\r") {
+            cr = "\r"
+            body = substr(body, 1, length(body) - 1)
           }
           out = ""
           while (nf > 0 && match(body, /^[ \t]*[^ \t]+/)) {
@@ -295,10 +292,21 @@ else
             match(seg, /[^ \t]+$/)
             out = out substr(seg, 1, RSTART - 1) hide(substr(seg, RSTART))
           }
-          print pre out body
+          print pre out body cr
         }'
   }
-  scan_out=$(scan_text)
+  scan_tracked() {
+    local f rc=0 st
+    while IFS= read -r -d '' f; do
+      [ -d "$f" ] && continue
+      LC_ALL=C grep -na -e '' -- "$f" | LC_ALL=C tr '\000' ' ' | scan_text "$f"
+      st=("${PIPESTATUS[@]}")
+      # grep status 1 is an empty file; anything above is a read error.
+      [ "${st[0]}" -le 1 ] && [ "${st[1]}" -eq 0 ] && [ "${st[2]}" -eq 0 ] || rc=1
+    done < <(git ls-files -z -- ':!LICENSE*')
+    return "$rc"
+  }
+  scan_out=$(scan_tracked)
   scan_status=$?
   # Print only path:line; the matched text could be the denied term itself.
   deny_hits=$(printf '%s\n' "$scan_out" | LC_ALL=C grep -aiE -e "$NO_PERSON_DENY" |

@@ -158,6 +158,44 @@ for text in "${url_fail_cases[@]}"; do
   fi
 done
 
+# Record boundaries: a tracked file name with a colon, and a CRLF line end,
+# must not change what the own-URL exemption sees. Each file starts a line
+# with the repository URL (clean case), then the same file also carries a
+# denied word (planted case), which must still fail.
+own='https://github.com/zzowner/zzrepo'
+for kind in colon-name crlf; do
+  for variant in clean planted; do
+    tree=$(new_dir)
+    make_tree "$tree"
+    git -C "$tree" remote add origin https://github.com/zzowner/zzrepo.git
+    if [ "$kind" = colon-name ]; then
+      target="$tree/notes:2.md"
+      eol='\n'
+    else
+      target="$tree/notes.md"
+      eol='\r\n'
+    fi
+    printf "$own is the source$eol$own$eol" > "$target"
+    if [ "$variant" = planted ]; then
+      printf "$own zzother wrote this$eol" >> "$target"
+    fi
+    git -C "$tree" add -A
+    if url_lint "$tree"; then
+      if [ "$variant" = clean ]; then
+        printf 'PASS: %s file with a leading own-URL passes the deny step\n' "$kind"
+      else
+        note_fail "$kind file with a denied word should fail the deny step"
+      fi
+    else
+      if [ "$variant" = planted ]; then
+        printf 'PASS: %s file with a denied word fails the deny step\n' "$kind"
+      else
+        note_fail "$kind file with only a leading own-URL should pass the deny step"
+      fi
+    fi
+  done
+done
+
 # A tree with a planted denied term, for the deny-list configuration checks.
 tree=$(new_dir)
 make_tree "$tree"
