@@ -268,6 +268,159 @@ def test_a_directory_sync_failure_after_publication_is_not_reported_as_unchanged
     assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
 
 
+def _dir_close_failing(monkeypatch):
+    """Make closing a directory descriptor fail, after really closing it."""
+    real_close = os.close
+    failures = []
+
+    def close_failing_on_directories(fd):
+        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        real_close(fd)
+        if is_dir:
+            failures.append(fd)
+            raise OSError(5, f"close failure {len(failures)}")
+
+    monkeypatch.setattr(write_page.os, "close", close_failing_on_directories)
+
+
+@pytest.mark.parametrize("mode", ["update", "create"])
+def test_a_directory_close_failure_after_publication_is_not_reported_as_unchanged(
+        layout, monkeypatch, capsys, mode):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    if mode == "update":
+        page.write_bytes(b"old\n")
+    opened = []
+    real_open = os.open
+
+    def recording_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        if kwargs.get("dir_fd") is not None or args[1] & os.O_DIRECTORY:
+            opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(write_page.os, "open", recording_open)
+    _dir_close_failing(monkeypatch)
+    failing_close = write_page.os.close
+    closed = []
+
+    def counting_close(fd):
+        closed.append(fd)
+        return failing_close(fd)
+
+    monkeypatch.setattr(write_page.os, "close", counting_close)
+    code = _main_with_stdin(monkeypatch, repo, page, mode, b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    # Every directory descriptor opened (repository and docs) had a close
+    # attempted although the first close failed.
+    assert len(opened) >= 3
+    assert set(opened) <= set(closed)
+    assert code == 1
+    # The first failure is the one reported.
+    assert "written, but closing a directory failed: close failure 1" in err
+    assert "unchanged" not in err
+    assert page.read_bytes() == b"new\n"
+    assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
+
+
+def test_a_temporary_file_cleanup_failure_after_publication_is_not_reported_as_unchanged(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    real_unlink = os.unlink
+
+    def unlink_failing(path, **kwargs):
+        raise OSError(13, "Permission denied")
+
+    real_fsync = os.fsync
+    directory_syncs = []
+
+    def counting_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directory_syncs.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(write_page.os, "unlink", unlink_failing)
+    monkeypatch.setattr(write_page.os, "fsync", counting_fsync)
+    code = _main_with_stdin(monkeypatch, repo, page, "create", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    leftovers = [p.name for p in (repo / "docs").iterdir() if p.name != "page.md"]
+    assert code == 1
+    assert len(leftovers) == 1
+    # The message names the file a person has to delete, relative to the repository.
+    assert f"written, but removing the temporary file docs/{leftovers[0]} failed" in err
+    assert str(repo) not in err
+    assert "unchanged" not in err
+    assert page.read_bytes() == b"new\n"
+    # The directory is still synced after the cleanup failure.
+    assert len(directory_syncs) == 1
+    for name in leftovers:
+        real_unlink(repo / "docs" / name)
+
+
+def test_a_sync_failure_after_a_cleanup_failure_still_names_the_leftover(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    real_unlink = os.unlink
+    real_fsync = os.fsync
+
+    def unlink_failing(path, **kwargs):
+        raise OSError(13, "Permission denied")
+
+    def fsync_failing_on_directories(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(5, "Input/output error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(write_page.os, "unlink", unlink_failing)
+    monkeypatch.setattr(write_page.os, "fsync", fsync_failing_on_directories)
+    code = _main_with_stdin(monkeypatch, repo, page, "create", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    leftovers = [p.name for p in (repo / "docs").iterdir() if p.name != "page.md"]
+    assert code == 1
+    assert len(leftovers) == 1
+    assert f"written, but removing the temporary file docs/{leftovers[0]} failed" in err
+    assert "syncing the directory" not in err
+    for name in leftovers:
+        real_unlink(repo / "docs" / name)
+
+
+def test_a_failure_before_publication_still_reports_the_page_unchanged(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    page.write_bytes(b"old\n")
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(write_page.os, "write", failing_write)
+    code = _main_with_stdin(monkeypatch, repo, page, "update", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "destination unchanged" in err
+    assert "written, but" not in err
+    assert page.read_bytes() == b"old\n"
+
+
+def test_a_directory_close_failure_before_publication_does_not_hide_the_refusal(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "missing.md"
+    _dir_close_failing(monkeypatch)
+    code = _main_with_stdin(monkeypatch, repo, page, "update", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "destination is missing" in err
+    assert "written, but" not in err
+
+
 def test_the_temporary_file_is_never_wider_than_0600_while_it_holds_content(
         layout, monkeypatch):
     repo, _ = layout
@@ -512,8 +665,9 @@ def test_a_repository_swapped_while_it_is_being_checked_writes_nothing(tmp_path,
         return _hook_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "stat", racing_stat)
-    with pytest.raises(write_page.Refusal):
-        paths = write_page.check_paths(str(repo), str(repo / "docs"), str(repo / "docs" / "page.md"), "create")
-        write_page.write_through(*paths, b"escaped\n", "create")
+    # check_paths' own second identity read must refuse; write_through's check
+    # is pinned separately by test_a_different_directory_at_the_repository_path_is_refused.
+    with pytest.raises(write_page.Refusal, match="changed while it was being checked"):
+        write_page.check_paths(str(repo), str(repo / "docs"), str(repo / "docs" / "page.md"), "create")
     monkeypatch.undo()
     assert list((repo / "docs").iterdir()) == []
