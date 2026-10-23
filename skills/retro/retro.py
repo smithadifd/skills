@@ -33,7 +33,10 @@ CHECK_COMMAND = re.compile(
     r"\b(lint|ruff|eslint|flake8|mypy|tsc|pytest|prettier|black|shellcheck|clippy)\b", re.I
 )
 FAILURE_TEXT = re.compile(r"\b(error|errors|failed|failure)\b", re.I)
-ZERO_COUNT = re.compile(r"\b(0|no)\s+(errors?|failed|failures?)\b", re.I)
+_WORD = r"(?:errors?|failed|failures?)"
+ZERO_COUNT = re.compile(
+    rf"\b(?:0|no)\s+{_WORD}\b|\b{_WORD}\s*[:=]?\s*0\b(?!\.?\d)", re.I
+)
 RULE_CODE = re.compile(r"\b[A-Z]{1,4}\d{2,4}\b")
 CORRECTION_CUE = re.compile(
     r"^\s*(no\b|don'?t\b|do not\b|stop\b|again\b|i said\b|that'?s not\b|wrong\b)", re.I
@@ -165,8 +168,18 @@ def scan(path):
 # ------------------------------------------------------------------- findings
 
 
+def _valid_instance(i):
+    return isinstance(i, dict) and isinstance(i.get("ref"), str) and bool(i["ref"].strip())
+
+
 def _instances(item):
-    return [i for i in item.get("instances") or [] if isinstance(i, dict) and i.get("ref")]
+    """Cited instances; raises RetroError when any is malformed."""
+    raw = item.get("instances") or []
+    if not isinstance(raw, list) or not all(_valid_instance(i) for i in raw):
+        raise RetroError(
+            f"finding {item.get('id', '?')}: each instance needs a non-empty string ref"
+        )
+    return raw
 
 
 def classify(item):
@@ -253,6 +266,11 @@ def validate(data):
         label = f"finding {item.get('id', index) if isinstance(item, dict) else index}"
         if not isinstance(item, dict):
             problems.append(f"{label}: not an object")
+            continue
+        try:
+            _instances(item)
+        except RetroError:
+            problems.append(f"{label}: each instance needs a non-empty string ref")
             continue
         if item.get("severity") not in SEVERITY_RANK:
             problems.append(f"{label}: severity must be one of {', '.join(SEVERITIES)}")

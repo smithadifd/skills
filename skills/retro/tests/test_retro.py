@@ -243,3 +243,40 @@ def test_approve_refuses_an_invalid_file(tmp_path):
     result = run("approve", out, "deps")
     assert result.returncode == 2 and "invalid" in result.stderr
     assert by_id(json.loads(out.read_text()), "deps")["approved"] is False
+
+
+# ---- round 3
+
+
+def test_suffix_zero_counts_are_not_failures():
+    out = json.loads(run("scan", FIX / "passing.jsonl").stdout)
+    assert out["mechanical_candidates"] == []
+
+
+def test_nonzero_suffix_counts_are_still_failures(tmp_path):
+    rec = [
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "pytest"}}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "Errors: 10"}]}},
+    ]
+    src = tmp_path / "t.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in rec) + "\n")
+    out = json.loads(run("scan", src).stdout)
+    assert len(out["mechanical_candidates"]) == 1
+
+
+def test_malformed_instance_ref_is_reported_cleanly(tmp_path):
+    bad = draft()
+    bad["findings"][0]["instances"][0]["ref"] = ["line", 11]
+    src = tmp_path / "bad.json"
+    src.write_text(json.dumps(bad))
+    result = run("build", src, "--out", tmp_path / "f.json")
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr and "non-empty string ref" in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
+    data = built()
+    by_id(data, "deps")["instances"][0]["ref"] = ["x"]
+    assert any("non-empty string ref" in p for p in retro.validate(data))
+    by_id(data, "deps")["instances"][0]["ref"] = ""
+    assert any("non-empty string ref" in p for p in retro.validate(data))

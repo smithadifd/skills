@@ -2,3 +2,13 @@
 {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p1", "is_error": false, "content": "All checks passed! 0 errors"}]}}
 {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p2", "name": "Bash", "input": {"command": "ruff check src"}}]}}
 {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p2", "is_error": false, "content": "Found 0 errors, no failures"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p10", "name": "Bash", "input": {"command": "pytest -q"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p10", "is_error": false, "content": "Errors: 0"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p11", "name": "Bash", "input": {"command": "pytest -q"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p11", "is_error": false, "content": "Failures: 0"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p12", "name": "Bash", "input": {"command": "pytest -q"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p12", "is_error": false, "content": "3 passed, 0 failed"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p13", "name": "Bash", "input": {"command": "pytest -q"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p13", "is_error": false, "content": "failed: 0"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p14", "name": "Bash", "input": {"command": "pytest -q"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p14", "is_error": false, "content": "errors=0"}]}}
