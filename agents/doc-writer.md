@@ -1,6 +1,6 @@
 ---
 name: doc-writer
-description: Drafts one doc page from a `doc-researcher` brief (or equivalent). Applies humanizer generation-mode inline—no separate humanize pass needed. Writes to disk; returns a summary plus claims list. The caller can assign independent pages in parallel.
+description: Drafts one doc page from a `doc-researcher` brief (or equivalent), as directed by the `document` skill. Applies humanizer generation-mode inline—no separate humanize pass needed. Writes to disk; returns a summary plus claims list. The caller can assign independent pages in parallel.
 model: sonnet
 color: magenta
 tools: Read, Glob, Grep, Write, Edit

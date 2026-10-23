@@ -1,6 +1,6 @@
 ---
 name: doc-verifier
-description: Checks documentation claims against code—does this function/flag/endpoint match the doc. Returns confirmed vs flagged lists so the caller can decide on a writer re-spawn. Used on app-wide docs, where doc rot is costly.
+description: Checks documentation claims against code—does this function/flag/endpoint match the doc. Returns confirmed vs flagged lists so the caller can decide on a writer re-spawn. Spawned by `document` on app-wide docs, where doc rot is costly.
 model: haiku
 color: yellow
 tools: Read, Glob, Grep, Bash
