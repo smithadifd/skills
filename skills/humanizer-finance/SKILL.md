@@ -10,7 +10,8 @@ description: >
   update sound human", "run humanizer-finance", "clean up this financial digest", or
   when humanizing text where the document type is financial/investment-analytical. If
   the text isn't financial/analytical, use the bare humanizer skill instead — this
-  overlay adds nothing useful there.
+  overlay adds nothing useful there. NOT for general prose, and NOT a replacement
+  for `humanizer`, which it builds on.
 ---
 
 # Humanizer — finance overlay

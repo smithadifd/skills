@@ -237,6 +237,14 @@ check_reviewer_axes() {
   "$repo_dir/ci/reviewer-axes.sh"
 }
 
+check_lint() {
+  "$repo_dir/ci/lint-skills.sh"
+}
+
+check_lint_fixtures() {
+  "$repo_dir/ci/test-lint.sh"
+}
+
 case ${1-} in
   install-all) check_install_all ;;
   install-one) check_install_one ;;
@@ -249,6 +257,8 @@ case ${1-} in
   agent-traversal) check_agent_traversal ;;
   agent-unknown) check_agent_unknown ;;
   reviewer-axes) check_reviewer_axes ;;
+  lint) check_lint ;;
+  lint-fixtures) check_lint_fixtures ;;
   '')
     check_install_all
     check_install_one
@@ -260,6 +270,8 @@ case ${1-} in
     check_agent_traversal
     check_agent_unknown
     check_reviewer_axes
+    check_lint
+    check_lint_fixtures
     ;;
   *)
     printf 'Unknown check: %s\n' "$1" >&2

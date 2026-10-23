@@ -1,8 +1,13 @@
 ---
 name: review
 kind: portable
+version: 1.0.0
 description: >
-  Review the current changes for bugs and security issues only.
+  Review the current changes for bugs and security issues only. Use when the
+  user says "review my changes", "review this diff", "check this branch for
+  bugs", or "any security problems here". NOT for style, naming or refactoring
+  feedback, and NOT for pressure-testing a design before code exists (that is
+  `shape`).
 ---
 
 Review the current changes for bugs and security issues only.

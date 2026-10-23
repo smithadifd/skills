@@ -1,0 +1,29 @@
+{
+  "Goal": "Move the retry logic in the sync client behind one helper.",
+  "Where we stopped": "Helper extracted; two call sites still use the old loop.",
+  "Verified": [
+    "`python3 -c \"print(1)\"` => prints 1"
+  ],
+  "Claimed but not verified": [
+    "The integration suite passes on CI (not rerun locally)."
+  ],
+  "Decisions and why": [
+    "Keep the helper private: only the sync client calls it."
+  ],
+  "Failed approaches": [
+    "Decorator form: it hid the retry count from callers."
+  ],
+  "Open questions": [
+    "Should the backoff cap be configurable?"
+  ],
+  "References": [
+    "src/sync/client.py",
+    "https://github.com/example/repo/pull/12",
+    "commit abc1234"
+  ],
+  "Skills to invoke next": [
+    "review"
+  ],
+  "Secrets": "API_KEY=fake-not-a-real-value-123456",
+  "Extra": "ignored"
+}
