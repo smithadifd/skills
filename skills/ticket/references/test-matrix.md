@@ -61,7 +61,10 @@ the list `c` (the duplicate rows, A8); its source fixture is then rewritten to t
 | A6.2 | `…[text]` | S6 × text | `closed`; F7 | `_derive` tests the change (row 5) before the valid close (row 2) → `plan` |
 | A6.3 | `…[added]` | S6 × added | `closed`; F7 names the new text | `(shared with A1.3)` |
 | A6.4 | `…[removed]` | S6 × removed | `closed`; F7 names the removed text | `(shared with A1.4)` |
-| A7 | `test_status_title_and_updated_at_are_flags_not_changes` | S3[1]; source status, title and `updated_at` changed | phase `outward_go`; flags `[F9, F10]`; the passing round survives | `_source_differences` is given `(status, *criteria)` (status folded into the identity) |
+| A7 | `test_status_title_and_updated_at_are_flags_not_changes` | S3[1]; source status, title and `updated_at` changed | phase `outward_go`; flags `[F9, F10, F12]`; the passing round survives | `_source_differences` is given `(status, *criteria)` (status folded into the identity) |
+| A9 | `test_a_title_only_change_is_a_flag` | S3[1]; only the source title changed | phase `outward_go`; flags `[F12]`; nothing written but the claim | `_source_flags` drops the title comparison `(shared with A7, A11)` |
+| A10 | `test_an_update_time_that_appears_or_disappears_is_a_flag[appears | disappears]` | S3[1] built with no source `updated_at` (the snapshot stores none), then one appears / built with one, then it disappears | phase `outward_go`; flags `[F10]`; nothing written but the claim | appears: `_source_flags` compares only when the snapshot stores an update time (`"ticket_updated_at" in plan and …`); disappears: the comparison is skipped when the source has none (`ticket.updated_at and …`) |
+| A11 | `test_metadata_changes_on_a_closed_card_are_flags[status | title | updated_at | all three | criteria and all three]` | S6; the source status / title / update time / all three / a reorder plus all three | phase `closed`; flags in order `[F7?, F9?, F10?, F12?]` for what changed; card bytes equal | `_derive` returns the closed state with the F7 flags only (no `_source_flags` on the closed path) |
 | A8.1 | `test_a_duplicate_criterion_added_is_a_change` | S1 built with `["A"]` × source `["A", "A"]` | phase `plan`; flags exactly `[F1(M=1, what="acceptance criterion is new or changed on the ticket: A")]`; no `removed` and no `reordered` line; nothing written; `present_plan` with `["A", "A"]` stores revision 2 | `_source_differences` names added texts by membership (`[t for t in source if t not in stored]`): no line, so it falls through to `reordered` |
 | A8.2 | `test_a_duplicate_criterion_removed_is_a_change` | S1 built with `["A", "A"]` × source `["A"]` | phase `plan`; flags exactly `[F1(M=1, what="acceptance criterion was removed from the ticket: A")]`; no `new or changed` and no `reordered` line; nothing written | `_source_differences` names removed texts by membership (`[t for t in stored if t not in source]`): no line, so it falls through to `reordered` |
 | A8.3 | `test_a_duplicate_criterion_moved_is_a_reorder` | S1 built with `["A", "A", "B"]` × source `["A", "B", "A"]` | phase `plan`; flags exactly `[F1(M=1, what="the acceptance criteria were reordered on the ticket")]`; no `new or changed` and no `removed` line; nothing written | `_source_differences` returns no line when the multisets are equal (the `reordered` fallback dropped): the flag carries an empty `{what}`, or no change is seen and the pass resumes at `plan_go` |
@@ -81,7 +84,7 @@ the list `c` (the duplicate rows, A8); its source fixture is then rewritten to t
 ## C. Empty and malformed stored identity
 
 Each row runs at every stage where a plan exists: `S1`, `S2[1]`, `S3[1]`, `S4[1]`, `S5`, `S6`
-(parametrize `stage`). Expected unless stated: refusal `plan_unidentifiable`; the card is byte- or
+(parametrize `stage`). C16–C19 follow the same rule, and their expected code is stated in the row. Expected unless stated: refusal `plan_unidentifiable`; the card is byte- or
 event-equal before and after; no claim; the open raises and the pass is not live.
 
 | ID | Test name | Shape | Expected | Mutation |
@@ -101,6 +104,10 @@ event-equal before and after; no claim; the open raises and the pass is not live
 | C13 | `test_a_review_without_a_whole_number_round_is_unreadable[missing | text | float]` | a stored review's `round` absent, `"2"`, `2.0` | refusal `card_unreadable`; nothing written; the pass is not live (no `KeyError`, no live pass with no way forward) | the card reader skips reviews lacking an `int` round instead of refusing |
 | C14 | `test_a_live_pass_whose_plan_is_corrupted_refuses_its_next_write` | S2[0], `join(P)`, then the card's plan set to `{}` behind the pass | the next step (`record_review`) writes against the held token and raises `stale` before any validation of the corrupted card; nothing written; pass ends | the markdown token is the file's `mtime` (unchanged by an in-place rewrite within the same second: set the mtime back in the test) / the ledger store skips `--expect-revision` on the review batch |
 | C15 | `test_an_unidentifiable_plan_wins_over_a_valid_close` | S6 with `revision: true` | `plan_unidentifiable`, not `closed` | `_derive` tests the close (row 2) before the identity (row 1) |
+| C16 | `test_a_plan_with_an_unknown_schema_is_unreadable` | `plan.schema` is `ticket-plan-card/v999` (revision, criteria and pass readable) | `card_unreadable`; no gate is derived; the card is equal before and after; no claim | `_validate_plan` drops the `schema` check |
+| C17 | `test_a_plan_missing_a_required_field_is_unreadable[schema | key | title | steps | open_questions]` | the named field absent from an otherwise readable plan | `card_unreadable` (no `KeyError`); nothing written | `_validate_plan` drops, alone, the `schema` / `key` / `title` / `steps` / `open_questions` check (five mutations) |
+| C18 | `test_a_plan_with_a_malformed_field_is_unreadable[other key | blank title | status non-text | updated non-text | open_questions not text | unknown field | steps not a list | diff without a skipped plan step]` | the named field set to the named bad value | `card_unreadable`; nothing written | `_validate_plan` drops, alone, the check for that field (eight mutations; the key, title, steps and open_questions mutations are C17's) |
+| C19 | `test_an_identity_fault_wins_over_a_non_identity_fault` | unknown schema and `revision: true` together | `plan_unidentifiable`, not `card_unreadable` | the read-time plan check runs before the identity check (the `_identity` guard dropped from `_check_plan_shape`) `(shared with C1–C12)` |
 
 ## D. Card-side changes: records that no longer cover the card's plan
 
@@ -129,11 +136,12 @@ event-equal before and after; no claim; the open raises and the pass is not live
 | E8 | `test_the_round_cap_counts_recorded_rounds_across_passes` | two `changes` rounds in pass 1; release; pass 2 resumes | `review_round == 2`; the third `changes` round stops: `stopped`, F5, cap stamp written in the same write as round 3 | `record_review` numbers the round from the pass's own count (`self._rounds` reset to 0 on resume) |
 | E9 | `test_a_store_read_that_fails_inside_the_outward_check_ends_the_pass` | S4[1] live; `read` raises `OSError` inside `require_outward_go` | `OSError` propagates; `session.live` false; the claim is released | `require_outward_go` loses `@_ends_on_failure` |
 | E10 | `test_an_exception_leaving_the_with_block_ends_the_pass` | `with TicketPass.open(...)` and a raise inside | the claim released; `live` false | `__exit__` drops `_end_quietly` |
-| E11a | `test_a_pass_holds_the_ticket_across_processes` | pass 1 open; a subprocess opens a new pass | the subprocess is refused `held`, the message names the id, host, started-at and the release command; nothing written | `_check_pass` returns when `mine is None and live is not None` |
+| E11a | `test_a_pass_holds_the_ticket_across_processes` | pass 1 open; a subprocess opens a new pass | the subprocess is refused `held`, the message names the id, host, started-at and the release command, spelled with the absolute path of the installed `ticket.py`; nothing written | `_check_pass` returns when `mine is None and live is not None` |
 | E11b | `test_join_refuses_an_id_that_is_not_the_live_pass` | pass 1 live; `join("other")` | `held` naming pass 1; nothing written | `_check_pass` drops `live["id"] == mine` |
 | E11c | `test_the_claim_is_released_on_every_exit_path[close | more_info | cap | end | refusal | with-block]` | each path | `card.pass` is `None` after; a new pass claims | `end` does not call `release` |
 | E11d | `test_a_person_clears_a_crashed_pass_with_the_documented_command` | a live claim, no process | `python3 ticket.py release <key> <id> --repo <repo>` exits 0 and clears it; a wrong id exits 1 and changes nothing | `clear_pass` skips `join_pass` |
 | E11e | `test_an_ended_pass_writes_nothing` | after `end()` | every step raises `pass_ended`; nothing written | `_check_pass` drops the `ended` branch |
+| E11f | `test_the_held_refusal_command_runs_from_the_target_repository` | pass 1 open; a subprocess is refused `held`; the printed command (plus `--repo <repo>`) is run from a directory that holds no `ticket.py` | the command's script path is the installed `ticket.py`; it exits 0 and clears the claim | the message names the bare `ticket.py` `(shared with E11a)` |
 | E12 | `test_three_more_info_exits[person | research | someone_else]` | a live pass at `plan` | a stamp `waiting on <x>: <q>` with the store phase; the pass ends; `someone_else` returns a drafted ask and requires a role | `more_info` does not end the pass |
 | E13 | `test_open_questions_tried_and_steps_persist_and_resume_rebuilds_the_pass` | a plan with a skipped `research` step, a skipped `plan` step with a one-sentence diff, an open question, a `tried` record | after resume: `session.plan` renders the skips with their reasons, the diff, the question; `tried` on the card | `PlanCard` rebuilt on resume drops `steps` restoration (all `pending`) |
 | E14 | `test_resume_pulls_the_live_ticket_before_reading_the_card` | a source that records the call order with the store | the source is pulled before `read` | `open` reads the card first |
@@ -177,7 +185,7 @@ event-equal before and after; no claim; the open raises and the pass is not live
 | G10 | `test_recorded_comment_markers_round_trip_and_leave_one_block` | a point containing `-->`, `<!--`, `&`, `<b>` | exactly one `<!-- ticket-card:v2` block; the text reads back equal; the rendered summary escapes them | the escape of `>` dropped in the machine block |
 | G11 | `test_a_failed_save_leaves_the_old_card_and_no_temporary_file` | `os.replace` made to raise | the old card intact; no `.tmp` left; the error raises; the pass ends | the save writes the card in place (`open(path, "w")`) |
 | G12 | `test_two_processes_racing_to_claim_get_one_pass` | two subprocesses open a new pass at once | exactly one `pass` on the card; the other reports `held` naming it | the claim is written without the token check (`apply(None, [claim])`) |
-| G13 | `test_markdown_adapter_records_every_card_field` | one of each event | every field of section 2 reads back equal | the folder drops `tried` (or any one kind) |
+| G13 | `test_markdown_adapter_records_every_card_field` | one of each event; the plan skips its plan step, since a `diff_statement` stands only with that skip | every field of section 2 reads back equal | the folder drops `tried` (or any one kind) |
 | G14 | `test_a_missing_card_reads_as_blank_with_token_none` | no file; then a card exists | `read()` returns the blank card and the literal token `none`; the first `apply(none, ...)` creates the file; `apply(none, ...)` against an existing card raises `stale` | `apply` treats the expected token `none` as "skip the check" |
 | G15 | `test_the_card_and_lock_are_inside_the_repository` | `.ticket` resolves outside the repo (a symlinked `.ticket`) | `StoreUnavailable`; nothing written | `_ensure_directory` drops the `relative_to` check |
 
@@ -258,14 +266,16 @@ identity of its `and`/`or`.
 | I22 | — | 1486, 1488, 1490 (`present_plan` guards: other key, criteria out of order, `passes` preset) | `test_present_plan_refuses_each_fault[other key | other order | passes preset]`: `TicketError`, nothing written | each alone |
 | I23 | — | 1519 (`stored.get("revision") != self._revision` in `record_go`) | **removed by construction**: `record_go("plan")` relies on the token (D5) and `card.plan.pass == P` (E3) | — |
 | I24 | — | 322 (2 operands of `_verified`) | **removed by construction** (D3): no `passes` copy, no `_verified` | — |
+| I25 | `test_completing_a_skipped_plan_step_clears_its_diff` | a plan card with the plan step skipped for a one-sentence diff, then `complete_step("plan")` | `diff_statement` is `None`, absent from the snapshot, the render has no `Diff:` line, the stored plan has none; completing another step keeps the diff | `complete_step` keeps the diff (and, alone, clears it for any step) |
+| I26 | `test_a_diff_statement_on_a_plan_step_that_is_not_skipped_is_not_persisted[pending | complete]` | a snapshot with `diff_statement` and the plan step pending / complete, presented | `TicketError`; nothing written; the pass stays live (the read-time form is C18) | `_validate_steps` drops the unskipped-diff check `(shared with C18)` |
 
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
-- Rows: A 40 (the four impossible S0 cells folded into A0.1–4), B 6, C 15, D 8, E 28, F 8, G 15,
-  H 32, I 24. Total 176 rows. Eight carry no test of their own: A0.1–4 (impossible by
+- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 29, F 8, G 15,
+  H 32, I 26. Total 186 rows. Eight carry no test of their own: A0.1–4 (impossible by
   construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), and the two
-  evidence probes G9 and H19. The other 168 each have a test and a named mutation.
+  evidence probes G9 and H19. The other 178 each have a test and a named mutation.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so.

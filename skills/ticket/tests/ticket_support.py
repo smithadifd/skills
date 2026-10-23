@@ -84,6 +84,10 @@ def F9(old, new):
 F10 = "ticket was updated since the plan card was written"
 
 
+def F12(old, new):
+    return f"ticket title changed: {old} -> {new}"
+
+
 def F11_review(n, m):
     return f"review round {n} reviewed other acceptance criteria than plan revision {m} on the card"
 

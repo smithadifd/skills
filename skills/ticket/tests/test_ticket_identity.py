@@ -145,6 +145,44 @@ def test_C15_an_unidentifiable_plan_wins_over_a_valid_close(repo):
     _refused_at(repo, "S6", _set_field("revision", True))
 
 
+@pytest.mark.parametrize("stage", STAGES)
+def test_C16_a_plan_with_an_unknown_schema_is_unreadable(repo, stage):
+    _refused_at(repo, stage, _set_field("schema", "ticket-plan-card/v999"), code="card_unreadable")
+
+
+@pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("name", ["schema", "key", "title", "steps", "open_questions"])
+def test_C17_a_plan_missing_a_required_field_is_unreadable(repo, stage, name):
+    _refused_at(repo, stage, _drop_field(name), code="card_unreadable")
+
+
+C18_FAULTS = {
+    "other key": ("key", "EK-99"),
+    "blank title": ("title", "  "),
+    "status non-text": ("ticket_status", 5),
+    "updated non-text": ("ticket_updated_at", 5),
+    "open_questions not text": ("open_questions", [""]),
+    "unknown field": ("passes", [True, True]),
+    "steps not a list": ("steps", "orient"),
+    "diff without a skipped plan step": ("diff_statement", "Add the guard."),
+}
+
+
+@pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("fault", list(C18_FAULTS))
+def test_C18_a_plan_with_a_malformed_field_is_unreadable(repo, stage, fault):
+    name, value = C18_FAULTS[fault]
+    _refused_at(repo, stage, _set_field(name, value), code="card_unreadable")
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_C19_an_identity_fault_wins_over_a_non_identity_fault(repo, stage):
+    def change(card):
+        card["plan"].update(schema="ticket-plan-card/v999", revision=True)
+
+    _refused_at(repo, stage, change)
+
+
 # --- D: card-side changes ----------------------------------------------------
 
 

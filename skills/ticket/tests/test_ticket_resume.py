@@ -9,7 +9,7 @@ import pytest
 
 import ticket
 from ticket_support import (
-    A, B, B_EDITED, C, EDIT_WHAT, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, KEY, REORDERED, Source,
+    A, B, B_EDITED, C, EDIT_WHAT, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F12, KEY, REORDERED, STATUS, TITLE, UPDATED, Source,
     assert_only_a_claim, build, build_released, card_bytes, changes, edit_card, go_plan,
     new_text, open_pass, passing, present, read_card, refusal, removed_text,
 )
@@ -377,9 +377,59 @@ def test_A7_status_title_and_updated_at_are_flags_not_changes(repo):
     src.status, src.title, src.updated_at = "In Review", "A retitled ticket", "2026-10-18T09:00:00Z"
     session = open_pass(repo, src)
     assert session.phase == "outward_go"
-    assert session.reconciliation == (F9("In Progress", "In Review"), F10)
+    assert session.reconciliation == (F9("In Progress", "In Review"), F10, F12(TITLE, "A retitled ticket"))
     assert session.plan.review["round"] == 1
     assert "passes: true" in session.plan.render()
+
+
+def test_A9_a_title_only_change_is_a_flag(repo):
+    src = Source()
+    build_released(repo, src, "S3", 1)
+    src.title = "A retitled ticket"
+    before = read_card(repo)
+    session = open_pass(repo, src)
+    assert session.phase == "outward_go"
+    assert session.reconciliation == (F12(TITLE, "A retitled ticket"),)
+    assert_only_a_claim(repo, before)
+
+
+@pytest.mark.parametrize("direction", ["appears", "disappears"])
+def test_A10_an_update_time_that_appears_or_disappears_is_a_flag(repo, direction):
+    src = Source()
+    if direction == "appears":
+        src.updated_at = None
+    build_released(repo, src, "S3", 1)
+    assert ("ticket_updated_at" in read_card(repo)["plan"]) is (direction == "disappears")
+    src.updated_at = UPDATED if direction == "appears" else None
+    before = read_card(repo)
+    session = open_pass(repo, src)
+    assert session.phase == "outward_go"
+    assert session.reconciliation == (F10,)
+    assert_only_a_claim(repo, before)
+
+
+@pytest.mark.parametrize("change", ["status", "title", "updated_at", "all three", "criteria and all three"])
+def test_A11_metadata_changes_on_a_closed_card_are_flags(repo, change):
+    src = Source()
+    build_released(repo, src, "S6")
+    flags = []
+    if change == "criteria and all three":
+        src.edit("reorder")
+        flags.append(F7(REORDERED))
+    if change in ("status", "all three", "criteria and all three"):
+        src.status = "Done"
+        flags.append(F9(STATUS, "Done"))
+    if change in ("updated_at", "all three", "criteria and all three"):
+        src.updated_at = "2026-10-18T09:00:00Z"
+        flags.append(F10)
+    if change in ("title", "all three", "criteria and all three"):
+        src.title = "A retitled ticket"
+        flags.append(F12(TITLE, "A retitled ticket"))
+    before = card_bytes(repo)
+    session = open_pass(repo, src)
+    assert session.phase == "closed"
+    assert session.reconciliation == tuple(flags)
+    assert card_bytes(repo) == before
 
 
 def _duplicates(repo, built_with, source_now):

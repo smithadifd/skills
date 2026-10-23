@@ -95,7 +95,8 @@ atomic with `append-many --expect-revision`.
       "revision": <int >= 1>, "pass": "<id of the pass that presented it>",
       "criteria": ["<text>", ...],                      # ordered, non-empty, each non-empty
       "steps": [{"name", "status", "skip"?} x 6],       # orient research plan build review outward
-      "diff_statement"?: "<one sentence>", "open_questions": ["<text>", ...],
+      "diff_statement"?: "<one sentence>",   # only while the plan step is skipped
+      "open_questions": ["<text>", ...],
       "ticket_status"?: "<text>", "ticket_updated_at"?: "<text>"
   },
   "decisions": [{"who", "who_kind", "relayed_by"?, "standing", "source": {"what", "ref", "who"?, "text"?},
@@ -126,6 +127,14 @@ atomic with `append-many --expect-revision`.
   `stamps` entry that is not an object, a `status` outside the two values) is refused on read with
   `card_unreadable`, the same code as a markdown block that does not parse. Nothing in the pass
   defends against a non-list with `or ()`: the reader does it once.
+- A stored plan snapshot is validated on read with the same rules as on write (the I5 and I7 rules),
+  before any gate is derived: an unknown `schema`, a missing `key`, `title`, `steps` or
+  `open_questions`, a key of another ticket, a malformed field, or a `diff_statement` while the plan
+  step is not skipped is refused with `card_unreadable`. A snapshot whose identity cannot be read
+  (section 3.1) keeps `plan_unidentifiable`: the identity check runs first, so a card that fails
+  both is refused as unidentifiable. A skipped plan step carries the one-sentence `diff_statement`;
+  completing that step clears it, so a snapshot never says the plan step is complete beside the
+  diff that stood in for it.
 
 ## 3. The state machine
 
@@ -147,9 +156,9 @@ this order, the first match wins:
 
 | # | Condition on the card | State | Notes |
 |---|---|---|---|
-| 0 | the card does not parse or has the wrong shape | refusal `card_unreadable` | before anything else |
+| 0 | the card does not parse or has the wrong shape, or its plan snapshot breaks the snapshot rules (section 2) while its identity is readable | refusal `card_unreadable` | before anything else |
 | 1 | `_identity` refuses | refusal `plan_unidentifiable` | in any state, closed included |
-| 2 | `status == "closed"` and `_closed_problems(card)` is empty | `closed` | terminal; a source change is flag F7 |
+| 2 | `status == "closed"` and `_closed_problems(card)` is empty | `closed` | terminal; a source change is flag F7; a metadata change is F9, F10 or F12 (section 4.2) |
 | 3 | `status == "closed"` and problems remain | refusal `close_invalid` | the card was edited or an outside writer set the status (ledger); a person repairs it |
 | 4 | no plan (`_identity` is `None`) | `orient` | S0 |
 | 5 | a change is present (section 4.2 or 4.3) | section 4.4 decides: `plan` or `stopped` | the change rows |
@@ -292,7 +301,11 @@ Leading and trailing whitespace is stripped by `Ticket.from_mapping` on both sid
 whitespace, case and punctuation count. Why occurrences: a membership diff sees `["A", "A"]` and
 `["A"]` as the same set and falls through to "reordered", which names nothing a person can act on; the
 multiset diff names the extra or missing occurrence. A change to status, title, description, links or
-`updated_at` is a flag (F9, F10) and never a change.
+`updated_at` is never a change. The three the plan snapshot stores are compared explicitly against
+the fresh source and are flags, in this order: status (F9), update time (F10), title (F12). The update
+time is nullable: a time that appears where the snapshot stored none, one that disappears, and one
+that differs are each F10. Description and links are not stored, so they are not compared. The flags
+are read in every state, a closed card included, where they follow F7.
 
 ### 4.3 Card-side changes
 
@@ -311,7 +324,7 @@ source change would be. Its F11 lines stand alone: F1, F2, F3 and F6 are not add
 | S3 passed, rounds 3 | `stopped` | nothing | F3 |
 | S4 approved (outward go recorded) | as S3 by rounds | nothing | F2 or F3, plus F4 |
 | S5 capped | `stopped` | nothing | F5, plus F6 for a source change |
-| S6 closed, close validates | `closed` | nothing | F7 |
+| S6 closed, close validates | `closed` | nothing | F7 (source change); F9, F10, F12 (metadata change) |
 
 "Written: nothing" means nothing beyond the new pass's own claim; a join writes nothing, and a
 `stopped` or `closed` open takes no claim. F1, F2, F3 and F6 are produced only for a source change
@@ -327,10 +340,10 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 
 | Code | Meaning | Notes |
 |---|---|---|
-| `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | |
+| `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | the command names the installed script by its absolute path (the directory of `ticket.py` itself, as `SKILL.md` writes `${CLAUDE_SKILL_DIR}/ticket.py`), so it runs from the target repository |
 | `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
 | `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
-| `card_unreadable` | the card does not parse or has the wrong shape; on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |
+| `card_unreadable` | the card does not parse or has the wrong shape, including a plan snapshot that breaks the snapshot rules while its identity is readable (section 2); on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |
 | `close_invalid` | `status` is closed but the close does not validate | a valid card can only reach `closed` through the atomic close (D2), so an invalid close is an edit or an outside status write, and D4 says a corrupt card is refused, not resumed into a writable pass |
 | `stale` | the card changed since this pass last read or wrote it: a write refused under the held token, a fresh read whose token differs from the held one, or on the ledger a batch key already taken (`conflict`); the message names the newest writer when the store knows it (ledger) or says the card on disk changed (markdown) | the held token detects every change under a live pass at every write and every fresh read, so there is one code and one place that raises it |
 | `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | a permanent refusal is never reported as the retryable `stale` |
@@ -352,6 +365,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 - F9 `ticket status changed: {old} -> {new}`
 - F10 `ticket was updated since the plan card was written`
 - F11 `review round {N} reviewed other acceptance criteria than plan revision {M} on the card` / `the plan go of plan revision {M} approved other acceptance criteria than the card's plan`
+- F12 `ticket title changed: {old} -> {new}`
 
 `{what}` is the `; `-joined list from 4.2 alone: F11 lines (4.3) stand alone and are never part of
 `{what}`. F1, F2, F3 and F6 appear only when the ticket source differs from the stored criteria; a

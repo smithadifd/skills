@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import socket
 import stat
 import subprocess
@@ -46,6 +47,8 @@ CARD_SCHEMA = "ticket-card/v2"
 PLAN_SCHEMA = "ticket-plan-card/v2"
 MAX_REVIEW_ROUNDS = 3
 NO_TOKEN = "none"
+# The installed script, so a recovery command runs from the target repository.
+_SCRIPT = os.path.abspath(__file__)
 
 _SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -96,7 +99,7 @@ class TicketHeld(StoreUnavailable):
         super().__init__(
             f"ticket {key} has a live pass: id {live['id']}, host {live['host']}, started {live['started_at']}. "
             "Nothing was written. It ends when that pass closes the ticket or ends. If that session is gone, "
-            f"a person releases it with `python3 ticket.py release {key} {live['id']}` "
+            f"a person releases it with `python3 {shlex.quote(_SCRIPT)} release {key} {live['id']}` "
             "(add `--repo <path>` for a markdown card).",
             code="held",
         )
@@ -246,6 +249,8 @@ class PlanCard:
     def complete_step(self, name: str) -> None:
         step = self._step(name)
         step.status, step.skip = "complete", None
+        if name == "plan":
+            self.diff_statement = None
 
     def skip_step(self, name: str, reason: str | None, *, diff_statement: str | None = None) -> None:
         if not _is_text(reason):
@@ -510,6 +515,8 @@ def _validate_steps(plan: Mapping[str, Any]) -> None:
             diff = plan.get("diff_statement")
             if type(diff) is not str or not _one_sentence(diff.strip()):
                 raise TicketError("the plan may be skipped only for a one-sentence diff")
+        if not skipped and step["name"] == "plan" and "diff_statement" in plan:
+            raise TicketError("a plan snapshot carries a diff_statement only while the plan step is skipped")
 
 
 def _validate_tried(tried: Any) -> None:
@@ -590,6 +597,26 @@ def _check_card_shape(card: Any, key: str, where: str) -> None:
     for review in card["reviews"]:
         if type(review.get("round")) is not int:
             raise _unreadable(where, "a stored review has no whole-number round")
+    _check_plan_shape(card, key, where)
+
+
+def _check_plan_shape(card: Mapping[str, Any], key: str, where: str) -> None:
+    """Refuse a stored plan snapshot that breaks the section-2 shape, before any gate is derived.
+
+    A plan whose identity cannot be read is left to ``_identity``, which refuses it
+    as ``plan_unidentifiable``.
+    """
+
+    if card["plan"] is None:
+        return
+    try:
+        _identity(card)
+    except StoreUnavailable:
+        return
+    try:
+        _validate_plan(card["plan"], key)
+    except TicketError as exc:
+        raise _unreadable(where, f"its plan snapshot is not valid ({exc})") from exc
 
 
 def _fold_event(card: dict[str, Any], kind: str, value: Any) -> None:
@@ -782,13 +809,15 @@ def _f8(m: int) -> str:
 
 
 def _source_flags(plan: Mapping[str, Any], ticket: Ticket) -> list[str]:
-    """F9 and F10: status and update-time edits are flags, never changes."""
+    """F9, F10 and F12: status, update-time and title edits are flags, never changes."""
 
     flags = []
     if "ticket_status" in plan and plan["ticket_status"] != ticket.status:
         flags.append(f"ticket status changed: {plan['ticket_status']} -> {ticket.status}")
-    if "ticket_updated_at" in plan and plan["ticket_updated_at"] != ticket.updated_at:
+    if plan.get("ticket_updated_at") != ticket.updated_at:
         flags.append("ticket was updated since the plan card was written")
+    if plan["title"] != ticket.title:
+        flags.append(f"ticket title changed: {plan['title']} -> {ticket.title}")
     return flags
 
 
@@ -838,7 +867,8 @@ def _derive(card: Mapping[str, Any], ticket: Ticket, pass_id: str | None, key: s
                 code="close_invalid",
             )
         differences = _source_differences(identity[1], ticket.acceptance_criteria)
-        return "closed", [_f7("; ".join(differences))] if differences else [], identity
+        flags = [_f7("; ".join(differences))] if differences else []
+        return "closed", flags + _source_flags(card["plan"], ticket), identity
     if identity is None:
         return "orient", [], None
     revision = identity[0]

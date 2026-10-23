@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -253,9 +255,27 @@ def test_E11a_a_pass_holds_the_ticket_across_processes(repo):
     answer = json.loads(result.stdout)
     live = read_card(repo)["pass"]
     assert answer["code"] == "held"
-    for part in (live["id"], live["host"], live["started_at"], f"python3 ticket.py release {KEY} {first.pass_id}"):
+    release = f"python3 {SKILL_DIR / 'ticket.py'} release {KEY} {first.pass_id}"
+    for part in (live["id"], live["host"], live["started_at"], f"`{release}`"):
         assert part in answer["message"]
     assert card_bytes(repo) == before
+
+
+def test_E11f_the_held_refusal_command_runs_from_the_target_repository(repo, tmp_path):
+    first = open_pass(repo, Source())
+    result = _child_open(repo)
+    message = json.loads(result.stdout)["message"]
+    command = shlex.split(re.search(r"`(python3 [^`]*release [^`]*)`", message).group(1))
+    assert command[1] == str(SKILL_DIR / "ticket.py")
+    elsewhere = tmp_path / "target"
+    elsewhere.mkdir()
+    assert not (elsewhere / "ticket.py").exists()
+    released = subprocess.run(
+        [sys.executable, *command[1:], "--repo", str(repo)], cwd=elsewhere, capture_output=True, text=True, check=False
+    )
+    assert released.returncode == 0, released.stderr
+    assert read_card(repo)["pass"] is None
+    assert first.pass_id in message
 
 
 def test_E11b_join_refuses_an_id_that_is_not_the_live_pass(repo):

@@ -342,8 +342,8 @@ def test_G13_markdown_adapter_records_every_card_field(repo):
         "schema": "ticket-plan-card/v2", "key": KEY, "title": TITLE, "revision": 1, "pass": claim["id"],
         "criteria": [A, B],
         "steps": [{"name": "orient", "status": "complete"}, {"name": "research", "status": "skipped", "skip": "Known."},
-                  {"name": "plan", "status": "pending"}, {"name": "build", "status": "pending"},
-                  {"name": "review", "status": "pending"}, {"name": "outward", "status": "pending"}],
+                  {"name": "plan", "status": "skipped", "skip": "One sentence covers it."},
+                  {"name": "build", "status": "pending"}, {"name": "review", "status": "pending"}, {"name": "outward", "status": "pending"}],
         "diff_statement": "Add one guard.", "open_questions": ["Which flag?"],
         "ticket_status": "In Progress", "ticket_updated_at": "2026-10-17T14:30:00Z",
     }

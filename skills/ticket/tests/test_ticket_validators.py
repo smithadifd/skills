@@ -245,6 +245,46 @@ def test_I7_a_plan_card_that_breaks_the_step_rules_is_not_persisted(repo, fault)
     assert read_card(repo)["plan"] is None
 
 
+def test_I25_completing_a_skipped_plan_step_clears_its_diff(repo):
+    session = open_pass(repo, Source())
+    session.finish_orient()
+    session.finish_research()
+    plan = ticket.PlanCard(session.ticket)
+    plan.skip_step("plan", "One sentence covers it.", diff_statement="Add the guard.")
+    plan.complete_step("orient")
+    assert plan.diff_statement == "Add the guard."
+    plan.complete_step("plan")
+    assert plan.diff_statement is None
+    assert "diff_statement" not in plan.snapshot(1, "0123456789abcdef", session.ticket)
+    assert "Diff:" not in plan.render()
+    session.present_plan(plan)
+    stored = read_card(repo)["plan"]
+    assert "diff_statement" not in stored
+    assert {step["name"]: step["status"] for step in stored["steps"]}["plan"] == "complete"
+
+
+@pytest.mark.parametrize("status", ["pending", "complete"])
+def test_I26_a_diff_statement_on_a_plan_step_that_is_not_skipped_is_not_persisted(repo, status):
+    session = open_pass(repo, Source())
+    session.finish_orient()
+    session.finish_research()
+    plan = ticket.PlanCard(session.ticket)
+    real_snapshot = plan.snapshot
+
+    def broken_snapshot(*args):
+        value = real_snapshot(*args)
+        value["diff_statement"] = "Add the guard."
+        value["steps"][2]["status"] = status
+        return value
+
+    plan.snapshot = broken_snapshot
+    before = card_bytes(repo)
+    with pytest.raises(ticket.TicketError, match="diff_statement only while the plan step is skipped"):
+        session.present_plan(plan)
+    assert card_bytes(repo) == before
+    assert session.live is True
+
+
 TRIED = {"what": "Ran the suite.", "phase": "build"}
 
 I8_FAULTS = {
