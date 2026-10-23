@@ -549,3 +549,51 @@ def test_python_interpreter_options_before_dash_m_group_with_the_plain_tool():
     assert retro._tool("python script.py") == "python"
     assert retro._tool("python -c 'import x'") == "python"
     assert retro._tool("python -m pytest") == "pytest"
+
+
+def test_python_x_flag_group_with_the_plain_tool():
+    assert retro._tool("python -x -m pytest") == retro._tool("pytest") == "pytest"
+    assert retro._tool("python3 -Ix -m pytest -q") == "pytest"
+
+
+def test_attached_dash_m_module_groups_with_the_plain_tool():
+    assert retro._tool("python -mpytest") == retro._tool("pytest") == "pytest"
+    assert retro._tool("python3 -I -mpytest -q") == "pytest"
+
+
+def test_or_chains_name_the_last_segment_and_pipes_the_last_non_filter_stage():
+    plain = retro._tool("pytest")
+    for command in ("a || pytest", "a && b || pytest -q", "pytest | tail", "pytest -q 2>&1 | tail -5",
+                    "a && pytest | tee log", "a || pytest | tee log", "a | pytest", "cat x | pytest -q",
+                    "pytest | tee log"):
+        assert retro._tool(command) == plain, command
+    assert retro._tool("pytest || echo failed") == "echo"
+    assert retro._tool("ruff check . | head") == "ruff"
+    assert retro._tool("cat x | head") == "cat"
+
+
+def test_separators_inside_quotes_do_not_split():
+    assert retro._tool('grep "a|b" f') == "grep"
+    assert retro._tool("grep 'a && b' f") == "grep"
+    assert retro._tool('echo "x;y" | cat') == "echo"
+    assert retro._tool('cd d && grep "a||b" f') == "grep"
+
+
+def test_clustered_flags_through_m_group_with_the_plain_tool():
+    for command in ("python3 -Impytest", "python3 -xImpytest -q", "python3 -Im pytest"):
+        assert retro._tool(command) == "pytest", command
+
+
+def test_piped_and_plain_pytest_failures_are_one_candidate(tmp_path):
+    lines = []
+    for n, command in enumerate(("pytest -q", "a | pytest -q")):
+        lines.append({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"toolu_{n}", "name": "Bash", "input": {"command": command}}]}})
+        lines.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"toolu_{n}", "is_error": True,
+             "content": "Exit code 1\nFAILED tests/test_a.py::test_x"}]}})
+    path = tmp_path / "t.jsonl"
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    out = scan_file(path)
+    assert [(c["class"], c["count"]) for c in out["mechanical_candidates"]] == [
+        ("pytest:tests/test_a.py::test_x", 2)]
