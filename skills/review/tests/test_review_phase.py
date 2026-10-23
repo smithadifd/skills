@@ -1995,19 +1995,6 @@ def _one_call_seconds(scan, text: str) -> float:
     return time.perf_counter() - start
 
 
-def _best_seconds_per_call(scan, text: str, trials: int = 5, calls: int = 10) -> float:
-    """The fastest per-call time over several trials; one slow call ends it."""
-    best = float("inf")
-    for _ in range(trials):
-        start = time.perf_counter()
-        for _ in range(calls):
-            call = _one_call_seconds(scan, text)
-            if call > REDOS_LIMIT_SECONDS:
-                return call
-        best = min(best, (time.perf_counter() - start) / calls)
-    return best
-
-
 @pytest.mark.parametrize("scan", list(REFERENCE_SCANS))
 @pytest.mark.parametrize("token", list(LONG_TOKENS))
 def test_reference_scan_finishes_a_4000_character_token_within_a_second(scan, token):
@@ -2018,26 +2005,48 @@ def test_reference_scan_finishes_a_4000_character_token_within_a_second(scan, to
     )
 
 
-# The growth test sizes its inputs so a linear scan takes several milliseconds
-# (a 4000-character token takes well under one, where runner noise alone can
-# triple a timing). Each size is timed several times and the fastest call is
-# kept, since noise only ever adds time. The longer input is four times the
-# shorter, so a linear scan grows about four times and a quadratic one about
-# sixteen; the bound of eight sits between them.
+# The growth tests time spans of several milliseconds (a 4000-character token
+# takes well under one, where runner noise alone can triple a timing). The
+# reference scan gets there with long inputs. A pattern that was once
+# quadratic cannot be fed an input that long to prove the old form, so the
+# pattern tests keep their inputs short and repeat the call until one timed
+# span lasts GROWTH_WINDOW_SECONDS. Each size is timed several times and the
+# fastest per-call time is kept, since noise only ever adds time. The longer
+# input is four times the shorter, so a linear scan grows about four times and
+# a quadratic one about sixteen; the bound of eight sits between them.
 GROWTH_SHORT_LENGTH = 40_000
 GROWTH_LONG_LENGTH = 4 * GROWTH_SHORT_LENGTH
 GROWTH_REPETITIONS = 9
 GROWTH_RATIO_BOUND = 8
+GROWTH_WINDOW_SECONDS = 0.005
+
+
+def _span_seconds(scan, text: str, calls: int) -> float:
+    start = time.perf_counter()
+    for _ in range(calls):
+        scan(text)
+    return time.perf_counter() - start
 
 
 def _fastest_call_seconds(scan, text: str) -> float:
-    """The fastest of several single calls; one call over the limit ends it."""
+    """The fastest per-call time over several timed spans.
+
+    A span repeats the call until it lasts GROWTH_WINDOW_SECONDS (a single call
+    when one already does). A first call over the limit ends it, so a pattern
+    that is far too slow is not timed again.
+    """
+    calls = 1
     best = float("inf")
-    for _ in range(GROWTH_REPETITIONS):
-        call = _one_call_seconds(scan, text)
-        if call > REDOS_LIMIT_SECONDS:
-            return call
-        best = min(best, call)
+    span = _span_seconds(scan, text, calls)
+    while span < GROWTH_WINDOW_SECONDS:
+        best = min(best, span / calls)
+        calls *= 2
+        span = _span_seconds(scan, text, calls)
+    best = min(best, span / calls)
+    if calls == 1 and span > REDOS_LIMIT_SECONDS:
+        return span
+    for _ in range(GROWTH_REPETITIONS - 1):
+        best = min(best, _span_seconds(scan, text, calls) / calls)
     return best
 
 
@@ -2144,19 +2153,6 @@ def _timed_heading_match(line: str):
     return matched, time.perf_counter() - start
 
 
-def _best_heading_seconds(line: str, trials: int = 7, calls: int = 50) -> float:
-    """The fastest per-call time over several trials; one slow call ends it."""
-    best = float("inf")
-    for _ in range(trials):
-        start = time.perf_counter()
-        for _ in range(calls):
-            _, call = _timed_heading_match(line)
-            if call > HEADING_LIMIT_SECONDS:
-                return call
-        best = min(best, (time.perf_counter() - start) / calls)
-    return best
-
-
 def test_heading_match_finishes_the_3000_space_line_within_a_second():
     matched, elapsed = _timed_heading_match(THREE_THOUSAND_SPACE_LINE)
     assert elapsed <= HEADING_LIMIT_SECONDS, (
@@ -2193,16 +2189,24 @@ HEADING_GROWTH_SHAPES = {
 }
 
 
+# The earlier heading pattern took seconds on 2,000 spaces, so these lengths
+# stay small enough for that form to finish and fail the growth bound.
+HEADING_SHORT_LENGTH = 500
+HEADING_LONG_LENGTH = 4 * HEADING_SHORT_LENGTH
+
+
 @pytest.mark.parametrize("shape", list(HEADING_GROWTH_SHAPES))
 def test_heading_match_time_grows_linearly_with_line_length(shape):
-    shorter = _best_heading_seconds(HEADING_GROWTH_SHAPES[shape](3000))
+    match = review_phase._HEADING.match
+    shorter = _fastest_call_seconds(match, HEADING_GROWTH_SHAPES[shape](HEADING_SHORT_LENGTH))
     assert shorter <= HEADING_LIMIT_SECONDS, (
-        f"_HEADING took {shorter:.2f}s on the 3000-space {shape} line"
+        f"_HEADING took {shorter:.2f}s on the {HEADING_SHORT_LENGTH}-space {shape} line"
     )
-    longer = _best_heading_seconds(HEADING_GROWTH_SHAPES[shape](6000))
-    assert longer <= 3 * shorter, (
-        f"_HEADING on a {shape} line: doubling 3000 to 6000 spaces took "
-        f"{shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than three times"
+    longer = _fastest_call_seconds(match, HEADING_GROWTH_SHAPES[shape](HEADING_LONG_LENGTH))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"_HEADING on a {shape} line: quadrupling {HEADING_SHORT_LENGTH} to "
+        f"{HEADING_LONG_LENGTH} spaces took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
     )
 
 
@@ -2275,19 +2279,8 @@ def test_heading_forms_keep_main_titles(line, title):
 # patterns gave.
 
 
-def _best_match_seconds(pattern, line: str, trials: int = 7, calls: int = 50) -> float:
-    """The fastest per-call time over several trials; one slow call ends it."""
-    best = float("inf")
-    for _ in range(trials):
-        start = time.perf_counter()
-        for _ in range(calls):
-            call_start = time.perf_counter()
-            pattern.match(line)
-            call = time.perf_counter() - call_start
-            if call > HEADING_LIMIT_SECONDS:
-                return call
-        best = min(best, (time.perf_counter() - start) / calls)
-    return best
+VERDICT_SHORT_LENGTH = 3000
+VERDICT_LONG_LENGTH = 4 * VERDICT_SHORT_LENGTH
 
 
 VERDICT_GROWTH_CASES = [
@@ -2318,15 +2311,16 @@ VERDICT_GROWTH_CASES = [
     ids=[f"{name}-{shape}" for name, shape, _ in VERDICT_GROWTH_CASES],
 )
 def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
-    pattern = getattr(review_phase, name)
-    shorter = _best_match_seconds(pattern, build(3000))
+    match = getattr(review_phase, name).match
+    shorter = _fastest_call_seconds(match, build(VERDICT_SHORT_LENGTH))
     assert shorter <= HEADING_LIMIT_SECONDS, (
-        f"{name} took {shorter:.2f}s on the 3000-space {shape} line"
+        f"{name} took {shorter:.2f}s on the {VERDICT_SHORT_LENGTH}-space {shape} line"
     )
-    longer = _best_match_seconds(pattern, build(6000))
-    assert longer <= 3 * shorter, (
-        f"{name} on a {shape} line: doubling 3000 to 6000 spaces took "
-        f"{shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than three times"
+    longer = _fastest_call_seconds(match, build(VERDICT_LONG_LENGTH))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"{name} on a {shape} line: quadrupling {VERDICT_SHORT_LENGTH} to "
+        f"{VERDICT_LONG_LENGTH} spaces took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
     )
 
 
@@ -2633,20 +2627,25 @@ QUOTED_INPUT_SCAN_SHAPES = {
 }
 
 
+QUOTED_SHORT_UNITS = 8000
+QUOTED_LONG_UNITS = 4 * QUOTED_SHORT_UNITS
+
+
 @pytest.mark.parametrize("shape", list(QUOTED_INPUT_SCAN_SHAPES))
 def test_quoted_input_scan_time_grows_linearly(shape):
     scan = review_phase._has_duration_claim
-    shorter = _best_seconds_per_call(scan, QUOTED_INPUT_SCAN_SHAPES[shape](4000))
+    shorter = _fastest_call_seconds(scan, QUOTED_INPUT_SCAN_SHAPES[shape](QUOTED_SHORT_UNITS))
     assert shorter <= REDOS_LIMIT_SECONDS, (
-        f"the duration scan took {shorter:.2f}s on the 4000-unit {shape} review"
+        f"the duration scan took {shorter:.2f}s on the {QUOTED_SHORT_UNITS}-unit {shape} review"
     )
-    longer = _best_seconds_per_call(scan, QUOTED_INPUT_SCAN_SHAPES[shape](8000))
+    longer = _fastest_call_seconds(scan, QUOTED_INPUT_SCAN_SHAPES[shape](QUOTED_LONG_UNITS))
     assert longer <= REDOS_LIMIT_SECONDS, (
-        f"the duration scan took {longer:.2f}s on the 8000-unit {shape} review"
+        f"the duration scan took {longer:.2f}s on the {QUOTED_LONG_UNITS}-unit {shape} review"
     )
-    assert longer <= 3 * shorter, (
-        f"the duration scan on {shape}: doubling 4000 to 8000 units took "
-        f"{shorter * 1e3:.3f}ms to {longer * 1e3:.3f}ms, more than three times"
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"the duration scan on {shape}: quadrupling {QUOTED_SHORT_UNITS} to "
+        f"{QUOTED_LONG_UNITS} units took {shorter * 1e3:.3f}ms to "
+        f"{longer * 1e3:.3f}ms, more than {GROWTH_RATIO_BOUND} times"
     )
 
 
