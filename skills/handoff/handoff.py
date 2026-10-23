@@ -59,9 +59,22 @@ _PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
 ]
-_AUTH = re.compile(
-    r"(\bAuthorization\s*[:=]\s*)(?:Basic|Bearer|Token|Digest)\s+[^\s\"']+",
-    re.IGNORECASE,
+# An Authorization key: one of these names, case-insensitive, not run on from
+# or into a longer word (a letter, digit or underscore on either side makes
+# it part of another word; a dash does not, so X-Authorization and
+# Proxy-Authorization are keys through the plain name). A
+# letter or digit that ends a written escape (\n, \r, \t, \xHH, \uHHHH, all
+# lowercase) or a percent-encoded byte (%HH, %25HH) is a boundary. Only the
+# name is case-insensitive, so \N or \X0a is not an escape. No
+# separator is required, so prose mentions count as keys too. A section that
+# holds a key is redacted whole.
+# See references/authorization-redaction.md.
+_AUTH_KEY = re.compile(
+    r"(?:(?<![A-Za-z0-9_])"
+    r"|(?<=\\[nrt])|(?<=\\x[0-9A-Fa-f]{2})|(?<=\\u[0-9A-Fa-f]{4})"
+    r"|(?<=%[0-9A-Fa-f]{2})|(?<=%25[0-9A-Fa-f]{2}))"
+    r"(?i:(?:REDIRECT_HTTP_|HTTP_PROXY_|HTTP_)?AUTHORIZATION)"
+    r"(?![A-Za-z0-9_])",
 )
 _FLAG = re.compile(
     r"(--[A-Za-z0-9-]*(?:key|token|secret|password|passwd)[A-Za-z0-9-]*)(\s+|=)(?!-)(" + _VALUE + ")",
@@ -77,10 +90,15 @@ class NoteError(Exception):
 
 
 def redact(text):
-    """Replace secret-shaped strings with [REDACTED]."""
+    """Replace secret-shaped strings with [REDACTED].
+
+    text is one section (or the header). When it holds an Authorization key,
+    the whole of it is replaced by one marker.
+    """
+    if _AUTH_KEY.search(text):
+        return REDACTED
     for pattern in _PATTERNS:
         text = pattern.sub(REDACTED, text)
-    text = _AUTH.sub(lambda m: m.group(1) + REDACTED, text)
     text = _FLAG.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     text = _ASSIGN.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     text = _COLON.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
@@ -152,7 +170,8 @@ def build_note(content, repo, slug, now=None):
     for name in SECTIONS:
         body = SECRETS_TEXT if name == "Secrets" else _section_text(content.get(name))
         bodies[name] = redact(body)
-    head = redact(head)
+    # The blank line that ends the header is layout, not content.
+    head = redact(head.rstrip("\n")) + "\n\n"
     fixed = len(head.encode("utf-8")) + sum(
         len(("## %s\n\n\n\n" % n).encode("utf-8")) for n in SECTIONS)
     bodies, truncated, dropped = cap_bodies(bodies, fixed)
