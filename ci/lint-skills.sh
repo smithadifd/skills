@@ -133,11 +133,20 @@ for agent_file in agents/*.md; do
 done
 
 # A skill runs its scripts from its own directory so both install paths work.
-for skill_doc in skills/*/SKILL.md skills/*/references/*.md; do
-  [ -f "$skill_doc" ] || continue
-  if grep -nF '.claude/skills/' "$skill_doc"; then
-    lint_fail skill-path "$skill_doc hard-codes .claude/skills/; call scripts through \${CLAUDE_SKILL_DIR}"
+check_skill_path() {
+  if grep -naF '.claude/skills/' "$1"; then
+    lint_fail skill-path "$1 hard-codes .claude/skills/; call scripts through \${CLAUDE_SKILL_DIR}"
   fi
+}
+for skill_doc in skills/*/SKILL.md; do
+  [ -f "$skill_doc" ] || continue
+  check_skill_path "$skill_doc"
+done
+for refs_dir in skills/*/references; do
+  [ -d "$refs_dir" ] || continue
+  while IFS= read -r -d '' ref_file; do
+    check_skill_path "$ref_file"
+  done < <(find "$refs_dir" -type f -print0)
 done
 
 # Unprefixed commands: only the two manifests carry the plugin name.
@@ -181,32 +190,55 @@ else
     own_url="github.com/$OWNER/$REPO"
   fi
   # Cut only the repository's own URL text out of each line (a literal,
-  # case-insensitive match that must end at a boundary: end of line, a path
-  # or query separator, .git, whitespace, a quote or a closing bracket), then
-  # apply the deny expression to what is left, so a denied term elsewhere on
-  # the same line is still found. Every stage reads bytes as text (-a, the C
-  # locale, NUL turned into a space) so a tracked binary file is scanned too.
-  # Print only path:line; the matched text could be the denied term itself.
-  if git ls-files -z -- ':!LICENSE*' | LC_ALL=C xargs -0 grep -naH -e '' |
-    LC_ALL=C tr '\000' ' ' |
-    LC_ALL=C awk -v url="$own_url" '
-      BEGIN {
-        u = tolower(url)
-        ure = u
-        gsub(/\./, "\\.", ure)
-        re = ure "(\\.git)?([]/#?\"\047)>,;: \t]|\\.($|[ \t])|$)"
-      }
-      {
-        out = ""
-        rest = $0
-        while (u != "" && match(tolower(rest), re)) {
-          out = out substr(rest, 1, RSTART - 1)
-          rest = substr(rest, RSTART + length(u))
+  # case-insensitive match that starts at a host boundary: line start,
+  # whitespace, an opening bracket or quote, "://" or "@"; and ends at a
+  # boundary: end of line, a path or query separator, .git, whitespace, a
+  # quote or a closing bracket), then apply the deny expression to what is
+  # left, so a denied term elsewhere on the same line is still found. Every
+  # stage reads bytes as text (-a, the C locale, NUL turned into a space) so
+  # a tracked binary file is scanned too.
+  # A file that cannot be read, or a failing stage, fails the step.
+  scan_tracked() {
+    local f rc=0
+    while IFS= read -r -d '' f; do
+      [ -d "$f" ] && continue
+      LC_ALL=C grep -naH -e '' -- "$f"
+      # Status 1 is an empty file; anything above is a read error.
+      [ "$?" -le 1 ] || rc=1
+    done < <(git ls-files -z -- ':!LICENSE*')
+    return "$rc"
+  }
+  scan_text() {
+    scan_tracked | LC_ALL=C tr '\000' ' ' |
+      LC_ALL=C awk -v url="$own_url" '
+        BEGIN {
+          u = tolower(url)
+          ure = u
+          gsub(/\./, "\\.", ure)
+          re = "(^|[ \t(<\"\047`@]|://)" ure "(\\.git)?([]/#?\"\047)>,;: \t]|\\.($|[ \t])|$)"
         }
-        print out rest
-      }' |
-    LC_ALL=C grep -aiE -e "$NO_PERSON_DENY" | LC_ALL=C cut -d: -f1,2 | sed 's/^/denied term at /' | grep .; then
+        {
+          out = ""
+          rest = $0
+          while (u != "" && match(tolower(rest), re)) {
+            start = RSTART + index(substr(tolower(rest), RSTART, RLENGTH), u) - 1
+            out = out substr(rest, 1, start - 1)
+            rest = substr(rest, start + length(u))
+          }
+          print out rest
+        }'
+  }
+  scan_out=$(scan_text)
+  scan_status=$?
+  # Print only path:line; the matched text could be the denied term itself.
+  deny_hits=$(printf '%s\n' "$scan_out" | LC_ALL=C grep -aiE -e "$NO_PERSON_DENY" |
+    LC_ALL=C cut -d: -f1,2 | sed 's/^/denied term at /')
+  if [ -n "$deny_hits" ]; then
+    printf '%s\n' "$deny_hits"
     lint_fail no-person-deny 'a tracked file carries a denied term (locations above)'
+  fi
+  if [ "$scan_status" -ne 0 ]; then
+    lint_fail no-person-deny-scan 'the deny-list scan could not read every tracked file'
   fi
 fi
 
