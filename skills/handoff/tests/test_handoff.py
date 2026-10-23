@@ -280,6 +280,17 @@ def test_token_straddling_the_header_limit_leaves_no_bytes_in_the_note():
     assert "QZQZ" not in note and "ghp_" not in note
 
 
+def test_token_straddling_the_repo_limit_is_redacted_before_the_cut():
+    # No Authorization key, so the header stays a header; the token is
+    # replaced before the field is shortened, so no piece of it survives.
+    token = "sk-" + "Zk9" * 8
+    repo = "r" * (handoff.HEADER_FIELD_MAX - 12) + " " + token
+    note, _ = handoff.build_note({"Goal": "g"}, repo, "s")
+    first = note.split("\n", 1)[0]
+    assert first.startswith("# Handoff: ") and first.endswith(" / s")
+    assert "Zk9" not in note and "sk-" not in note
+
+
 NEWLINE_SECRET = 'PASSWORD="hunter2\nsecretpart"'
 
 
