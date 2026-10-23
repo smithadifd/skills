@@ -173,15 +173,23 @@ def build_note(content, repo, slug, now=None):
     """Render the note. Returns (text, truncated). Every section is always
     present; when the note is too large, section bodies are cut, never headings."""
     now = now or datetime.now(timezone.utc)
-    repo, slug = (_bound(redact(_oneline(v))) for v in (repo, slug))
-    head = "# Handoff: %s / %s\n\nWritten: %s\n\n" % (
-        repo, slug, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    repo, slug = (_oneline(v) for v in (repo, slug))
+    if _AUTH_KEY.search(repo) or _AUTH_KEY.search(slug):
+        # A field that holds a key makes the whole header one marker. It is
+        # judged on the full field, so a key beyond the cut still counts.
+        head = REDACTED
+    else:
+        # Each field is redacted before it is cut, so the cut can never leave
+        # a piece of a secret the patterns no longer recognise.
+        repo, slug = (_bound(redact(v)) for v in (repo, slug))
+        head = redact("# Handoff: %s / %s\n\nWritten: %s" % (
+            repo, slug, now.strftime("%Y-%m-%dT%H:%M:%SZ")))
+    # The blank line that ends the header is layout, not content.
+    head += "\n\n"
     bodies = {}
     for name in SECTIONS:
         body = SECRETS_TEXT if name == "Secrets" else _section_text(content.get(name))
         bodies[name] = redact(body)
-    # The blank line that ends the header is layout, not content.
-    head = redact(head.rstrip("\n")) + "\n\n"
     fixed = len(head.encode("utf-8")) + sum(
         len(("## %s\n\n\n\n" % n).encode("utf-8")) for n in SECTIONS)
     bodies, truncated, dropped = cap_bodies(bodies, fixed)
