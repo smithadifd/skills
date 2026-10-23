@@ -1,29 +1,32 @@
-# `ticket`: the rule note (fresh design, after design pass 1)
+# `ticket`: the rule note
 
-Status: design, before any code. The build is checked against `test-matrix.md`, not discovered by review.
+The code is checked against `test-matrix.md`: every behavior here maps to a named test.
 Scope: `skills/ticket/` (the pass, the plan identity, resume, both stores). The ledger CLI it relies on
 is the toolkit's, at the version that has `append --expect-revision` and `append-many`.
+Only the markdown store is built in this release. The ledger store (section 6.2, matrix section H) is
+specified for a later part: a configured `TICKET_LEDGER_CLI` is refused with `ledger_store_unavailable`
+(section 4.5, 6.3).
 
-## 0. Why the first build never converged, and the four decisions that end it
+## 0. The four decisions behind the resume and plan-identity rules
 
-Six review rounds each fixed one finding in the resume and plan-identity rules and the next round found
-another. Reading them together, every finding came from one of four shapes:
+Resume and plan identity go wrong in four ways, and each of the decisions below removes one of them
+rather than guarding it:
 
 1. **Several copies of "which plan is this".** The plan revision lived in the session, on the card, on
    each review, on each go decision, and each check compared a different pair of them (the session's
-   cached revision, the card's revision, a subset of criteria, the source's criteria). Each round bound
-   one more pair.
+   cached revision, the card's revision, a subset of criteria, the source's criteria). Each added check
+   binds one more pair.
 2. **Half-written states.** A step was two or three store writes (review, then plan snapshot, then stop
    stamp; pending close stamp, then read-back, then confirm). A crash between writes needed its own
    resume state (`outward_stop`, `cap_stop`, "unconfirmed close") and each of those needed its own
-   rules and messages, and each got a finding.
+   rules and messages.
 3. **Trust read from mutable copies.** `passes` on the plan snapshot was a copy of what a review said,
    so it had to be re-verified against the review at every point of reliance, and the check could be
    skipped at one of them.
 4. **Fail-open on a malformed card.** A stored plan that could not be read became a "change" or a
    revision 0.
 
-The fresh design removes each shape rather than guarding it:
+The decisions:
 
 - **D1. One plan identity, compared by equality.** The identity of a plan is `(revision, criteria)`:
   a whole number and the ordered criterion texts. Every record that relies on a plan (a review, a plan
@@ -107,8 +110,8 @@ atomic with `append-many --expect-revision`.
 
 - A **go decision** is a decision with `gate`, `plan_revision`, `criteria`, `who_kind: person`,
   `standing: settled`, `source.what: ratification`, and a `ticket` tag naming the key. A plan go also
-  carries `pass`, the id of the pass that presented that plan (section 3.4). The old practice of
-  matching the `effect` sentence is gone; `effect` is prose for people.
+  carries `pass`, the id of the pass that presented that plan (section 3.4). A go is never
+  recognized by matching the `effect` sentence; `effect` is prose for people.
 - **Stamps** are the human trail and the resume card: the point text, next skills and references at
   each stop. The derived state never depends on a stop stamp (D2 writes each stamp in the same `apply`
   as the record it describes, so a stamp is never missing). The one stamp the state reads is the close
@@ -295,7 +298,7 @@ multiset diff names the extra or missing occurrence. A change to status, title, 
 
 A review or plan go whose `plan_revision == I.revision` but which does not cover `I` means the card's
 plan was edited after that record. It is a change with flag F11 (one line per record), handled as a
-source change would be. Records of other revisions are history and cover nothing; they are not flags.
+source change would be. Its F11 lines stand alone: F1, F2, F3 and F6 are not added for it. Records of other revisions are history and cover nothing; they are not flags.
 
 ### 4.4 What a change does, by state
 
@@ -303,12 +306,17 @@ source change would be. Records of other revisions are history and cover nothing
 |---|---|---|---|
 | S1 presented (no go) | `plan` | nothing | F1 |
 | S2 building, rounds 0–2 | `plan`; the stored rounds count toward the cap | nothing | F1 |
-| S2 building, rounds 3 | `stopped`; the pass is not live | nothing | F1, F5 |
+| S2 building, rounds 3 | `stopped`; the pass is not live | nothing | F5, F6 |
 | S3 passed, rounds 1–2 | `plan`; the passing round stays as history | nothing | F2 |
 | S3 passed, rounds 3 | `stopped` | nothing | F3 |
 | S4 approved (outward go recorded) | as S3 by rounds | nothing | F2 or F3, plus F4 |
-| S5 capped | `stopped` | nothing | F5, F6 |
+| S5 capped | `stopped` | nothing | F5, plus F6 for a source change |
 | S6 closed, close validates | `closed` | nothing | F7 |
+
+"Written: nothing" means nothing beyond the new pass's own claim; a join writes nothing, and a
+`stopped` or `closed` open takes no claim. F1, F2, F3 and F6 are produced only for a source change
+(section 4.6); a card-side change alone yields its F11 lines (section 4.3). S2 at three rounds has no
+passing final review, so it is S5: its flags are F5 and F6, not F1.
 
 A change at S1–S4 below the cap sends the pass to `plan`: it presents revision N+1 with the source's
 criteria, and that revision needs its own plan go and its own review rounds. Rounds already stored
@@ -317,16 +325,17 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 
 ### 4.5 Refusal codes
 
-| Code | Meaning | Kept or changed |
+| Code | Meaning | Notes |
 |---|---|---|
-| `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | kept |
-| `pass_ended` | this handle's pass has ended; nothing was written | kept |
-| `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | kept; now also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
-| `card_unreadable` | the card does not parse or has the wrong shape; on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | new code on an existing refusal (it had none) |
-| `close_invalid` | `status` is closed but the close does not validate | new. The old design flagged this and resumed before close. Under D2 a valid card can only reach `closed` through the atomic close, so an invalid close is an edit or an outside status write, and D4 says a corrupt card is refused, not resumed into a writable pass |
-| `stale` | the card changed since this pass last read or wrote it: a write refused under the held token, a fresh read whose token differs from the held one, or on the ledger a batch key already taken (`conflict`); the message names the newest writer when the store knows it (ledger) or says the card on disk changed (markdown) | new; replaces `plan_changed` and `review_changed`. Both meant "the card changed under a live pass"; the held token detects every such change at every write and every fresh read, so there is one code and one place that raises it |
-| `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | new. These were read as `stale` before, which hid a permanent refusal behind a retryable one |
-| `ledger_incompatible` | the selected ledger CLI lacks `append-many` or `--expect-revision`, or answers `usage` to a command the store sends | replaces `ledger_unsupported`, since the ledger store is now supported |
+| `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | |
+| `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
+| `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
+| `card_unreadable` | the card does not parse or has the wrong shape; on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |
+| `close_invalid` | `status` is closed but the close does not validate | a valid card can only reach `closed` through the atomic close (D2), so an invalid close is an edit or an outside status write, and D4 says a corrupt card is refused, not resumed into a writable pass |
+| `stale` | the card changed since this pass last read or wrote it: a write refused under the held token, a fresh read whose token differs from the held one, or on the ledger a batch key already taken (`conflict`); the message names the newest writer when the store knows it (ledger) or says the card on disk changed (markdown) | the held token detects every change under a live pass at every write and every fresh read, so there is one code and one place that raises it |
+| `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | a permanent refusal is never reported as the retryable `stale` |
+| `ledger_incompatible` | the selected ledger CLI lacks `append-many` or `--expect-revision`, or answers `usage` to a command the store sends | |
+| `ledger_store_unavailable` | `TICKET_LEDGER_CLI` selects the ledger store, which this release does not include; nothing was read or written | raised by store selection and by the `release` command (which exits 2) |
 
 `GateRequired` (a `TicketError`) stays for a step taken before its go.
 
@@ -344,7 +353,10 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 - F10 `ticket was updated since the plan card was written`
 - F11 `review round {N} reviewed other acceptance criteria than plan revision {M} on the card` / `the plan go of plan revision {M} approved other acceptance criteria than the card's plan`
 
-`{what}` is the `; `-joined list from 4.2 (and 4.3). F2 and F3 are produced only when the last review
+`{what}` is the `; `-joined list from 4.2 alone: F11 lines (4.3) stand alone and are never part of
+`{what}`. F1, F2, F3 and F6 appear only when the ticket source differs from the stored criteria; a
+card-side change with an unchanged source produces its F11 lines (and F5 at the cap, F4 after an
+outward go) and nothing else. F2 and F3 are produced only when the last review
 passes and covers `I`; with an earlier revision's passing round as the last review, F1 is produced
 (the second-edit case). No flag ever says the card lacks a round it holds.
 
@@ -355,7 +367,9 @@ passes and covers `I`; with an earlier revision's passing round as the last revi
 - `require_outward_go()` reads fresh, requires the token equal to the held one (else refusal `stale`,
   before anything else) and `_has_go(card, "outward", I)`; it is called before each outward action.
 - `approved(gate)` reads fresh, requires the token equal to the held one (else refusal `stale`) and
-  returns `_has_go`.
+  returns `_has_go`. The outward gate answers true only while the live phase is `outward_go`: once a
+  change has sent the pass back to `plan`, the stored outward go reads false (F4), even though the
+  card still holds it. The plan gate returns `_has_go` as written.
 - A `TicketError` (wrong phase, invalid value, `GateRequired`) writes nothing and leaves the pass
   live. Any other exception past validation (a store read or write failure, `held`, `stale`,
   `ledger_refused`) ends the pass and releases its claim, then re-raises. A failed release leaves the
@@ -395,7 +409,9 @@ value (`TicketError`, nothing written). The `token` passed to `apply` is always 
 - **Token**: SHA-256 of the canonical JSON (`sort_keys`, compact separators) of the card as loaded;
   `none` when the file does not exist.
 - **`apply`**: take the handle's thread lock, then an exclusive `flock` on the lock file (opened with
-  `O_NOFOLLOW` through a directory fd; a lock path that is not a regular file is refused untouched);
+  `O_NOFOLLOW` through a directory fd; a lock path that is not a regular file is refused untouched;
+  creating the lock file through the directory retries up to five attempts on `ENOENT`, because two
+  first writers creating it at the same moment can see that error);
   load; compute the token; refuse `stale` if it differs from the expected (held) one; check the claim
   (`_check_pass`: a bound handle writes only while its pass is live, an unbound handle only while none
   is); fold the events; write a temporary file beside the card and rename it into place; return the
@@ -562,21 +578,18 @@ refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once
   random key and cannot match. The card-level checks of `_closed_problems` then run as for markdown.
 - **Capability**: at store selection the store runs the CLI's `append-many --help` and refuses
   `ledger_incompatible`, before any write, unless it exits 0 and names `--expect-revision`.
-- **Does `append-many` replace the two-append close?** Yes. SK1b's two-append close (stamp at `R`,
-  then state at `S` keyed by S's id) was correct but left an orphan pending-close stamp possible
-  between the two, with its own resume rule and a fresh-stamp rule on retry; `append-many` removes
-  the window, the orphan state and the second key form. The claim batch, the review batch and the
-  close batch all use it, which is what makes D2 hold on the ledger. This design therefore depends on
-  SK18 being merged in the toolkit before the ledger half is built (it is approved; its merge line was
-  pending when this note was written). If it is not, the ledger half falls back to SK1b's sequence
-  (`references/ledger-concurrency.md` at that branch) with its orphan-stamp resume rows; the markdown
-  half does not depend on it.
+- **The close is one conditional batch append.** The claim batch, the review batch and the close batch
+  all use `append-many`: the close lands the stamp and the state together under `--expect-revision`,
+  so no stamp is ever left without its state, and that is what makes D2 hold on the ledger. The ledger
+  store requires a ledger CLI that has `append-many` and `--expect-revision`; the capability probe
+  above refuses `ledger_incompatible` otherwise. The markdown store does not depend on it.
 
 ### 6.3 Store selection
 
 `choose_store(repo, key, title)`: the ledger store when `TICKET_LEDGER_CLI` names an executable (after
 the capability probe), else the markdown store. An empty value counts as unset. The `release` command
-selects the same way.
+selects the same way. In this release a non-empty selector is refused with `ledger_store_unavailable`
+before anything is read or written, and the `release` command exits 2.
 
 ## 7. Non-goals
 
@@ -585,134 +598,7 @@ selects the same way.
 - Reopening a closed ticket, or undoing outward actions, on a change.
 - Repairing a corrupt card (an unidentifiable plan, an invalid close, an unreadable block). A person
   does it.
-- Migrating v1 cards: the skill is unreleased, no card exists.
+- Migrating cards of an earlier schema: none exists.
 - A fourth review round.
 - Defending the card against a writer that forges the store's own record shapes (a go decision, a
   close key, a framed ticket note). The store is what the skill trusts.
-
-## 8. Findings accounted for
-
-One line each: round and lane, file:line at that head, the finding, and the rule or matrix row that
-now covers it (or why it is out of scope). Workspace review files are cited by basename only.
-
-### 8.1 The markdown build, rounds 1–6
-
-| # | Round, lane (file) | At head | Finding | Covered by |
-|---|---|---|---|---|
-| 1 | r1 Sol, pre-tier (pr-60-sol-r1.result.output.md) | ticket.py:860 | a literal `-->` in recorded text closes the HTML comment | 6.1 escaping; matrix G10 |
-| 2 | same | ticket.py:964 | close checked only the round count; a final `changes` review still closed | 3.3: close is reachable only at `outward_go` with the go, under the token; `_closed_problems` on every later read; F2, F3, F5 |
-| 3 | same | ticket.py:1240 | three reviews read as stopped without the cap stamp; no retry path | D2: round 3 and its stamp are one write; the state never reads the stamp; A5.0, E8 |
-| 4 | r1 Claude, pre-tier (pr-60-claude-empirical-r1.output.md) | ticket.py:882 | `TICKET_LEDGER_CLI=""` counts as unset, untested | 6.3; I20 |
-| 5 | same | ticket.py:775-784 | `release_pass` marks the handle ended before taking the lock | 5: the release is unconditional and fail-closed; G8 |
-| 6 | r1 Sol (pr-60-sol-r1.result.output.md, tier) | ticket.py:497 | plan steps not validated at persistence | I7 |
-| 7 | same | ticket.py:586 | `_depth` shared across threads bypassed `flock` | 6.1 thread lock; G3 |
-| 8 | r1 Claude (pr-60-claude-empirical-r1.output.md, tier) | ticket.py:1273 | `outward_stop` trusted a passing round of another plan revision | D1: a review covers only its identity; D2 removes `outward_stop`; A3.1, B1 |
-| 9 | same | ticket.py:1499 | M4: `_verified` in `record_outward_stop` unreached | removed by construction (D2, D3): no `record_outward_stop`, no `passes` copy |
-| 10 | same | ticket.py:997 | M6: the outward-stamp clause of close untested | removed by construction: the state does not read stop stamps; the close checks records (F1–F6) |
-| 11 | same, minor | SKILL.md:226-227 | which call flips `passes` | D3: nothing flips `passes`; it is derived |
-| 12 | same, minor | ticket.py:1289-1296 | "only an edited card" message reached without an edit | 4.6: no such message exists; F5 names the cap, F2/F3 name the change |
-| 13 | r2 Sol (pr-60-sol-r2.result.output.md) | ticket.py:538 | `diff_statement` stringified; `123` persisted | I7 (uncoerced) |
-| 14 | same | ticket.py:1544 | relabelled `plan_revision` on the stored review still authorized outward work | D1 coverage by full identity at every reliance; D2 token; F2, E6 |
-| 15 | r2 Claude (pr-60-claude-empirical-r2.output.md), minor | ticket.py:225-226 | docstring on which call flips `passes` | D3 |
-| 16 | same, minor | ticket.py:1328-1348 | wrong cap message when round 3 passed an earlier plan | F5 is the one cap text; A5.1 |
-| 17 | same, minor | ticket.py:1543 | `KeyError` on a review without `round` | 2: a review without an integer `round` is `card_unreadable`; C13 |
-| 18 | r3 Sol (pr-60-sol-r3.result.output.md) | ticket.py:1121 | `_review_problems` used the session's cached revision and a subset of criteria; a deleted criterion resumed closed | D1 (`_covers`), 3.2 rows 2–3, `close_invalid`; D1–D6, F3 |
-| 19 | r3 Claude (pr-60-claude-empirical-r3.output.md) | ticket.py:1673 | the release decorator on `require_outward_go` untested (M22) | 4.7; E9 |
-| 20 | same, minor | ticket.py:514 / :179 | `Ticket.from_mapping` accepts an empty title, which then fails `present_plan` | I1: the source refuses an empty title |
-| 21 | same, minor | ticket.py:1641-1642 | a review without a whole-number round left a live pass with no way forward | C13 (`card_unreadable`, pass ends) |
-| 22 | same, minor | — | M8, M20, M21 equivalent mutants | the coerced form and the `isinstance` swaps do not exist in the new code |
-| 23 | r4 Claude (pr-60-claude-empirical-r4.output.md) | ticket.py:1367 | resume compared the card with the source; a reorder was not a change; a closed ticket reopened | D1, 4.2 (reorder is a change), 3.2 row 2 (closed stays closed); A6.1–A6.4, A3.1 |
-| 24 | same | ticket.py:1433 | D8: resume compared the card with its own texts, all green | A3.1 (source reorder), D3 (card and source reordered alike) |
-| 25 | same | ticket.py:1125 | D5: the revision `type is int` check removable | C2, C3, I12 |
-| 26 | same, minor | ticket.py:179, :1670 | the two round-3 NITs | #20, #21 |
-| 27 | design pass Sol (SK1a-design-1, diff-sol-r1.result.output.md) | resume-plan-identity.md:50 | the plan go was not bound to criteria before any review existed (SECURITY) | D1: a plan go carries its identity; `_has_go` requires coverage; D1, D2, E4 |
-| 28 | same | resume-plan-identity.md:29 | a malformed stored identity was a flag, not fail-closed | D4, 3.1; C1–C13 |
-| 29 | r5 Sol (pr-60-sol-r5.result.output.md) | ticket.py:1517 | `if stored:` let `{}`, `[]`, `""` resume at revision 0 | 3.1: only `None` is "no plan"; C1 |
-| 30 | r6 Sol (pr-60-sol-r6.result.output.md) | ticket.py:1518 | fixed; no regression | — |
-| 31 | r6 Claude, its round 5 on b46f2a2..a03c71d (pr-60-claude-empirical-r5.output.md) | ticket.py:1659 | M20: `held` without `plan_revision == revision`; a second source edit after a re-presented plan named the wrong round; at the cap it stopped without the stamp | 4.6 last paragraph; B1, B2, B3 |
-| 32 | same, minor | — | M21, M29, M30 equivalent (card texts versus held texts at resume) | the pass has no separate held texts: `I` is the card's |
-
-### 8.2 The ledger design passes (the close sequence)
-
-| # | Pass (file) | At | Finding | Covered by |
-|---|---|---|---|---|
-| 33 | SK1-design (diff-sol-r1.result.output.md) | ledger-concurrency.md:14 | adjacency alone let an outside `closed` pass as this pass's close | 6.2 trust: keys bind stop and state to pass and token; H8, H9 |
-| 34 | SK1-design-2 | :15 | a retry after a committed append looked stale | 6.2 ambiguous outcomes: keys are checked before the revision; H5 |
-| 35 | SK1-design-2 | :22 | an unparseable response does not prove nothing was written | 6.2: resolve by the batch's last key; H6, H7 |
-| 36 | SK1-design-3 | :15 | two handles at one revision shared a key | 6.2 request token per `apply`; H4 |
-| 37 | SK1-design-4 | :12 | CAS did not enforce pass ownership | 6.2: claim check on the read, CAS makes it hold; H3 |
-| 38 | SK1-design-4 | :14 | two close-key forms | 6.2: one pair of keys with the close token; H8 |
-| 39 | SK1-design-4 | :14 | a later `item.stopped` after the close still trusted | 6.2: S must be the latest stop; H11 |
-| 40 | SK1-design-4 | :23 | the invariant contradicted the unconditional release | 5, 6.2: release exempt from token and ownership; H13, H14 |
-| 41 | SK1-design-5 | :26 | resume claimed before validating, invalidating every close | 4.1: derive before claim; closed is never claimed; H15 |
-| 42 | SK1-design-6 | :26 | unbalanced pass pairs after a close | trust reads no pass records (the export hides them); H12 |
-| 43 | SK1-design-7 | :49 | the test matrix contradicted the rule on post-close pairs | no post-close bookkeeping condition exists; H12 |
-| 44 | SK1-design-8 | :26 | requiring the closing pass's release before a valid close failed every normal close | 3.3: the close has no read-back; the release follows and is not a trust condition; H2, H13 |
-| 45 | SK1b-design-1 (diff-sol-r1.result.output.md) | ledger-concurrency.md:26 | the ownership check refused the release after a close; "nothing else is written" forbade the error-exit release | 6.2 release exempt and best-effort after every close attempt; H13, H14 |
-
-### 8.3 The earlier code reviews of the first ledger build (PR 39)
-
-| # | Round, lane (file) | At head | Finding | Covered by |
-|---|---|---|---|---|
-| 46 | r1 Sol (pr-39-sol-r1.result.output.md) | ticket.py:1053 | an event between the revision check and `session.opened` left an orphan claim | 5: the claim is one conditional append; H1 |
-| 47 | same | ticket.py:1143 | the close overwrote an interleaved state and resumed closed | 6.2: the close is one conditional batch carrying the state read at `R`; H2, H10 |
-| 48 | r2 Sol (pr-39-sol-r2.result.output.md) | ticket.py:1182 | `_void_close` overwrote a newer state | removed by construction: no void, no restore |
-| 49 | r3 Sol (pr-39-sol-r3.result.output.md) | ticket.py:1194, :1188 | the note-only repair confirmed a later retry; the void named the wrong event | removed by construction: a refused close writes nothing (H2) |
-| 50 | r2 Claude (pr-39-claude-empirical-r2.output.md) | ticket.py:1426, :1776 | the `close_voided` clauses untested | removed by construction |
-| 51 | r1 Claude (pr-39-claude-empirical-r1.output.md) | — | none; the caller can write its own decision record | 7, last non-goal |
-
-### 8.4 Out of scope
-
-- Review-runner residuals named in the status lines (a `— NIT.` line refused as unparseable; two
-  verdict blocks in one transcript): tooling, not this skill.
-- #22 and #32: the equivalent mutants named by reviewers; the code they mutated does not exist here.
-
-Totals: 51 findings listed; 45 covered by a rule and matrix rows, 6 removed by construction (#9, #10,
-#48, #49, #50 and the coerced form in #22), none left open.
-
-## 9. Open questions for the owner
-
-1. The ledger half depends on SK18 (`append-many`) being merged in the toolkit before it is built.
-   Confirm that order, or accept the SK1b fallback for the ledger half (section 6.2, last bullet).
-2. A closed card that no longer validates is now a refusal (`close_invalid`) rather than a resume
-   before close with a flag (section 4.5). The recommendation is the refusal: it is fail-closed and
-   only an edit or an outside status write can produce that card.
-3. The plan snapshot drops `passes`, `review_evidence` and `review_round` (D3) and the plan-card
-   schema moves to `ticket-plan-card/v2`. Nothing consumes v1; confirm there is no other reader.
-4. On the ledger, the first claim on an item with no events creates the item (`item.created`, type
-   `ticket`, section 6.2). The recommendation is to keep it: every `item.note` the pass writes needs
-   the item to exist, and creating it at the claim keeps the ticket skill's first write one batch.
-   The alternative is to refuse `ledger_refused` until another tool has created the item.
-
-## 10. Design pass 1 findings
-
-One line per finding of the second-family design pass on the v1 note: the rule that now covers it and
-the matrix rows that test it.
-
-1. **Ledger mapping (v1 :356).** Settled within the skill: every ticket-specific record is a framed
-   `item.note` (6.2.3), no event cites another, and 6.2.1–6.2.2 list every written kind and field
-   against the schema; `decision.recorded`, `review.recorded` and `outside.recorded` are no longer
-   written. Rows H18 (changed), H23, H24, H25, H26, H27.
-2. **Exit codes (v1 :373).** Rule 6.2.4: the store reads `error.code`, maps `stale_revision` and
-   `conflict` to `stale`, every other listed code to the permanent `ledger_refused` (or
-   `ledger_incompatible` for `usage`), and resolves `error`, `unusable` and unknown answers by the
-   batch key. Rows H1, H2, H4, H13, H20, H22 (changed to name codes), H28, H29, H30, H31, H32.
-3. **Derived versus live state (v1 :158).** D2 and 3.2b separate the resume state from the live
-   phase; `finish_orient`, `finish_research` and `begin_build` are in-memory only; the 3.3 table gives
-   each step its live phase and what a resume derives after it (a recorded plan go resumes at `build`
-   and `begin_build` is live-only). Rows A2.0a, E17, E21, E22.
-4. **Held token (v1 :159).** 3.3, 3.5 and 4.7: every write carries the held token, every fresh read
-   is compared with it before validation, and the pair advances only after a successful `apply`.
-   Rows E6, C14, D5, F5 (kept, now consistent), E23, E24.
-5. **Duplicates (v1 :215).** 4.2 is a multiset diff naming one line per extra or missing occurrence,
-   falling through to "reordered" only for an equal multiset. Rows A8.1, A8.2, A8.3, A8.4; the shared
-   mutations of A1.1, A1.3 and A1.4 are unchanged.
-
-Changes forced beyond the five, each logged here: the field-by-field check (finding 1) showed that
-every `item.note`, `item.stopped`, `item.tried` and `item.state` needs an existing item, so the first
-claim on token `none` now creates it (6.2 mapping, 6.2.2, open question 4, row H23); the code mapping
-(finding 2) gave `read` a rule for `not_found` (the blank card) and added the refusal code
-`ledger_refused` to 4.5; section 2 now states the store-phase mapping the ledger's `phase` enum
-requires; the last non-goal names a framed ticket note among the record shapes the store does not
-defend against; D5's mutation names the comparison drop for the two reading steps. No other rule
-changed.

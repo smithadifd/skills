@@ -1,15 +1,16 @@
-# `ticket`: the test matrix (written before any code; after design pass 1)
+# `ticket`: the test matrix
 
 Companion to `ticket-design.md`; section numbers, state names S0–S6, flag names F1–F11 and refusal
 codes are its. Every row names the test, the card state and edit it sets up, the expected outcome
 (phase, flags verbatim, refusal code, what is written) and one production mutation that must turn the
-test red. A builder applies each mutation alone, runs the suite, records RED, restores, records GREEN.
+test red. Each mutation is applied alone, the suite run and RED recorded, then the code restored and GREEN recorded.
 Where several rows share a mutation it is marked `(shared with <row>)`; each such mutation is applied
 once and every row that names it must be among the reds. Cells impossible by construction say why.
 
 Conventions: `resume(store, source)` opens a new pass on an existing card; `join(store, P)` continues
 pass `P`; "nothing written" means the store's card (markdown: bytes; ledger: the event list) is equal
-before and after; `{what}` in a flag is the 4.2 text for the edit kind, for example
+before and after, apart from the claim a new pass takes (a join and a `stopped` or `closed` open
+write no claim); `{what}` in a flag is the 4.2 text for the edit kind, for example
 `the acceptance criteria were reordered on the ticket`; the *held token* is the token of the pass's
 last read or last successful write (design 3.5), and "phase" in an expected cell is the live phase the
 pass reports (design 3.2b), which after a resume equals the resume state.
@@ -40,7 +41,7 @@ the list `c` (the duplicate rows, A8); its source fixture is then rewritten to t
 | A2.3 | `…[added]` | S2[0] × added | phase `plan`; F1 names the new text | `(shared with A1.3)` |
 | A2.4 | `…[removed]` | S2[2] × removed | phase `plan`; F1; `review_round == 2` kept | `(shared with A1.4)` |
 | A3.0 | `test_a_passing_round_resumes_at_outward_go` | S3[1] × none | phase `outward_go`; `approved("outward")` false; `require_outward_go()` raises `GateRequired`; nothing written | `_derive` row 9 returns `build` (passing final review ignored) |
-| A3.1 | `test_a_source_change_after_a_passing_round_resumes_at_plan[reorder]` | S3[1] × reorder | phase `plan`; flags `[F2(N=1, M=1, what=reordered)]`; nothing written; `approved("outward")` false; revision 2 then reaches `build` after its go, and `record_review("pass")` on it is round 2 | `_derive` compares the source with the card's own criteria instead of `I.criteria` (card-vs-card, the old D8) → `outward_go` |
+| A3.1 | `test_a_source_change_after_a_passing_round_resumes_at_plan[reorder]` | S3[1] × reorder | phase `plan`; flags `[F2(N=1, M=1, what=reordered)]`; nothing written; `approved("outward")` false; revision 2 then reaches `build` after its go, and `record_review("pass")` on it is round 2 | `_derive` compares the source with the card's own criteria instead of `I.criteria` (card against card) → `outward_go` |
 | A3.2 | `…[text]` | S3[2] × text | phase `plan`; F2 with N=2 | `_derive` tests the passing final review (row 9) before the change (row 5) and returns `outward_go` |
 | A3.3 | `…[added]` | S3[1] × added | phase `plan`; F2 names the new text | `(shared with A1.3)` |
 | A3.4 | `…[removed]` | S3[1] × removed | phase `plan`; F2 names the removed text | `(shared with A1.4)` |
@@ -70,12 +71,12 @@ the list `c` (the duplicate rows, A8); its source fixture is then rewritten to t
 
 | ID | Test name | State × edit | Expected | Mutation |
 |---|---|---|---|---|
-| B1 | `test_a_second_source_change_after_a_re_presented_plan_names_the_new_revision` | S3[1]; `edit(text)`; resume → `plan`; revision 2 presented (no go); `edit(added)` × resume | phase `plan`; flags exactly `[F1(M=2)]`; no F2; nothing written | `_derive` decides "a passing round held" from `last.verdict == "pass"` without `_covers(last, I)` (the old M20) → F2 "round 1 passed plan revision 2" |
+| B1 | `test_a_second_source_change_after_a_re_presented_plan_names_the_new_revision` | S3[1]; `edit(text)`; resume → `plan`; revision 2 presented (no go); `edit(added)` × resume | phase `plan`; flags exactly `[F1(M=2)]`; no F2; nothing written | `_derive` decides "a passing round held" from `last.verdict == "pass"` without `_covers(last, I)` → F2 "round 1 passed plan revision 2" |
 | B2 | `test_a_second_source_change_after_a_re_presented_plan_with_its_go` | as B1 but revision 2 gets its go and one `changes` round; `edit(removed)` | phase `plan`; `[F1(M=2)]`; `review_round == 2` | `_derive` reads `last = reviews[0]` for the held check |
 | B3 | `test_a_second_source_change_at_the_cap_stops_without_a_round_claim` | revision 1 rounds 1–2 `changes`, `edit(text)`, revision 2 presented + go, round 3 `changes` (cap stamp written); `edit(reorder)` | phase `stopped`; `[F5(M=2), F6]`; nothing written | `_derive` at the cap with a change returns `plan` when the last round is of `I.revision` |
 | B4 | `test_a_source_change_at_a_passing_round_three_stops` | S3[3] × text | phase `stopped`; flags exactly `[F3(N=3, M=1)]`; the flag never claims the card lacks the round; nothing written; no claim | `_derive` returns `plan` with F2 at rounds == 3 (the cap not consulted after a passing round) |
 | B5 | `test_a_source_change_at_an_approved_round_three_stops_and_spends_the_go` | S4[3] × removed | `stopped`; `[F3, F4]`; nothing written | `_derive` drops F4 on the stopped path |
-| B6 | `test_a_change_at_the_cap_reaches_no_review_step` | B3's card, `join(P)` on the stopped pass | `record_review` raises `TicketError` (no live pass: `pass_ended`); nothing written | `open` keeps a stopped pass live |
+| B6 | `test_a_change_at_the_cap_reaches_no_review_step` | B3's card, `join(P)` on the stopped pass | `record_review` raises `StoreUnavailable` with code `pass_ended` (no live pass); nothing written | `open` keeps a stopped pass live |
 
 ## C. Empty and malformed stored identity
 
@@ -137,7 +138,7 @@ event-equal before and after; no claim; the open raises and the pass is not live
 | E13 | `test_open_questions_tried_and_steps_persist_and_resume_rebuilds_the_pass` | a plan with a skipped `research` step, a skipped `plan` step with a one-sentence diff, an open question, a `tried` record | after resume: `session.plan` renders the skips with their reasons, the diff, the question; `tried` on the card | `PlanCard` rebuilt on resume drops `steps` restoration (all `pending`) |
 | E14 | `test_resume_pulls_the_live_ticket_before_reading_the_card` | a source that records the call order with the store | the source is pulled before `read` | `open` reads the card first |
 | E15 | `test_skips_require_reasons_and_plan_skip_requires_one_sentence_diff` | `PlanCard.skip_step` | a skip without a reason raises; `plan` skipped with a two-sentence diff raises | `skip_step` drops `_one_sentence` |
-| E16 | `test_each_go_check_alone_keeps_every_gate_shut[role | lean | source | tag | other revision | other criteria | other pass]` | S2[0]'s plan go edited in one field | `approved("plan")` false; `begin_build` raises `GateRequired` | `_has_go` drops that one condition (seven mutations, one per case) |
+| E16 | `test_each_go_check_alone_keeps_every_gate_shut[role | lean | source | tag | other revision | other criteria | other pass]` | S2[0]'s plan go edited in one field | `approved("plan")` false; `begin_build` raises `GateRequired`, except for `other criteria`: that edit is a card-side change (design 4.3), so the pass lands at `plan` and `begin_build` raises `TicketError` (wrong phase) | `_has_go` drops that one condition (seven mutations, one per case) |
 | E17 | `test_orient_and_research_are_in_memory_phases` | fresh pass | `finish_orient` → `research`, `finish_research` → `plan`; a resume lands at `orient` again; nothing written | `finish_orient` writes a stamp (assert nothing written) |
 | E18 | `test_a_terminal_open_takes_no_claim_and_is_not_live[stopped | closed]` | S5, S6 | `open` returns a pass with `live` false; `card.pass` stays `None`; `end()` is a no-op | `open` claims before `_derive` `(shared with A6.0)` |
 | E19 | `test_the_pass_holds_the_stored_plan_after_a_changed_resume` | A3.1's resume | `session.plan.acceptance_criteria` texts equal the stored order, not the source's; `present_plan` requires the source's order | `_derive` rebuilds the held plan from the source |
@@ -182,8 +183,8 @@ event-equal before and after; no claim; the open raises and the pass is not live
 
 ## H. The ledger store (concurrent writers)
 
-Tests run against the toolkit's ledger CLI when `LEDGER_CLI` names it (skip guard plus env override;
-the reviewer runs it), and against a fake CLI that records argv and stdin, keeps its own event list
+Tests run against the toolkit's ledger CLI when `LEDGER_CLI` names it (skip guard plus an env override
+that runs it), and against a fake CLI that records argv and stdin, keeps its own event list
 for `query` and `export-item`, and can be scripted to answer any `{ok, data, error}` envelope with any
 exit status, garbage, or a lost response, for the rows that need an interleaved writer or a particular
 answer. "Answers `<code>`" means the envelope `{"ok": false, "error": {"code": "<code>", ...}}` with
@@ -224,20 +225,20 @@ the exit status design 6.2.4 lists for it, unless the row pairs them otherwise.
 | H31 | `test_the_code_is_read_from_the_envelope_not_the_exit_status[stale_revision with exit 3 | conflict with exit 5 | ok true with exit 1]` | S2[0] live; the fake CLI pairs the envelope and the exit status as named | `stale` / `stale` / landed (the token advances to `data.events[-1].id` and the next write lands) | the store switches on the exit status (5 → `stale`, 3 → `conflict` or `ledger_refused`, 1 → `ledger_refused`) |
 | H32 | `test_error_and_unusable_are_resolved_by_the_batch_key[error landed | unusable landed | unusable absent]` | S2[0] live; the fake CLI commits the batch (its export shows it) and answers `error` / `unusable` (exit 3); or writes nothing and answers `unusable` | landed: the token advances to the batch's last event and the next write lands; absent: `StoreUnavailable` (`ledger_refused`) with the CLI's output, the pass ends | `error` and `unusable` are mapped as permanent refusals (a landed batch is reported as not written): the next write after a landed batch is `stale` instead of landing |
 
-## I. Validators (the guard sweep's survivors, SK24)
+## I. Validators
 
-Line numbers are the survivors' own, at the sweep head (0a66882); the expression identifies the guard
-in the new code. Expected for every row unless stated: `TicketError`, nothing written, the pass stays
-live. The mutation is the sweep's: the `if` test replaced by `False`, or the named operand replaced by
-the identity of its `and`/`or`.
+Line numbers in the guard column are those of an earlier revision of the code; the expression
+identifies the guard. Expected for every row unless stated: `TicketError`, nothing written, the pass
+stays live. The mutation is the `if` test replaced by `False`, or the named operand replaced by the
+identity of its `and`/`or`.
 
-| ID | Test name | Guard (survivor lines) | Expected | Mutation |
+| ID | Test name | Guard (line numbers) | Expected | Mutation |
 |---|---|---|---|---|
-| I1 | `test_ticket_from_mapping_refuses_each_fault[missing field | criteria not a list | empty criteria | non-text criterion | blank criterion | links not a list | link without kind | link without url | empty title | key mismatch]` | 162, 165–166 (4 operands), 170, 174 (3 operands), 202; plus the new non-empty title | `TicketError` per fault; the empty title is refused at the source (the old NIT) | each `if`/operand alone (10 mutations) |
+| I1 | `test_ticket_from_mapping_refuses_each_fault[missing field | criteria not a list | empty criteria | non-text criterion | blank criterion | links not a list | link without kind | link without url | empty title | key mismatch]` | 162, 165–166 (4 operands), 170, 174 (3 operands), 202; plus the new non-empty title | `TicketError` per fault; the empty title is refused at the source | each `if`/operand alone (10 mutations) |
 | I2 | `test_stamp_validation_refuses_each_fault[phase | empty point | non-text point | point over 600 | 13 next skills | non-text skill | skill over 80 | skill regex | 21 refs | ref not a target | ref over 300 | ref with newline]` | 424, 429 (2), 435 (3), 452, 454–455 (4), 459 | per fault | each alone (12) |
 | I3 | `test_decision_validation_refuses_each_fault[who_kind | role without relayed_by | standing | source what | empty tags | tag keys | tag type | criteria invalid | gate unknown | plan_revision not int]` | 470, 474, 476, 481, 484 (2), plus the new `gate`/`plan_revision` checks | per fault | each alone (10) |
 | I4 | `test_review_validation_refuses_each_fault[round not int | round 0 | verdict | 21 findings | non-text finding | reviewer non-text | evidence not a ref | plan_revision 0 | criteria invalid | passed not a list | passed index out of range | passed repeated]` | 490 (3), 492 | per fault | each alone (12) |
-| I5 | `test_plan_snapshot_validation_refuses_each_fault[not a mapping | wrong schema | unknown field | other key | empty title | revision | status non-text | updated non-text | pass non-text | open_questions | diff non-text | criteria not a list | criterion non-text]` | 505 (2), plus the strict checks the r3 delta added | per fault | each alone (13) |
+| I5 | `test_plan_snapshot_validation_refuses_each_fault[not a mapping | wrong schema | unknown field | other key | empty title | revision | status non-text | updated non-text | pass non-text | open_questions | diff non-text | criteria not a list | criterion non-text]` | 505 (2), plus the strict checks of the plan snapshot | per fault | each alone (13) |
 | I6 | `test_criteria_texts_helper_refuses_each_shape[tuple ok | set | empty | non-text entry]` | the `_criteria_texts` operands | per shape | each operand alone |
 | I7 | `test_a_plan_card_that_breaks_the_step_rules_is_not_persisted[missing step | extra step | out of order | unknown status | skipped without reason | reason on an unskipped step | plan skipped without diff | diff of two sentences | diff numeric | step unknown field]` | 1179–1185 (the restore side) and the `_validate_steps` rules | per fault; `123` as a diff refused uncoerced | each rule alone (10) |
 | I8 | `test_tried_validation_refuses_each_fault[empty what | phase | outcome non-text | evidence not a ref]` | `_validate_tried` | per fault | each alone |
@@ -268,16 +269,3 @@ the identity of its `and`/`or`.
   evidence probes G9 and H19. The other 168 each have a test and a named mutation.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so.
-
-## Changes from v1 (design pass 1)
-
-- Added: A8.1, A8.2, A8.3, A8.4 (finding 5, duplicates); E21, E22 (finding 3, live phase versus
-  resume state); E23, E24 (finding 4, the held token); H23 (the first claim creates the item), H24,
-  H25, H26, H27 (finding 1, ticket records as framed notes); H28, H29, H30, H31, H32 (finding 2, the
-  CLI's error codes).
-- Changed: A2.0a (`begin_build` is wrong phase on a resumed S2); C14, E6 and D5 (the held token
-  named; D5's mutation covers the two reading steps); H1, H2, H4, H7, H13, H16, H20, H22 (answers
-  named by `error.code`, not exit status); H12 (the outsider's `review` and `decision` are the
-  toolkit's kinds); H18 (folds the three note frames); the H section intro (the fake CLI answers
-  envelopes); the conventions and fixtures paragraphs (held token, live phase, `S1 built with c`).
-- Unchanged: every other row, its expected cell and its mutation.
