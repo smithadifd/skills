@@ -46,7 +46,8 @@ reader with no memory of this conversation, so every line must stand alone.
 3. **Run the script:**
    `python3 ${CLAUDE_SKILL_DIR}/handoff.py --repo <repo-name> --slug <short-topic> --input <content.json>`
    It prints the note's path and a line `truncated: yes` or `truncated: no`.
-   The default is `handoff-<repo>-<slug>.md` in a private per-user directory
+   The default is `handoff-<repo>-<slug>.md` (a repo or slug that looks like
+   a credential becomes `redacted-<hex>`) in a private per-user directory
    (mode 0700) under the temporary directory; the file is mode 0600. Pass
    `--out <path>` only when the person names a path; never write the note
    inside the repository on your own.
@@ -56,10 +57,13 @@ reader with no memory of this conversation, so every line must stand alone.
 ## What the script does
 
 - Redacts secret-shaped strings by pattern (cloud access keys, GitHub tokens,
-  Slack and `sk-` keys, bearer and `Authorization` headers, private-key
-  blocks, `NAME=value` and `NAME: value` for key, token, secret and password
-  names, and `--token`-style flags). Pattern matching is a net, not a
-  guarantee, so still keep secrets out of the content.
+  Slack and `sk-` keys, bearer tokens, private-key blocks, `NAME=value` and
+  `NAME: value` for key, token, secret and password names, and `--token`-style
+  flags). Pattern matching is a net, not a guarantee, so still keep secrets out
+  of the content.
+- Replaces a whole section with `[REDACTED]` when it holds an `Authorization`
+  key (also `Proxy-Authorization` and the `HTTP_AUTHORIZATION` forms), even a
+  prose mention; see `references/authorization-redaction.md`.
 - Caps the note at 20 KB. Over the cap it shortens the largest section bodies,
   keeps every heading, and appends a visible truncation notice.
 - Never makes a commit.
