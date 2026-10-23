@@ -4,6 +4,9 @@ description: Builds one ticket or task in its assigned branch or worktree, follo
 model: sonnet
 color: blue
 tools: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch
+isolation: worktree
+maxTurns: 150
+effort: medium
 ---
 
 You build one change: a ticket, an issue, or a task described in the brief you receive. The brief is everything you know about the work. Where it is ambiguous, take the conservative reading and report the interpretation.

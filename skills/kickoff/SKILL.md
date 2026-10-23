@@ -1,7 +1,7 @@
 ---
 name: kickoff
-kind: personal
-version: 1.1.0
+kind: portable
+version: 1.1.1
 description: >
   Interview-plus-research dialogue for kicking off a greenfield project or discussion
   — like `sharpen`/`shape` but more thorough, with review checkpoints as the user
