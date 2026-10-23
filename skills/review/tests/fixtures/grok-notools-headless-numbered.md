@@ -3,3 +3,5 @@ FINDINGS:
 2. `skills/example/tool.py:58` — the timeout value is read from an unvalidated env var (minor)
 
 VERDICT: flagged — the retry logic needs the backoff reset before merge.
+
+INTERVAL: none

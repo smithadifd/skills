@@ -16,3 +16,5 @@ The change exempts a spaced duration followed by timeout, bound, limit, cap or d
 - Sinks checked: `_has_duration_claim` and `_DURATION_CLAIM` callers in `run_phase` / `--from-text`. Only the regex changed.
 - Trust boundary: the review text from the reviewer lane enters via `--from-text` or the envelope. It is checked in `review_phase._has_duration_claim` before `review_interval_endpoints_missing` is raised.
 - Earlier findings: n/a, round 1.
+
+INTERVAL: none

@@ -21,3 +21,5 @@ The change exempts a spaced number and unit followed by timeout, bound, limit, c
   The 100kb-line test also passes on the unmutated code, so the lookahead does not cause catastrophic backtracking on that input.
 - Sinks checked: n/a, this is a pure regex classifier. The only consumer is the interval-endpoints refusal, `review_interval_endpoints_missing`.
 - Trust boundary: finding text enters the review phase and is checked by this regex. The worst case for a bypass is a measured duration with a bound word right after the unit going unflagged; that is the contrived-phrasing case in Minor notes.
+
+INTERVAL: none

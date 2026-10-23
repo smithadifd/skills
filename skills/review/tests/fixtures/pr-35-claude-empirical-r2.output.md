@@ -18,3 +18,5 @@ At head 2938daf, the delta rewrites `_shield_later_components` to blank only a p
 - Sinks checked: only the scan text built in `_text_for_duration_scan` is rewritten, and the review artifact is untouched. The path-token and file:line passes still read the shielded piece.
 - Trust boundary: review text is untrusted and enters through `_text_for_duration_scan`. The shield runs on it before the duration regex does.
 - Earlier findings: round 1 had no issues, so there is nothing to mark fixed. I confirmed `git rev-parse HEAD` is 2938daf270152da796626682216ff82155f38997, matching the brief. I did not run `gh` and took the diff from git.
+
+INTERVAL: none
