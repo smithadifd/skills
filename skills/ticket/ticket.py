@@ -52,6 +52,8 @@ _SCRIPT = os.path.abspath(__file__)
 
 _SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A pass id is hex (design section 2); no length is fixed.
+_PASS_ID = re.compile(r"[0-9a-f]+")
 # What a stamp or a review may point at: a path (absolute, or relative with a
 # directory or an extension, optionally :line or :start-end), a PR or issue
 # (owner/repo#N or #N), a branch (branch:<name>), a commit SHA, or a store
@@ -74,6 +76,11 @@ _REF_TARGET = re.compile(
 PLAN_GO_POINT = "Waiting at plan go for plan revision {revision}."
 OUTWARD_GO_POINT = "Waiting at outward go after review round {round}."
 CAP_POINT = "Review did not converge after round three."
+
+
+def release_command(key: str, pass_id: str) -> str:
+    """The recovery command a person copies: every argv element shell-quoted."""
+    return shlex.join(["python3", _SCRIPT, "release", key, pass_id])
 
 
 class TicketError(ValueError):
@@ -99,7 +106,7 @@ class TicketHeld(StoreUnavailable):
         super().__init__(
             f"ticket {key} has a live pass: id {live['id']}, host {live['host']}, started {live['started_at']}. "
             "Nothing was written. It ends when that pass closes the ticket or ends. If that session is gone, "
-            f"a person releases it with `python3 {shlex.quote(_SCRIPT)} release {key} {live['id']}` "
+            f"a person releases it with `{release_command(key, live['id'])}` "
             "(add `--repo <path>` for a markdown card).",
             code="held",
         )
@@ -368,6 +375,8 @@ def _validate_claim(claim: Any) -> None:
         raise TicketError("a claim names exactly its id, host and started_at")
     for name in ("id", "host", "started_at"):
         _text(claim[name], f"the claim's {name}")
+    if not _PASS_ID.fullmatch(claim["id"]):
+        raise TicketError("the claim's id must be lowercase hex")
 
 
 def _validate_stamp(stamp: Any) -> None:
@@ -589,6 +598,8 @@ def _check_card_shape(card: Any, key: str, where: str) -> None:
     live = card.get("pass", "absent")
     if live is not None and (type(live) is not dict or not all(_is_text(live.get(n)) for n in ("id", "host", "started_at"))):
         raise _unreadable(where, "its pass is neither null nor a claim")
+    if live is not None and not _PASS_ID.fullmatch(live["id"]):
+        raise _unreadable(where, "its pass id is not hex")
     if "plan" not in card:
         raise _unreadable(where, "it has no plan field")
     for name in _CARD_LISTS:

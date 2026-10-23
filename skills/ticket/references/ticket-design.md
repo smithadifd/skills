@@ -340,7 +340,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 
 | Code | Meaning | Notes |
 |---|---|---|
-| `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | the command names the installed script by its absolute path (the directory of `ticket.py` itself, as `SKILL.md` writes `${CLAUDE_SKILL_DIR}/ticket.py`), so it runs from the target repository |
+| `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | the command names the installed script by its absolute path (the directory of `ticket.py` itself, as `SKILL.md` writes `${CLAUDE_SKILL_DIR}/ticket.py`), so it runs from the target repository. The command is rendered with `shlex.join` over its whole argv (interpreter, script path, subcommand, key, pass id), so no stored value can add a shell word. A pass id is lowercase hex; a card whose live pass id is anything else is `card_unreadable` |
 | `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
 | `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
 | `card_unreadable` | the card does not parse or has the wrong shape, including a plan snapshot that breaks the snapshot rules while its identity is readable (section 2); on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |

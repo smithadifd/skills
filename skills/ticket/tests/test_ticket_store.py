@@ -190,6 +190,9 @@ G7_BODIES = {
     "key other": lambda card: _block({**card, "key": "EK-99"}),
     "no title": lambda card: _block({**card, "title": ""}),
     "pass malformed": lambda card: _block({**card, "pass": {"id": "abc"}}),
+    "pass id not hex": lambda card: _block(
+        {**card, "pass": {"id": "deadbeef; printf PROBE_INJECTED", "host": "h", "started_at": "t"}}
+    ),
     "plan field missing": lambda card: _block({name: value for name, value in card.items() if name != "plan"}),
     "reviews not a list": lambda card: _block({**card, "reviews": None}),
     "decision not an object": lambda card: _block({**card, "decisions": ["approved"]}),

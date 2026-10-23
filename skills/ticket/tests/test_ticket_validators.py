@@ -306,8 +306,9 @@ def test_I8_tried_validation_refuses_each_fault(repo, fault):
     "kind, value, message",
     [("note", {"text": "x"}, "unknown event"),
      ("claim", {"id": "a1", "host": "h"}, "exactly its id, host and started_at"),
-     ("claim", {"id": "", "host": "h", "started_at": "t"}, "claim's id must be non-empty")],
-    ids=["unknown event", "claim fields", "claim id"],
+     ("claim", {"id": "", "host": "h", "started_at": "t"}, "claim's id must be non-empty"),
+     ("claim", {"id": "a1; b2", "host": "h", "started_at": "t"}, "claim's id must be lowercase hex")],
+    ids=["unknown event", "claim fields", "claim id", "claim id not hex"],
 )
 def test_I_extra_the_store_refuses_an_unknown_event_or_a_malformed_claim(repo, kind, value, message):
     # Not a matrix row: the event validators beyond section I's records.

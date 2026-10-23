@@ -90,6 +90,7 @@ every step refuses with `pass_ended`.
 A session that crashed leaves its claim, and the ticket stays refused. When
 the person confirms that session is gone, release it with
 `python3 ${CLAUDE_SKILL_DIR}/ticket.py release <key> <pass-id> --repo <target-repo>`.
+The command a refusal prints is shell-quoted word by word, so it is safe to copy.
 It refuses unless that id is the live claim. It exits 0 when it released the
 claim, 1 when it refused, and 2 when the ledger store was selected.
 

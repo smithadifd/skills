@@ -266,7 +266,7 @@ def test_E11f_the_held_refusal_command_runs_from_the_target_repository(repo, tmp
     result = _child_open(repo)
     message = json.loads(result.stdout)["message"]
     command = shlex.split(re.search(r"`(python3 [^`]*release [^`]*)`", message).group(1))
-    assert command[1] == str(SKILL_DIR / "ticket.py")
+    assert command == ["python3", str(SKILL_DIR / "ticket.py"), "release", KEY, first.pass_id]
     elsewhere = tmp_path / "target"
     elsewhere.mkdir()
     assert not (elsewhere / "ticket.py").exists()
@@ -276,6 +276,22 @@ def test_E11f_the_held_refusal_command_runs_from_the_target_repository(repo, tmp
     assert released.returncode == 0, released.stderr
     assert read_card(repo)["pass"] is None
     assert first.pass_id in message
+
+
+HOSTILE_IDS = {
+    "command": "deadbeef; printf PROBE_INJECTED",
+    "space": "dead beef",
+    "quote": "dead'beef\"",
+    "newline": "dead\nbeef",
+}
+
+
+@pytest.mark.parametrize("case", list(HOSTILE_IDS))
+def test_E11g_the_printed_command_quotes_every_argument(case):
+    hostile = HOSTILE_IDS[case]
+    held = ticket.TicketHeld(KEY, {"id": hostile, "host": "builder", "started_at": "2026-10-17T14:30:00Z"})
+    printed = re.search(r"releases it with `(.*)` \(add", str(held), re.DOTALL).group(1)
+    assert shlex.split(printed) == ["python3", str(SKILL_DIR / "ticket.py"), "release", KEY, hostile]
 
 
 def test_E11b_join_refuses_an_id_that_is_not_the_live_pass(repo):
