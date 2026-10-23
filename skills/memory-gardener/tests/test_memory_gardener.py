@@ -762,12 +762,15 @@ def test_default_taxonomy_classifies_generic_note_stems():
 
 def test_default_taxonomy_keywords_do_not_match_inside_longer_words():
     tax = mg.DEFAULT_SHARD_TAXONOMY
-    # `feed` and `server` as raw substrings would capture these unrelated stems.
-    assert mg.classify_shard("feedback-self-review", tax) is None
-    assert mg.classify_shard("observer-cache", tax) is None
-    # The delimited forms still classify.
-    assert mg.classify_shard("feed-refresh-schedule", tax) == "automation"
-    assert mg.classify_shard("home-server-setup", tax) == "infra"
+    # Short generic words such as `feed` or `server` would capture these
+    # unrelated stems, so the defaults carry no such keyword.
+    for stem in (
+        "feedback-self-review",
+        "observer-cache",
+        "breastfeed-support-notes",
+        "home-serverless-migration",
+    ):
+        assert mg.classify_shard(stem, tax) is None
 
 
 def test_default_taxonomy_has_zero_no_person_deny_hits():
