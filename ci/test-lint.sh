@@ -163,18 +163,20 @@ done
 # with the repository URL (clean case), then the same file also carries a
 # denied word (planted case), which must still fail.
 own='https://github.com/zzowner/zzrepo'
-for kind in colon-name crlf; do
+for kind in colon-name crlf soh-name tab-name dash-name backslash-name; do
   for variant in clean planted; do
     tree=$(new_dir)
     make_tree "$tree"
     git -C "$tree" remote add origin https://github.com/zzowner/zzrepo.git
-    if [ "$kind" = colon-name ]; then
-      target="$tree/notes:2.md"
-      eol='\n'
-    else
-      target="$tree/notes.md"
-      eol='\r\n'
-    fi
+    eol='\n'
+    case "$kind" in
+      colon-name) target="$tree/notes:2.md" ;;
+      soh-name) target="$tree/odd$(printf '\001')name.md" ;;
+      tab-name) target="$tree/odd$(printf '\t')name.md" ;;
+      dash-name) target="$tree/-odd.md" ;;
+      backslash-name) target="$tree/odd\\name.md" ;;
+      *) target="$tree/notes.md"; eol='\r\n' ;;
+    esac
     printf "$own is the source$eol$own$eol" > "$target"
     if [ "$variant" = planted ]; then
       printf "$own zzother wrote this$eol" >> "$target"
