@@ -86,7 +86,10 @@ git -C "$tree" remote add origin https://github.com/zzowner/zzrepo.git
   printf 'Docs: https://github.com/zzowner/zzrepo/issues, (https://github.com/zzowner/zzrepo)\n'
   printf 'Link "https://github.com/zzowner/zzrepo" and https://github.com/zzowner/zzrepo.\n'
   printf 'Last: https://github.com/zzowner/zzrepo\n'
-} > "$tree/notes.md"
+  printf 'Plain http://github.com/zzowner/zzrepo.git and github.com/zzowner/zzrepo/pulls\n'
+  printf 'Remote git@github.com:zzowner/zzrepo.git or ssh://git@github.com/zzowner/zzrepo.git\n'
+  printf 'Bare (github.com/zzowner/zzrepo) <git@github.com:zzowner/zzrepo>\n'
+}> "$tree/notes.md"
 git -C "$tree" add -A
 if env -u CI -u GITHUB_ACTIONS -u OWNER -u REPO NO_PERSON_DENY=zzowner bash "$lint" "$tree" > /dev/null 2>&1; then
   printf 'PASS: a line holding only the repository URL passes the deny step\n'

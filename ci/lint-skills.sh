@@ -190,8 +190,9 @@ else
     own_url="github.com/$OWNER/$REPO"
   fi
   # Cut only the repository's own URL text out of each line (a literal,
-  # case-insensitive match that starts at a host boundary: line start,
-  # whitespace, an opening bracket or quote, "://" or "@"; and ends at a
+  # case-insensitive match of one allowed form (https://, http://,
+  # ssh://git@, git@host:, or bare host/owner/repo) that starts a token: line
+  # start, whitespace, an opening bracket or a quote; and ends at a
   # boundary: end of line, a path or query separator, .git, whitespace, a
   # quote or a closing bracket), then apply the deny expression to what is
   # left, so a denied term elsewhere on the same line is still found. Every
@@ -215,13 +216,17 @@ else
           u = tolower(url)
           ure = u
           gsub(/\./, "\\.", ure)
-          re = "(^|[ \t(<\"\047`@]|://)" ure "(\\.git)?([]/#?\"\047)>,;: \t]|\\.($|[ \t])|$)"
+          urc = ure
+          sub(/\//, ":", urc)
+          # Allowed forms only: https://, http://, ssh://git@ or no scheme
+          # before host/owner/repo, or git@host:owner/repo; each a whole token.
+          re = "(^|[ \t(<\"\047`])((https?://|ssh://git@)?" ure "|git@" urc ")(\\.git)?([]/#?\"\047)>,;: \t]|\\.($|[ \t])|$)"
         }
         {
           out = ""
           rest = $0
           while (u != "" && match(tolower(rest), re)) {
-            start = RSTART + index(substr(tolower(rest), RSTART, RLENGTH), u) - 1
+            start = RSTART + index(substr(tolower(rest), RSTART, RLENGTH), "github.com") - 1
             out = out substr(rest, 1, start - 1)
             rest = substr(rest, start + length(u))
           }
