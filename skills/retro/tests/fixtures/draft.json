@@ -1,0 +1,38 @@
+{
+  "findings": [
+    {
+      "id": "deps",
+      "title": "New dependencies added after the person asked for the standard library",
+      "severity": "medium",
+      "mechanical": false,
+      "instances": [
+        {"ref": "line 11", "excerpt": "No, do not add a new dependency. Use the stdlib csv module."},
+        {"ref": "line 27", "excerpt": "Again, no new dependencies. I said use the stdlib."}
+      ],
+      "evidence": ["the person corrected the same choice twice in one session"],
+      "diff": "--- a/CONTRIBUTING.md\n+++ b/CONTRIBUTING.md\n@@ -1,2 +1,3 @@\n # Contributing\n+Prefer the standard library; ask before adding a dependency.\n"
+    },
+    {
+      "id": "line-length",
+      "title": "Line-length lint error fixed by hand twice",
+      "severity": "high",
+      "mechanical": true,
+      "structure": "hook",
+      "instances": [
+        {"ref": "line 15", "excerpt": "E501 Line too long (97 > 88)"},
+        {"ref": "line 31", "excerpt": "E501 Line too long (101 > 88)"}
+      ],
+      "evidence": ["ruff reported E501 twice and each was fixed by hand"],
+      "proposal": "Run the formatter in a pre-commit hook so line length never reaches review."
+    },
+    {
+      "id": "single-slip",
+      "title": "One-off wrong flag",
+      "severity": "low",
+      "mechanical": false,
+      "instances": [{"ref": "line 5", "excerpt": "wrong flag"}],
+      "evidence": ["seen once"],
+      "diff": "unused"
+    }
+  ]
+}

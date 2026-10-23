@@ -1,0 +1,2 @@
+{"findings": [{"id": "once", "title": "One-off", "severity": "low", "mechanical": false,
+  "instances": [{"ref": "line 5", "excerpt": "x"}], "evidence": ["seen once"], "diff": "unused"}]}
