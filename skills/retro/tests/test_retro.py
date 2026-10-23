@@ -561,9 +561,21 @@ def test_attached_dash_m_module_groups_with_the_plain_tool():
     assert retro._tool("python3 -I -mpytest -q") == "pytest"
 
 
-def test_or_and_pipe_chains_name_the_last_segment_like_and_and_semicolon():
+def test_or_chains_name_the_last_segment_and_pipes_name_the_first_stage():
     plain = retro._tool("pytest")
-    for command in ("a || pytest", "a | pytest", "a && b || pytest -q", "a | b || pytest"):
+    for command in ("a || pytest", "a && b || pytest -q", "pytest | tail", "pytest -q 2>&1 | tail -5",
+                    "a && pytest | tee log", "a || pytest | tee log"):
         assert retro._tool(command) == plain, command
     assert retro._tool("pytest || echo failed") == "echo"
-    assert retro._tool("pytest | tail") == "tail"
+
+
+def test_separators_inside_quotes_do_not_split():
+    assert retro._tool('grep "a|b" f') == "grep"
+    assert retro._tool("grep 'a && b' f") == "grep"
+    assert retro._tool('echo "x;y" | pytest') == "echo"
+    assert retro._tool('cd d && grep "a||b" f') == "grep"
+
+
+def test_clustered_flags_through_m_group_with_the_plain_tool():
+    for command in ("python3 -Impytest", "python3 -xImpytest -q", "python3 -Im pytest"):
+        assert retro._tool(command) == "pytest", command

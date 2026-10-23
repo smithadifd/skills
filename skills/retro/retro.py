@@ -124,19 +124,56 @@ def triage(path):
     return {"trivial": trivial, "tool_calls": tool_calls, "edits": edits}
 
 
+_M_CLUSTER = re.compile(r"-([IBEsSuOqvbdiPRx]*)m(.*)")
+
+
+def _stages(command):
+    """Split a shell line outside single and double quotes.
+
+    Returns a list of `&&` / `;` / `||`-separated segments, each a list of
+    `|`-separated pipeline stages. Not a shell parser: quotes only toggle.
+    """
+    segments, stages, buf, quote, i = [], [], [], None, 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == quote:
+                quote = None
+            buf.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        elif ch == ";" or command.startswith("&&", i) or command.startswith("||", i):
+            stages.append("".join(buf))
+            segments.append(stages)
+            stages, buf = [], []
+            i += 1 if ch == ";" else 2
+            continue
+        elif ch == "|":
+            stages.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    stages.append("".join(buf))
+    segments.append(stages)
+    return segments
+
+
 def _python_module_at(words, i):
     """Index of the module word of `python <options> -m <module>`, else None.
 
-    Interpreter options are skipped first: no-operand flags (`-I`, `-B`, combined
-    like `-IB`; `-x` included), `-W`/`-X`/`--check-hash-based-pycs` with an operand, and their
+    Interpreter options are skipped first: no-operand flags (`-I`, `-B`, `-x`,
+    combined like `-IB`, and clustered through `-m` as in `-Impytest`), `-W`/`-X`/`--check-hash-based-pycs` with an operand, and their
     attached forms (`-Wdefault`, `-Xdev`). `-c` or a script path gives None.
     """
     while i < len(words):
         word = words[i]
-        if word == "-m":
+        cluster = _M_CLUSTER.fullmatch(word)
+        if cluster:
+            if cluster.group(2):
+                return i
             return i + 1 if i + 1 < len(words) else None
-        if re.fullmatch(r"-m.+", word):
-            return i
         if word in ("-W", "-X", "--check-hash-based-pycs"):
             i += 2
         elif re.fullmatch(r"-[WX].+|--check-hash-based-pycs=.+", word):
@@ -151,13 +188,15 @@ def _python_module_at(words, i):
 def _tool(command):
     """The command word a shell line runs.
 
-    Grammar: take the last command of a simple `&&` / `;` / `||` / `|` chain (so
-    `cd d && pytest` and `a || pytest` are `pytest`); skip leading variable assignments; skip a wrapper (env, npx,
+    Grammar: take the last `&&` / `;` / `||` segment (so `cd d && pytest` and
+    `a || pytest` are `pytest`), and within it the first `|` stage (so
+    `pytest | tail` is `pytest`); separators inside quotes are ignored; skip leading variable assignments; skip a wrapper (env, npx,
     command, time, sudo) with its options, and the operand of each option that
-    takes one (`env -u NAME`); skip `python <options> -m`. Quoting is not parsed.
+    takes one (`env -u NAME`); skip `python <options> -m`. Only quote pairs are tracked.
     """
-    parts = [p for p in re.split(r"&&|;|\|\|?", command) if p.strip()]
-    words = parts[-1].split() if parts else []
+    parts = [[st for st in seg if st.strip()] for seg in _stages(command)]
+    parts = [seg for seg in parts if seg]
+    words = parts[-1][0].split() if parts else []
     i = 0
     wrapper = None
     while i < len(words):
@@ -173,8 +212,9 @@ def _tool(command):
             i += 1
         elif re.match(r"^python[\d.]*$", word) and _python_module_at(words, i + 1) is not None:
             i = _python_module_at(words, i + 1)
-            if words[i].startswith("-m"):
-                words[i] = words[i][2:]
+            attached = _M_CLUSTER.fullmatch(words[i])
+            if attached:
+                words[i] = attached.group(2)
         else:
             return word.rsplit("/", 1)[-1]
     return ""
