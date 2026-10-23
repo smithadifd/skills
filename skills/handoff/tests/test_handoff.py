@@ -83,6 +83,22 @@ def test_oversized_section_keeps_every_heading_and_says_so():
     assert note.split("## Secrets")[1].split("\n\n")[1] == "none, redacted"
 
 
+def test_huge_repo_and_slug_cannot_push_the_note_over_the_cap():
+    huge = "r" * handoff.CAP_BYTES * 2
+    content = {name: "x" * handoff.CAP_BYTES for name in handoff.SECTIONS}
+    note, truncated = handoff.build_note(content, huge, huge + "\nnewline")
+    assert truncated and len(note.encode("utf-8")) <= handoff.CAP_BYTES
+    for name in handoff.SECTIONS:
+        assert "## " + name in note
+    first = note.split("\n")[0]
+    assert len(first) < 200 and "..." in first
+
+
+def test_huge_header_with_small_body_stays_under_the_cap():
+    note, _ = handoff.build_note({"Goal": "g"}, "r" * 50000, "s" * 50000)
+    assert len(note.encode("utf-8")) <= handoff.CAP_BYTES
+
+
 def test_many_large_sections_all_survive_trimming():
     content = {name: "x" * handoff.CAP_BYTES for name in handoff.SECTIONS}
     note, truncated = handoff.build_note(content, "repo", "slug")

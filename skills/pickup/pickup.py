@@ -2,18 +2,20 @@
 """Read a handoff note and show what to trust. Runs nothing unless asked.
 
     python3 pickup.py [NOTE_PATH] [--repo NAME] [--cwd DIR]
-    python3 pickup.py NOTE_PATH --rerun 1,3 [--cwd DIR]
+    python3 pickup.py NOTE_PATH --rerun 1,3 --note-digest DIGEST [--cwd DIR]
 
 Without NOTE_PATH, uses the newest note in the per-user notes directory under
 the temporary directory (only files owned by you, not group- or world-writable,
 not symlinks). The default run parses the note and lists its Verified commands
 numbered; it executes none of them. --rerun runs only the listed commands, and
-requires an explicit NOTE_PATH. A rerun command that exits nonzero or cannot
+requires an explicit NOTE_PATH and the note digest the listing printed; if
+the note changed since the listing, nothing runs. A rerun command that exits nonzero or cannot
 run is demoted to Claimed; so is every command not rerun.
 A Verified line looks like:  - `command` => result
 """
 import argparse
 import glob
+import hashlib
 import os
 import re
 import stat
@@ -114,16 +116,25 @@ def _bullets(body):
     return [l.strip() for l in body.splitlines() if l.strip() and l.strip() != "none"]
 
 
-def pickup(text, cwd=None, rerun_indices=()):
+def digest(text):
+    """Short digest (first 12 hex of sha256) of exact text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def pickup(text, cwd=None, rerun_indices=(), note_digest=None):
     """Parse a note. Runs only the Verified commands whose 1-based number is in
     rerun_indices (none by default). Returns a dict: stale, commands, verified,
     demoted, not_rerun, claimed, open_questions, skills, decisions."""
+    if rerun_indices and note_digest != digest(text):
+        raise ValueError("note digest does not match the listing; the note changed "
+                         "or no digest was given. Nothing was run. List it again.")
     sections = parse_sections(text)
     commands = []
     for line in sections.get("Verified", "").splitlines():
         m = VERIFIED_LINE.match(line.strip())
         if m:
-            commands.append({"command": m.group("cmd"), "result": m.group("result") or ""})
+            commands.append({"command": m.group("cmd"), "result": m.group("result") or "",
+                             "digest": digest(m.group("cmd"))})
     verified, demoted, not_rerun = [], [], []
     for number, item in enumerate(commands, 1):
         if number not in rerun_indices:
@@ -138,6 +149,7 @@ def pickup(text, cwd=None, rerun_indices=()):
     wrote, head = written_at(text), latest_commit_time(cwd)
     return {
         "stale": bool(wrote and head and head > wrote),
+        "digest": digest(text),
         "written": wrote,
         "head_commit": head,
         "commands": commands,
@@ -158,8 +170,10 @@ def report(result):
     elif result["stale"]:
         out.append("WARNING: the repository has a commit newer than this note (%s > %s)."
                    % (result["head_commit"].isoformat(), result["written"].isoformat()))
+    out.append("Note digest: %s" % result["digest"])
     out.append("Verified commands in the note (%d):" % len(result["commands"]))
-    out += ["  %d. `%s`" % (i, c["command"]) for i, c in enumerate(result["commands"], 1)]
+    out += ["  %d. [%s] `%s`" % (i, c["digest"], c["command"])
+            for i, c in enumerate(result["commands"], 1)]
     out.append("Rerun and passed (%d):" % len(result["verified"]))
     out += ["  - `%s`" % v["command"] for v in result["verified"]]
     out.append("Rerun and failed, demoted to claimed (%d):" % len(result["demoted"]))
@@ -187,6 +201,7 @@ def main(argv=None):
     ap.add_argument("--repo")
     ap.add_argument("--cwd", default=os.getcwd())
     ap.add_argument("--rerun", help="comma-separated Verified command numbers to run")
+    ap.add_argument("--note-digest", help="the note digest printed by the listing")
     args = ap.parse_args(argv)
     if args.rerun is not None and not args.note:
         print("pickup: --rerun needs an explicit note path", file=sys.stderr)
@@ -199,7 +214,8 @@ def main(argv=None):
             return 1
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        result = pickup(text, cwd=args.cwd, rerun_indices=indices)
+        result = pickup(text, cwd=args.cwd, rerun_indices=indices,
+                        note_digest=args.note_digest)
     except (OSError, ValueError) as exc:
         print("pickup: %s" % exc, file=sys.stderr)
         return 1

@@ -56,20 +56,21 @@ def test_cli_default_run_executes_nothing_and_lists_numbered(tmp_path, capsys):
     path.write_text(note(["- `%s` => ok" % touch_cmd(marker)]))
     assert pickup.main([str(path), "--cwd", str(tmp_path)]) == 0
     assert not marker.exists()
-    assert "1. `" in capsys.readouterr().out
+    assert "  1. [" in capsys.readouterr().out
 
 
 def test_rerun_runs_only_listed_commands(tmp_path):
     first, second = tmp_path / "one", tmp_path / "two"
     text = note(["- `%s` => a" % touch_cmd(first), "- `%s` => b" % touch_cmd(second)])
-    result = pickup.pickup(text, cwd=str(tmp_path), rerun_indices={2})
+    result = pickup.pickup(text, cwd=str(tmp_path), rerun_indices={2},
+                           note_digest=pickup.digest(text))
     assert not first.exists() and second.exists()
     assert len(result["verified"]) == 1 and len(result["not_rerun"]) == 1
 
 
 def test_failing_rerun_command_is_demoted_to_claimed():
     text = note(["- `%s` => ok" % OK_CMD, "- `%s` => was passing" % BAD_CMD])
-    result = pickup.pickup(text, rerun_indices={1, 2})
+    result = pickup.pickup(text, rerun_indices={1, 2}, note_digest=pickup.digest(text))
     assert [v["command"] for v in result["verified"]] == [OK_CMD]
     assert [d["command"] for d in result["demoted"]] == [BAD_CMD]
     assert any("failed on rerun" in c and "sys.exit(3)" in c for c in result["claimed"])
@@ -77,7 +78,8 @@ def test_failing_rerun_command_is_demoted_to_claimed():
 
 
 def test_unrunnable_command_is_demoted():
-    result = pickup.pickup(note(["- `definitely-not-a-command-xyz` => ok"]), rerun_indices={1})
+    text = note(["- `definitely-not-a-command-xyz` => ok"])
+    result = pickup.pickup(text, rerun_indices={1}, note_digest=pickup.digest(text))
     assert len(result["demoted"]) == 1 and not result["verified"]
 
 
@@ -88,9 +90,43 @@ def test_cli_rerun_requires_explicit_path(private_tmp, capsys):
 
 def test_cli_rerun_reports_demotion(private_tmp, capsys):
     path = private_tmp / "n.md"
-    path.write_text(note(["- `%s` => was ok" % BAD_CMD]))
-    assert pickup.main([str(path), "--rerun", "1", "--cwd", str(private_tmp)]) == 0
+    text = note(["- `%s` => was ok" % BAD_CMD])
+    path.write_text(text)
+    assert pickup.main([str(path), "--rerun", "1", "--note-digest", pickup.digest(text),
+                        "--cwd", str(private_tmp)]) == 0
     assert "failed, demoted to claimed (1)" in capsys.readouterr().out
+
+
+def test_listing_prints_note_and_command_digests(tmp_path, capsys):
+    text = note(["- `%s` => ok" % OK_CMD])
+    path = tmp_path / "n.md"
+    path.write_text(text)
+    assert pickup.main([str(path), "--cwd", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "Note digest: " + pickup.digest(text) in out
+    assert "[" + pickup.digest(OK_CMD) + "]" in out
+
+
+def test_note_edited_after_listing_is_refused_and_nothing_runs(tmp_path, capsys):
+    marker = tmp_path / "ran"
+    path = tmp_path / "n.md"
+    path.write_text(note(["- `%s` => ok" % OK_CMD]))
+    assert pickup.main([str(path), "--cwd", str(tmp_path)]) == 0
+    listed = next(l for l in capsys.readouterr().out.splitlines()
+                  if l.startswith("Note digest: ")).split(": ")[1]
+    path.write_text(note(["- `%s` => ok" % touch_cmd(marker)]))
+    rc = pickup.main([str(path), "--rerun", "1", "--note-digest", listed, "--cwd", str(tmp_path)])
+    assert rc == 1
+    assert not marker.exists()
+    assert "Nothing was run" in capsys.readouterr().err
+
+
+def test_rerun_without_a_digest_is_refused(tmp_path, capsys):
+    marker = tmp_path / "ran"
+    path = tmp_path / "n.md"
+    path.write_text(note(["- `%s` => ok" % touch_cmd(marker)]))
+    assert pickup.main([str(path), "--rerun", "1", "--cwd", str(tmp_path)]) == 1
+    assert not marker.exists()
 
 
 def test_cli_bad_rerun_spec_is_a_clean_error(private_tmp, capsys):

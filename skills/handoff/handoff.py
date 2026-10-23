@@ -130,10 +130,22 @@ def _section_text(value):
     return str(value).strip()
 
 
+HEADER_FIELD_MAX = 80
+
+
+def _bound(value):
+    """One line, at most HEADER_FIELD_MAX characters, with a marker when cut."""
+    value = " ".join(str(value).split())
+    if len(value) > HEADER_FIELD_MAX:
+        value = value[: HEADER_FIELD_MAX - 3] + "..."
+    return value
+
+
 def build_note(content, repo, slug, now=None):
     """Render the note. Returns (text, truncated). Every section is always
     present; when the note is too large, section bodies are cut, never headings."""
     now = now or datetime.now(timezone.utc)
+    repo, slug = _bound(repo), _bound(slug)
     head = "# Handoff: %s / %s\n\nWritten: %s\n\n" % (
         repo, slug, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     bodies = {}
