@@ -29,14 +29,16 @@ Either way the span has an opening quote character `q`. The span ends at the fir
 **Clean end.** The suffix after the closing quote is kept only when the closing quote is followed by:
 
 - whitespace or the end of the line; or
-- a run of one or more of `,` `;` `)` `]` `}` that is itself followed by whitespace or the end of the line.
+- a shell metacharacter that ends a word: `;` `&` `|` `<` `>` `(` `)`. Whatever follows one of these is a new token (a redirect target, a pipe, the next command), never part of the header argument; or
+- a run of one or more of `,` `]` `}` that is itself followed by whitespace, the end of the line, or one of the metacharacters above. A shell treats `,` `]` `}` as ordinary word characters, so the run alone does not end the argument; only what follows it can.
 
 Anything else is not a clean end, and the value is redacted to the end of the line (§ 3). In particular:
 
 | After the closing quote | Reading | Result |
 |---|---|---|
 | ` -X POST`, end of line | span is closed | suffix kept |
-| `], retries = 3`, `)` + EOL, `},` + space | span closed by a list/call/dict | suffix kept |
+| `>response.txt`, `\|jq .`, `;echo done`, `&&next` | shell metacharacter ends the word | suffix kept |
+| `], retries = 3`, `)` + EOL, `},` + space, `])` | span closed by a list/call/dict | suffix kept |
 | `"` or `'` (`"a=","response=x"` has `,` then `"`) | shell concatenates adjacent words; a list item with no space after the comma reads the same way | to end of line |
 | a letter, digit or other word character (`"..."tail`) | shell concatenation | to end of line |
 | `]x`, `}x`, `,x` (closer run not followed by whitespace) | shell treats `]` `}` `,` as ordinary word characters | to end of line |
@@ -70,5 +72,7 @@ Each row below is a test; the secret marker (`tailsecret`) must be absent from t
 9. `Authorization: Digest username="u", response="tailsecret"` → no `tailsecret`.
 10. `curl -H "Authorization: Bearer tail\"secret" https://x` (escaped quote) → no `secret`; ` https://x` kept.
 11. `["Authorization: Bearer x","Accept: tailsecret"]` → no `tailsecret` (over-redacted, by design).
+12. `curl -H "Authorization: Digest algorithm=MD5",username='"u"',nonce='"tailsecret"' https://x` → no `tailsecret`.
+13. `curl -H "Authorization: Basic dGFpbHNlY3JldA==">response.txt` → no `dGFpbHNlY3JldA==`; `>response.txt` kept.
 
-Cases 2–5 are the four inputs that leaked under the previous attempt. Each test is observed red under a targeted mutation of the clean-end rule (for 2–5 and 11: accept any closer run as a clean end; for 1: accept any following character; for 6–8: always redact to the end of the line) and green after restoration.
+Cases 2–5 and 12 are inputs that leaked under the previous attempt. Each test is observed red under a targeted mutation of the clean-end rule (for 2–5, 11 and 12: accept a closer run as a clean end whatever follows it; for 1: accept any following character; for 6–8 and 13: always redact to the end of the line) and green after restoration.
