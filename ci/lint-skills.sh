@@ -185,20 +185,18 @@ if [ -z "${NO_PERSON_DENY:-}" ]; then
 elif [ "$deny_status" -eq 2 ]; then
   lint_fail no-person-deny-config 'NO_PERSON_DENY is not a valid extended regular expression'
 else
-  own_url=
-  if [ -n "$OWNER" ] && [ -n "$REPO" ]; then
-    own_url="github.com/$OWNER/$REPO"
-  fi
-  # Cut only the repository's own URL text out of each line (a literal,
-  # case-insensitive match of one allowed form (https://, http://,
-  # ssh://git@, git@host:, or bare host/owner/repo) that starts a token: line
-  # start, whitespace, an opening bracket or a quote; and ends at a
-  # boundary: end of line, a path or query separator, .git, whitespace, a
-  # quote or a closing bracket), then apply the deny expression to what is
-  # left, so a denied term elsewhere on the same line is still found. Every
-  # stage reads bytes as text (-a, the C locale, NUL turned into a space) so
-  # a tracked binary file is scanned too.
-  # A file that cannot be read, or a failing stage, fails the step.
+  # Hide only the repository's own URL from the deny scan, and only where a
+  # whole whitespace-separated word is exactly one allowed form of it.
+  # The word may carry one trailing mark (. , ; : ! ?) and one wrapper pair
+  # ( ) < > " " ' ' or backticks. Allowed forms: https://, http://,
+  # ssh://git@ or no scheme before github.com/owner/repo, and
+  # git@github.com:owner/repo, each with an optional .git and an optional
+  # tail starting with / ? or #. A one-word Markdown link [text](form) also
+  # qualifies. Only the scheme, host, owner and repo characters are removed;
+  # the link text, .git, tail, wrappers and punctuation are scanned as usual,
+  # and any other word is scanned unchanged. Every stage reads bytes as text
+  # (-a, the C locale, NUL turned into a space) so a tracked binary file is
+  # scanned too. A file that cannot be read, or a failing stage, fails the step.
   scan_tracked() {
     local f rc=0
     while IFS= read -r -d '' f; do
@@ -211,26 +209,93 @@ else
   }
   scan_text() {
     scan_tracked | LC_ALL=C tr '\000' ' ' |
-      LC_ALL=C awk -v url="$own_url" '
+      LC_ALL=C awk -v owner="$OWNER" -v repo="$REPO" '
         BEGIN {
-          u = tolower(url)
-          ure = u
-          gsub(/\./, "\\.", ure)
-          urc = ure
-          sub(/\//, ":", urc)
-          # Allowed forms only: https://, http://, ssh://git@ or no scheme
-          # before host/owner/repo, or git@host:owner/repo; each a whole token.
-          re = "(^|[ \t(<\"\047`])((https?://|ssh://git@)?" ure "|git@" urc ")(\\.git)?([]/#?\"\047)>,;: \t]|\\.($|[ \t])|$)"
+          sq = "\047"
+          o = tolower(owner)
+          r = tolower(repo)
+          nf = 0
+          if (o != "" && r != "") {
+            forms[++nf] = "https://github.com/" o "/" r
+            forms[++nf] = "http://github.com/" o "/" r
+            forms[++nf] = "ssh://git@github.com/" o "/" r
+            forms[++nf] = "git@github.com:" o "/" r
+            forms[++nf] = "github.com/" o "/" r
+          }
+        }
+        # formlen(c): length of the allowed form at the start of c when the
+        # rest is nothing, or .git and/or a tail starting with / ? or #; else 0.
+        function formlen(c,    i, f, rem) {
+          for (i = 1; i <= nf; i++) {
+            f = forms[i]
+            if (substr(c, 1, length(f)) != f) continue
+            rem = substr(c, length(f) + 1)
+            if (substr(rem, 1, 4) == ".git") rem = substr(rem, 5)
+            if (rem == "" || index("/?#", substr(rem, 1, 1)) > 0) return length(f)
+          }
+          return 0
+        }
+        # span(c, base): set gs/gl to the 1-based start and length, within the
+        # word, of the text to hide when c (starting after base characters of
+        # the word) is a form or a one-word Markdown link to one.
+        function span(c, base,    fl, i, t, inner) {
+          fl = formlen(c)
+          if (fl > 0) { gs = base + 1; gl = fl; return 1 }
+          if (substr(c, 1, 1) == "[" && substr(c, length(c), 1) == ")") {
+            i = index(c, "](")
+            if (i > 0) {
+              t = substr(c, 2, i - 2)
+              if (index(t, "[") == 0 && index(t, "]") == 0) {
+                inner = substr(c, i + 2, length(c) - i - 2)
+                fl = formlen(inner)
+                if (fl > 0) { gs = base + i + 2; gl = fl; return 1 }
+              }
+            }
+          }
+          return 0
+        }
+        function pair(op, cl) {
+          return (op == "(" && cl == ")") || (op == "<" && cl == ">") ||
+            (op == "\"" && cl == "\"") || (op == sq && cl == sq) || (op == "`" && cl == "`")
+        }
+        # hide(w): w without the hidden form when w is exempt, else w.
+        function hide(w,    len, tr, wr, e, b, ee, c) {
+          len = length(w)
+          for (tr = 0; tr <= 1; tr++) {
+            e = len
+            if (tr) {
+              if (len < 1 || index(".,;:!?", substr(w, len, 1)) == 0) continue
+              e = len - 1
+            }
+            for (wr = 0; wr <= 1; wr++) {
+              b = 0
+              ee = e
+              if (wr) {
+                if (e < 2 || !pair(substr(w, 1, 1), substr(w, e, 1))) continue
+                b = 1
+                ee = e - 1
+              }
+              c = tolower(substr(w, b + 1, ee - b))
+              if (span(c, b)) return substr(w, 1, gs - 1) substr(w, gs + gl)
+            }
+          }
+          return w
         }
         {
-          out = ""
-          rest = $0
-          while (u != "" && match(tolower(rest), re)) {
-            start = RSTART + index(substr(tolower(rest), RSTART, RLENGTH), "github.com") - 1
-            out = out substr(rest, 1, start - 1)
-            rest = substr(rest, start + length(u))
+          pre = ""
+          body = $0
+          if (match($0, /^[^:]*:[0-9]+:/)) {
+            pre = substr($0, 1, RLENGTH)
+            body = substr($0, RLENGTH + 1)
           }
-          print out rest
+          out = ""
+          while (nf > 0 && match(body, /^[ \t]*[^ \t]+/)) {
+            seg = substr(body, 1, RLENGTH)
+            body = substr(body, RLENGTH + 1)
+            match(seg, /[^ \t]+$/)
+            out = out substr(seg, 1, RSTART - 1) hide(substr(seg, RSTART))
+          }
+          print pre out body
         }'
   }
   scan_out=$(scan_text)
