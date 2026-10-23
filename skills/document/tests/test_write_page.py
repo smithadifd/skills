@@ -317,3 +317,147 @@ def test_a_250_byte_page_name_can_be_created_and_updated(layout):
     assert result.returncode == 0, result.stderr.decode()
     assert page.read_bytes() == b"longer\n"
     assert [p.name for p in (repo / "docs").iterdir()] == [page.name]
+
+
+# A repository with no docs folder yet: create mode makes the output root
+# itself, below the same no-follow rules as every other component.
+
+def test_create_makes_a_missing_docs_root(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    dest = repo / "docs" / "page.md"
+    result = run(repo, repo / "docs", dest, "create", "# New\n")
+    assert result.returncode == 0, result.stderr.decode()
+    assert dest.read_text() == "# New\n"
+
+
+def test_update_still_needs_an_existing_docs_root(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = run(repo, repo / "docs", repo / "docs" / "page.md", "update")
+    assert_refused(result)
+    assert not (repo / "docs").exists()
+
+
+def test_a_symlink_where_the_docs_root_would_go_is_refused(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "docs").symlink_to(outside, target_is_directory=True)
+    result = run(repo, repo / "docs", repo / "docs" / "page.md", "create")
+    assert_refused(result)
+    assert list(outside.iterdir()) == []
+
+
+# Swap a symlink in at each step of the walk, between the check and that
+# step's open, and prove nothing lands outside the repository. The swap runs
+# from a wrapper around the real os call, installed by the test only.
+
+def _snapshot(path):
+    return sorted((str(p.relative_to(path)), p.read_bytes() if p.is_file() else None)
+                  for p in path.rglob("*"))
+
+
+def _hook(monkeypatch, name, when, action, kind="before"):
+    real = getattr(os, name)
+    state = {"done": False}
+
+    def wrapper(*args, **kwargs):
+        hit = not state["done"] and when(args, kwargs)
+        if hit:
+            state["done"] = True
+            if kind == "before":
+                action()
+        result = real(*args, **kwargs)
+        if hit and kind == "after":
+            action()
+        return result
+
+    monkeypatch.setattr(os, name, wrapper)
+    return state
+
+
+def _swap_dir(path, target):
+    """Replace the directory at path with a symlink to target."""
+    def action():
+        path.rename(path.with_name(path.name + "-moved"))
+        path.symlink_to(target, target_is_directory=True)
+    return action
+
+
+def _plant(path, target):
+    def action():
+        if path.exists() or path.is_symlink():
+            path.unlink()
+        path.symlink_to(target)
+    return action
+
+
+STEPS = ["repo", "docs_component", "nested_component", "created_root",
+         "temp_file", "create_link", "update_replace"]
+
+
+@pytest.mark.parametrize("step", STEPS)
+def test_a_symlink_swapped_in_at_each_step_never_writes_outside(tmp_path, monkeypatch, step):
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    (outside / "docs" / "api").mkdir(parents=True)
+    (outside / "file.md").write_text("untouched\n")
+    mode = "create"
+    if step == "created_root":
+        repo.mkdir()
+    else:
+        (repo / "docs" / "api").mkdir(parents=True)
+    dest = repo / "docs" / "api" / "page.md"
+    if step == "update_replace":
+        mode = "update"
+        dest.write_text("old\n")
+    before = _snapshot(outside)
+    real_repo = os.path.realpath(repo)
+
+    if step == "repo":
+        _hook(monkeypatch, "open", lambda a, k: a[0] == real_repo,
+              _swap_dir(repo, outside))
+    elif step == "docs_component":
+        _hook(monkeypatch, "open", lambda a, k: a[0] == "docs" and "dir_fd" in k,
+              _swap_dir(repo / "docs", outside / "docs"))
+    elif step == "nested_component":
+        _hook(monkeypatch, "open", lambda a, k: a[0] == "api" and "dir_fd" in k,
+              _swap_dir(repo / "docs" / "api", outside / "docs" / "api"))
+    elif step == "created_root":
+        _hook(monkeypatch, "mkdir", lambda a, k: a[0] == "docs",
+              _swap_dir(repo / "docs", outside / "docs"), kind="after")
+    elif step == "temp_file":
+        monkeypatch.setattr(write_page.secrets, "token_hex", lambda n: "fixed")
+        _plant(repo / "docs" / "api" / ".wp-fixed.tmp", outside / "file.md")()
+    elif step == "create_link":
+        _hook(monkeypatch, "link", lambda a, k: a[1] == "page.md",
+              _plant(dest, outside / "file.md"))
+    elif step == "update_replace":
+        _hook(monkeypatch, "replace", lambda a, k: a[1] == "page.md",
+              _plant(dest, outside / "file.md"))
+
+    paths = write_page.check_paths(str(repo), str(repo / "docs"), str(dest), mode)
+    try:
+        write_page.write_through(*paths, b"escaped\n", mode)
+    except write_page.Refusal:
+        pass
+    except OSError:
+        pass
+    assert _snapshot(outside) == before
+    assert (outside / "file.md").read_text() == "untouched\n"
+
+
+def test_a_different_directory_at_the_repository_path_is_refused(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    other = tmp_path / "other"
+    (other / "docs").mkdir(parents=True)
+    dest = repo / "docs" / "page.md"
+    paths = write_page.check_paths(str(repo), str(repo / "docs"), str(dest), "create")
+    repo.rename(tmp_path / "repo-moved")
+    other.rename(repo)
+    with pytest.raises(write_page.Refusal, match="changed after"):
+        write_page.write_through(*paths, b"x", "create")
+    assert list((repo / "docs").iterdir()) == []

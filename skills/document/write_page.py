@@ -21,6 +21,11 @@ Refusals exit 1, print one line on stderr and write nothing:
     --dest is outside the canonical --root;
   - --mode create and the destination exists;
   - --mode update and the destination is missing or is not a regular file.
+  - the repository path, or any directory on the way, is a symlink when it is
+    opened, or the opened repository is not the directory that was checked.
+
+In create mode a missing output root is created, one component at a time,
+with the same no-follow opening.
 
 The repository README is allowed only in the form
     --root <repo> --dest <repo>/README.md
@@ -42,6 +47,13 @@ class Refusal(Exception):
     """A guard failed; nothing was written."""
 
 
+class RepoPath(str):
+    """The canonical repository path, plus the identity of the directory seen
+    when it was validated, so the later open can prove it is the same one."""
+
+    identity = None
+
+
 class Published(Exception):
     """The page is in place, but syncing the directory afterwards failed."""
 
@@ -55,12 +67,14 @@ def _parts(path):
     return [p for p in path.split(os.sep) if p]
 
 
-def check_paths(repo, root, dest):
+def check_paths(repo, root, dest, mode="update"):
     """Validate the three paths without touching the destination.
 
-    Returns (real_repo, rel_parts, root_depth): the canonical repository root,
-    the destination as components below it, and how many of those components
-    lead to the output root.
+    Returns (real_repo, rel_parts, root_depth): the canonical repository root
+    (carrying the identity of the directory that was validated), the
+    destination as components below it, and how many of those components lead
+    to the output root. In create mode the output root may not exist yet;
+    write_through then creates it.
     """
     for label, value in (("repo", repo), ("root", root), ("dest", dest)):
         if not value:
@@ -92,13 +106,19 @@ def check_paths(repo, root, dest):
         raise Refusal("repository root is not a directory")
     if not _inside(real_root, real_repo):
         raise Refusal("canonical output root is outside the canonical repository")
-    if not os.path.isdir(real_root):
+    if mode != "create" and not os.path.isdir(real_root):
         raise Refusal("output root is not an existing directory")
     if not _inside(real_dest, real_root) or real_dest == real_root:
         raise Refusal("canonical destination is outside the canonical output root")
 
     rel_parts = _parts(os.path.relpath(dest_abs, repo_abs))
     root_depth = len(_parts(os.path.relpath(root_abs, repo_abs)))
+    try:
+        seen = os.stat(real_repo)
+    except OSError as exc:
+        raise Refusal(f"cannot inspect the repository root: {exc.strerror}")
+    real_repo = RepoPath(real_repo)
+    real_repo.identity = (seen.st_dev, seen.st_ino)
     return real_repo, rel_parts, root_depth
 
 
@@ -138,21 +158,36 @@ def _write_temp(dir_fd, text, perm):
 def write_through(real_repo, rel_parts, root_depth, text, mode):
     """Open the destination relative to directory handles and write text.
 
-    Every component is opened with O_NOFOLLOW. Directories below the output
-    root are created in create mode; anything above it must already exist.
+    Every open on the way is relative to a directory handle that is already
+    held and refuses a symlink (O_NOFOLLOW): the repository, each component,
+    the temporary file. In create mode any missing directory, including the
+    output root itself, is made the same way; update mode needs them all.
+    The repository handle must be the directory check_paths validated.
     """
     fds = []
     try:
-        fd = os.open(real_repo, DIR_FLAGS)
+        try:
+            fd = os.open(real_repo, DIR_FLAGS | NOFOLLOW)
+        except OSError as exc:
+            raise Refusal(f"cannot open the repository without following links: {exc.strerror}")
         fds.append(fd)
-        for index, part in enumerate(rel_parts[:-1]):
+        expected = getattr(real_repo, "identity", None)
+        if expected is not None:
+            opened_id = os.fstat(fd)
+            if (opened_id.st_dev, opened_id.st_ino) != expected:
+                raise Refusal("the repository changed after it was checked")
+        for part in rel_parts[:-1]:
             try:
-                fd = os.open(part, DIR_FLAGS | NOFOLLOW, dir_fd=fd)
-            except FileNotFoundError:
-                if mode != "create" or index < root_depth:
-                    raise Refusal(f"directory is missing: {part}")
-                os.mkdir(part, 0o755, dir_fd=fd)
-                fd = os.open(part, DIR_FLAGS | NOFOLLOW, dir_fd=fd)
+                try:
+                    fd = os.open(part, DIR_FLAGS | NOFOLLOW, dir_fd=fd)
+                except FileNotFoundError:
+                    if mode != "create":
+                        raise Refusal(f"directory is missing: {part}")
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                    fd = os.open(part, DIR_FLAGS | NOFOLLOW, dir_fd=fd)
             except OSError as exc:
                 raise Refusal(f"cannot open directory {part} without following links: {exc.strerror}")
             fds.append(fd)
@@ -214,7 +249,7 @@ def main(argv=None):
         text = sys.stdin.buffer.read()
         if not text.strip():
             raise Refusal("page text on stdin is empty")
-        real_repo, rel_parts, root_depth = check_paths(args.repo, args.root, args.dest)
+        real_repo, rel_parts, root_depth = check_paths(args.repo, args.root, args.dest, args.mode)
         write_through(real_repo, rel_parts, root_depth, text, args.mode)
     except Refusal as exc:
         print(f"write_page: refused: {exc}", file=sys.stderr)
