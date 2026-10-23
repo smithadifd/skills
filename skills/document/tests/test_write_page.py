@@ -268,6 +268,91 @@ def test_a_directory_sync_failure_after_publication_is_not_reported_as_unchanged
     assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
 
 
+def _dir_close_failing(monkeypatch):
+    """Make closing a directory descriptor fail, after really closing it."""
+    real_close = os.close
+
+    def close_failing_on_directories(fd):
+        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        real_close(fd)
+        if is_dir:
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(write_page.os, "close", close_failing_on_directories)
+
+
+@pytest.mark.parametrize("mode", ["update", "create"])
+def test_a_directory_close_failure_after_publication_is_not_reported_as_unchanged(
+        layout, monkeypatch, capsys, mode):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    if mode == "update":
+        page.write_bytes(b"old\n")
+    _dir_close_failing(monkeypatch)
+    code = _main_with_stdin(monkeypatch, repo, page, mode, b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "written, but closing a directory failed" in err
+    assert "unchanged" not in err
+    assert page.read_bytes() == b"new\n"
+    assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
+
+
+def test_a_temporary_file_cleanup_failure_after_publication_is_not_reported_as_unchanged(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    real_unlink = os.unlink
+
+    def unlink_failing(path, **kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(write_page.os, "unlink", unlink_failing)
+    code = _main_with_stdin(monkeypatch, repo, page, "create", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "written, but removing the temporary file failed" in err
+    assert "unchanged" not in err
+    assert page.read_bytes() == b"new\n"
+    for leftover in (repo / "docs").iterdir():
+        if leftover.name != "page.md":
+            real_unlink(leftover)
+
+
+def test_a_failure_before_publication_still_reports_the_page_unchanged(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    page.write_bytes(b"old\n")
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(write_page.os, "write", failing_write)
+    code = _main_with_stdin(monkeypatch, repo, page, "update", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "destination unchanged" in err
+    assert "written, but" not in err
+    assert page.read_bytes() == b"old\n"
+
+
+def test_a_directory_close_failure_before_publication_does_not_hide_the_refusal(
+        layout, monkeypatch, capsys):
+    repo, _ = layout
+    page = repo / "docs" / "missing.md"
+    _dir_close_failing(monkeypatch)
+    code = _main_with_stdin(monkeypatch, repo, page, "update", b"new\n")
+    monkeypatch.undo()
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "destination is missing" in err
+    assert "written, but" not in err
+
+
 def test_the_temporary_file_is_never_wider_than_0600_while_it_holds_content(
         layout, monkeypatch):
     repo, _ = layout
@@ -512,8 +597,9 @@ def test_a_repository_swapped_while_it_is_being_checked_writes_nothing(tmp_path,
         return _hook_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "stat", racing_stat)
-    with pytest.raises(write_page.Refusal):
-        paths = write_page.check_paths(str(repo), str(repo / "docs"), str(repo / "docs" / "page.md"), "create")
-        write_page.write_through(*paths, b"escaped\n", "create")
+    # check_paths' own second identity read must refuse; write_through's check
+    # is pinned separately by test_a_different_directory_at_the_repository_path_is_refused.
+    with pytest.raises(write_page.Refusal, match="changed while it was being checked"):
+        write_page.check_paths(str(repo), str(repo / "docs"), str(repo / "docs" / "page.md"), "create")
     monkeypatch.undo()
     assert list((repo / "docs").iterdir()) == []

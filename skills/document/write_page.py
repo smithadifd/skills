@@ -56,7 +56,11 @@ class RepoPath(str):
 
 
 class Published(Exception):
-    """The page is in place, but syncing the directory afterwards failed."""
+    """The page is in place, but a later step failed; step names it."""
+
+    def __init__(self, step, detail):
+        super().__init__(detail)
+        self.step = step
 
 
 def _inside(child, parent):
@@ -177,6 +181,7 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
     The repository handle must be the directory check_paths validated.
     """
     fds = []
+    completed = False
     try:
         try:
             fd = os.open(real_repo, DIR_FLAGS | NOFOLLOW)
@@ -244,12 +249,25 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
         try:
             if mode == "create":
                 _unlink_quietly(tmp, fd)
+        except OSError as exc:
+            raise Published("removing the temporary file", exc.strerror)
+        try:
             os.fsync(fd)
         except OSError as exc:
-            raise Published(exc.strerror)
+            raise Published("syncing the directory", exc.strerror)
+        completed = True
     finally:
+        # Every handle is closed even if one close fails. A failed close
+        # reaches the caller only when nothing else is already in flight, and
+        # then the page is published (completed is set after publication).
+        close_error = None
         for opened in fds:
-            os.close(opened)
+            try:
+                os.close(opened)
+            except OSError as exc:
+                close_error = close_error or exc
+        if close_error is not None and completed:
+            raise Published("closing a directory", close_error.strerror)
 
 
 def main(argv=None):
@@ -269,7 +287,7 @@ def main(argv=None):
         print(f"write_page: refused: {exc}", file=sys.stderr)
         return 1
     except Published as exc:
-        print(f"write_page: written, but syncing the directory failed: {exc}", file=sys.stderr)
+        print(f"write_page: written, but {exc.step} failed: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
         print(f"write_page: refused: write failed, destination unchanged: {exc.strerror}", file=sys.stderr)
