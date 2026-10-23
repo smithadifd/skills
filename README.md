@@ -17,6 +17,7 @@ cd skills
 
 | Skill | What it does |
 | --- | --- |
+| `debug` | Finds the cause of a bug by reproducing it, testing a hypothesis and isolating the fault, then fixes it behind a test that fails first and passes after. |
 | `handoff` | Writes one redacted, size-capped resume note so a fresh session can continue the work. |
 | `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. |
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. |
