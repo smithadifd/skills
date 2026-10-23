@@ -461,3 +461,59 @@ def test_a_different_directory_at_the_repository_path_is_refused(tmp_path):
     with pytest.raises(write_page.Refusal, match="changed after"):
         write_page.write_through(*paths, b"x", "create")
     assert list((repo / "docs").iterdir()) == []
+
+
+# Only the output root itself may be created; its parents must already exist.
+
+def test_nested_root_with_a_missing_parent_is_refused_and_creates_nothing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = repo / "site" / "docs"
+    result = run(repo, root, root / "page.md", "create")
+    assert_refused(result, "directory is missing: site")
+    assert not (repo / "site").exists()
+
+
+def test_nested_root_with_an_existing_parent_is_created(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "site").mkdir(parents=True)
+    root = repo / "site" / "docs"
+    result = run(repo, root, root / "api" / "page.md", "create", "# A\n")
+    assert result.returncode == 0, result.stderr.decode()
+    assert (root / "api" / "page.md").read_text() == "# A\n"
+
+
+def test_a_root_directly_under_the_repository_is_created(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = run(repo, repo / "docs", repo / "docs" / "page.md", "create")
+    assert result.returncode == 0, result.stderr.decode()
+
+
+def test_a_repository_swapped_while_it_is_being_checked_writes_nothing(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    replacement = tmp_path / "replacement"
+    (replacement / "docs").mkdir(parents=True)
+    real_repo = os.path.realpath(repo)
+    calls = []
+
+    def swap():
+        calls.append(1)
+        if len(calls) == 2:
+            repo.rename(tmp_path / "original")
+            replacement.rename(repo)
+
+    _hook_stat = os.stat
+
+    def racing_stat(path, *args, **kwargs):
+        if os.fspath(path) == real_repo:
+            swap()
+        return _hook_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", racing_stat)
+    with pytest.raises(write_page.Refusal):
+        paths = write_page.check_paths(str(repo), str(repo / "docs"), str(repo / "docs" / "page.md"), "create")
+        write_page.write_through(*paths, b"escaped\n", "create")
+    monkeypatch.undo()
+    assert list((repo / "docs").iterdir()) == []

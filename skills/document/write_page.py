@@ -24,8 +24,9 @@ Refusals exit 1, print one line on stderr and write nothing:
   - the repository path, or any directory on the way, is a symlink when it is
     opened, or the opened repository is not the directory that was checked.
 
-In create mode a missing output root is created, one component at a time,
-with the same no-follow opening.
+In create mode a missing output root (its last component only; its parents
+must exist) is created, with the same no-follow opening, and so is anything
+below it.
 
 The repository README is allowed only in the form
     --root <repo> --dest <repo>/README.md
@@ -67,6 +68,14 @@ def _parts(path):
     return [p for p in path.split(os.sep) if p]
 
 
+def _identity(path):
+    try:
+        seen = os.stat(path)
+    except OSError as exc:
+        raise Refusal(f"cannot inspect the repository root: {exc.strerror}")
+    return (seen.st_dev, seen.st_ino)
+
+
 def check_paths(repo, root, dest, mode="update"):
     """Validate the three paths without touching the destination.
 
@@ -82,6 +91,10 @@ def check_paths(repo, root, dest, mode="update"):
         if ".." in _parts(value):
             raise Refusal(f"--{label} contains a '..' component")
     repo_abs = os.path.abspath(repo)
+    # The repository's identity is read before any other check and again after
+    # them, so a swap at any point between is seen; write_through later holds
+    # the opened directory to the same identity.
+    first = _identity(os.path.realpath(repo_abs))
     root_abs = os.path.abspath(root)
     dest_abs = os.path.abspath(dest)
 
@@ -113,12 +126,10 @@ def check_paths(repo, root, dest, mode="update"):
 
     rel_parts = _parts(os.path.relpath(dest_abs, repo_abs))
     root_depth = len(_parts(os.path.relpath(root_abs, repo_abs)))
-    try:
-        seen = os.stat(real_repo)
-    except OSError as exc:
-        raise Refusal(f"cannot inspect the repository root: {exc.strerror}")
+    if _identity(real_repo) != first:
+        raise Refusal("the repository changed while it was being checked")
     real_repo = RepoPath(real_repo)
-    real_repo.identity = (seen.st_dev, seen.st_ino)
+    real_repo.identity = first
     return real_repo, rel_parts, root_depth
 
 
@@ -161,7 +172,8 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
     Every open on the way is relative to a directory handle that is already
     held and refuses a symlink (O_NOFOLLOW): the repository, each component,
     the temporary file. In create mode any missing directory, including the
-    output root itself, is made the same way; update mode needs them all.
+    output root itself, is made the same way, but the directories above the
+    output root must already exist; update mode needs them all.
     The repository handle must be the directory check_paths validated.
     """
     fds = []
@@ -176,12 +188,14 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
             opened_id = os.fstat(fd)
             if (opened_id.st_dev, opened_id.st_ino) != expected:
                 raise Refusal("the repository changed after it was checked")
-        for part in rel_parts[:-1]:
+        for index, part in enumerate(rel_parts[:-1]):
             try:
                 try:
                     fd = os.open(part, DIR_FLAGS | NOFOLLOW, dir_fd=fd)
                 except FileNotFoundError:
-                    if mode != "create":
+                    # Only the output root itself (its last component) and what
+                    # is below it may be made; its parents must already exist.
+                    if mode != "create" or index < root_depth - 1:
                         raise Refusal(f"directory is missing: {part}")
                     try:
                         os.mkdir(part, 0o755, dir_fd=fd)
