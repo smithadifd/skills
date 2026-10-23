@@ -7,8 +7,8 @@ description: >
   isolating the fault and fixing it behind a test that fails first. Use when
   the user says "why does this fail", "this test is failing", "debug this", or
   reports a crash, wrong output or regression. NOT for feature work or new
-  behavior (that is `tdd` or the builder), and NOT for reviewing a diff that
-  already exists (that is `review`).
+  behavior (use `tdd`, or delegate to the `builder-core` agent), and NOT for
+  reviewing a diff that already exists (that is `review`).
 ---
 
 Find the cause of a reported bug and fix it. Never claim a fix without a test
@@ -32,7 +32,10 @@ over the one that is easiest to check. Read the error and its stack first.
 
 Narrow until one cause remains, using whichever fits:
 
-- Bisect the history (`git bisect run <command>`) when it used to work.
+- Bisect the history when it used to work: `git bisect start <bad> <good>`,
+  then `git bisect run <command>` (the command exits 0 when good, 1 to 127
+  except 125 when bad). Always finish with `git bisect reset`, including
+  after an interrupted run.
 - Instrument: add a temporary log or assertion at the suspected boundary and
   compare actual against expected values.
 - Reduce the input or the setup to the smallest case that still fails.
