@@ -4,3 +4,5 @@
 
 ## VERDICT
 flagged — the shutdown path drops pending jobs.
+
+INTERVAL: none

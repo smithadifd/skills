@@ -116,7 +116,9 @@ def test_flag_absent_success_is_byte_identical_to_today():
         "artifacts",
         "reason",
         "resume_token",
+        "intervals",
     }
+    assert result["intervals"] == []
     assert result["status"] == "success"
     assert result["artifacts"]["findings.json"]["verdict"] == "changes_requested"
 

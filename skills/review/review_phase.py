@@ -20,6 +20,15 @@ closed (`additionalProperties: false`) with a complete `required` list, and
 each finding carries exactly `file`, `line`, `rule`, `description`,
 `severity`.
 
+Every return ends with an INTERVAL record: its last non-blank line is
+`INTERVAL: none`, or one `INTERVAL: from <start event>, <start source> to
+<end event>, <end source> = <duration>` line per measured interval the verdict
+relies on. That record is the only place this phase reads for time; the
+adapters never see it, and on success the phase result carries `intervals`
+(`[]` for `none`). A return whose record is missing, malformed, missing an
+endpoint, contradictory or duplicated is `failure`, with a reason naming the
+line (references/structured-interval.md).
+
 With `REVIEW_PHASE_JEV_SHADOW=1`, a successful regex parse also sends
 `jev_client.trim_payload(review.md)` through the existing `JevClient` and adds
 advisory `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason`
@@ -248,7 +257,7 @@ _GROK_VERDICT_LABEL = re.compile(
 
 def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     """`## FINDINGS` bullets + `## VERDICT <cleared|flagged> — <sentence>`."""
-    lines = text.splitlines()
+    lines = _review_lines(text)
     bullets: list[str] | None = None
     unparsed = False
     verdict: str | None = None
@@ -311,7 +320,7 @@ _CLAUDE_SECTIONS = (
 def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     """The reviewer agent's block, the headless `VERDICT:` shape, or the
     `review` skill's tagged bullets."""
-    lines = text.splitlines()
+    lines = _review_lines(text)
     verdict: str | None = None
     for line in lines:
         matched = _CLAUDE_VERDICT_HEADING.match(line) or _CLAUDE_VERDICT_LABEL.match(line)
@@ -454,32 +463,37 @@ def _check(value: object, schema: dict, path: str, errors: list[str]) -> None:
             _check(item, schema["items"], f"{path}[{index}]", errors)
 
 
-# --- measured-interval records ----------------------------------------------
+# --- the INTERVAL record ------------------------------------------------------
 
-# A review verdict that relies on a measured interval must name both physical
-# endpoints. `review-findings/v1` is closed, so parsed records live on the
-# phase result as `intervals`, not inside findings.json.
+# Every review ends with an INTERVAL record. Its last non-blank line is
+# `INTERVAL: none`, or one `INTERVAL: from <start event>, <start source> to
+# <end event>, <end source> = <duration>` line per measured interval the
+# verdict relies on, consecutive. The record block is the run of INTERVAL
+# lines that ends at the last non-blank line; a blank line ends the run.
+# Nothing else in the review is read for a time or for the word INTERVAL, so
+# a duration, a commit sha or a quoted INTERVAL example anywhere else never
+# matters. `review-findings/v1` is closed, so parsed records live on the
+# phase result as `intervals`, not inside findings.json. The grammar and the
+# refusals are written out in references/structured-interval.md.
+INTERVAL_MISSING = "review_interval_missing"
+INTERVAL_MALFORMED = "review_interval_malformed"
 INTERVAL_ENDPOINTS_MISSING = "review_interval_endpoints_missing"
+INTERVAL_CONTRADICTORY = "review_interval_contradictory"
+INTERVAL_DUPLICATE = "review_interval_duplicate"
 _INTERVAL_FIELDS = ("start_event", "start_source", "end_event", "end_source", "duration")
-# `_INTERVAL_LINE` runs on every line of every successfully parsed review;
-# `_INTERVAL_PARTS` runs on each body it accepted. The line body ends on a
-# non-space/tab (or is empty), so the trailing `[ \t]*` never shares a
-# whitespace run with a lazy group (the `(.*?)[ \t]*$` form it replaces was
-# quadratic on `INTERVAL: a` + n spaces + `b`). The body form walks separators
-# left to right, advancing to the next candidate when a part would contain a
-# newline or the remaining grammar cannot complete, so five lazy `(.*?)`
-# groups never split the same whitespace (that form was cubic on `from a,`
-# + n spaces + `b`). Trailing whitespace on the source groups is a linear
-# `str.rstrip()` (the same Unicode set as `\s`); `\s+$` was quadratic on a
-# long internal whitespace run then a non-space. The lines and groups they
-# accept are exactly those of the patterns they replace.
+# One line. The body ends on a non-space/tab (or is empty), so the trailing
+# `[ \t]*` never shares a whitespace run with the body group (the lazy
+# `(.*?)[ \t]*$` form it replaces was quadratic on `INTERVAL: a` + n spaces +
+# `b`).
 _INTERVAL_LINE = re.compile(
     r"^[ \t]*INTERVAL[ \t]*:[ \t]*((?:[^\n]*[^ \t\n])?)[ \t]*$",
-    re.IGNORECASE | re.MULTILINE,
+    re.IGNORECASE,
 )
 _INTERVAL_FROM = re.compile(r"^from\s+", re.IGNORECASE)
 _INTERVAL_TO = re.compile(r"to\s+", re.IGNORECASE)
 _INTERVAL_WS = re.compile(r"\s*")
+_INTERVAL_DURATION = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d)")
+_REFUSAL_LINE_MAX = 200
 
 
 class _IntervalPartsMatch:
@@ -491,811 +505,149 @@ class _IntervalPartsMatch:
 
 
 class _IntervalParts:
-    """INTERVAL body grammar: from <e>, <s> to <e>, <s> = <d>.
+    """INTERVAL body grammar on one line: from <e>, <s> to <e>, <s> = <d>.
 
-    Left-to-right separator scan; later candidates only when a part would
-    contain a newline or the remaining grammar cannot complete.
+    The first `,` ends the start event, the first `to` plus whitespace after
+    it ends the start source, the next `,` ends the end event, and the last
+    `=` ends the end source, so an end source may itself hold `=`
+    (`a log line k=v`). Each separator is found once, left to right (the last
+    `=` from the right), so the walk is linear in the line. Whitespace after
+    a separator is skipped; trailing whitespace on the two sources is
+    stripped with `str.rstrip()`, the same Unicode set as `\\s`.
     """
 
     def match(self, text: str) -> _IntervalPartsMatch | None:
         headed = _INTERVAL_FROM.match(text)
         if headed is None:
             return None
-        start_at = headed.end()
-
-        def from_end_source(source_at: int) -> tuple[str, str] | None:
-            eq = source_at - 1
-            while True:
-                eq = text.find("=", eq + 1)
-                if eq < 0:
-                    return None
-                end_source = text[source_at:eq].rstrip()
-                if "\n" in end_source:
-                    return None
-                duration_at = _INTERVAL_WS.match(text, eq + 1).end()
-                duration = text[duration_at:]
-                if duration.endswith("\n"):
-                    duration = duration[:-1]
-                if "\n" in duration:
-                    continue
-                return end_source, duration
-
-        def from_end_event(event_at: int) -> tuple[str, str, str] | None:
-            comma = event_at - 1
-            while True:
-                comma = text.find(",", comma + 1)
-                if comma < 0:
-                    return None
-                end_event = text[event_at:comma]
-                if "\n" in end_event:
-                    return None
-                rest = from_end_source(_INTERVAL_WS.match(text, comma + 1).end())
-                if rest is not None:
-                    return (end_event,) + rest
-                if "\n" not in text:
-                    return None
-
-        def from_start_source(source_at: int) -> tuple[str, str, str, str] | None:
-            to_at = source_at
-            while True:
-                to = _INTERVAL_TO.search(text, to_at)
-                if to is None:
-                    return None
-                start_source = text[source_at : to.start()].rstrip()
-                if "\n" in start_source:
-                    return None
-                rest = from_end_event(to.end())
-                if rest is not None:
-                    return (start_source,) + rest
-                if "\n" not in text:
-                    return None
-                to_at = to.start() + 1
-
-        comma = start_at - 1
-        while True:
-            comma = text.find(",", comma + 1)
-            if comma < 0:
-                return None
-            start_event = text[start_at:comma]
-            if "\n" in start_event:
-                return None
-            rest = from_start_source(_INTERVAL_WS.match(text, comma + 1).end())
-            if rest is not None:
-                start_source, end_event, end_source, duration = rest
-                return _IntervalPartsMatch(
-                    {
-                        "start_event": start_event,
-                        "start_source": start_source,
-                        "end_event": end_event,
-                        "end_source": end_source,
-                        "duration": duration,
-                    }
-                )
-            if "\n" not in text:
-                return None
+        start_comma = text.find(",", headed.end())
+        if start_comma < 0:
+            return None
+        start_source_at = _INTERVAL_WS.match(text, start_comma + 1).end()
+        to = _INTERVAL_TO.search(text, start_source_at)
+        if to is None:
+            return None
+        end_comma = text.find(",", to.end())
+        if end_comma < 0:
+            return None
+        end_source_at = _INTERVAL_WS.match(text, end_comma + 1).end()
+        equals = text.rfind("=", end_source_at)
+        if equals < 0:
+            return None
+        return _IntervalPartsMatch(
+            {
+                "start_event": text[headed.end() : start_comma],
+                "start_source": text[start_source_at : to.start()].rstrip(),
+                "end_event": text[to.end() : end_comma],
+                "end_source": text[end_source_at:equals].rstrip(),
+                "duration": text[_INTERVAL_WS.match(text, equals + 1).end() :],
+            }
+        )
 
 
 _INTERVAL_PARTS = _IntervalParts()
-# Conservative detector: a number followed by a time unit, word-bounded.
-# Compact attached units omit `s` so a code timeout like `900s` is not a
-# measured-interval claim; `41m` / `2h` / `3d` / `500ms` still are. Spaced
-# `min` is omitted for the same reason (`15 min` in a finding about a bound).
-# A spaced number and unit that name a configured bound are not a claim:
-# the next token is timeout, bound, limit, cap or deadline (optional `s`,
-# case-insensitive). Optional closing backticks (at most three) then
-# spaces or tabs may sit between the unit and that token, so a backticked
-# bound still exempts. A newline between the unit and the bound noun does
-# not exempt. The lookahead is one word, so "took 120 seconds before the
-# timeout" still claims. Hyphenated `120-second` is not a
-# token (the separator is `-`, not whitespace).
-_DURATION_TOKEN = (
-    r"(?:"
-    r"\d+(?:\.\d+)?(?:ms|[mhd])"
-    r"|"
-    r"\d+(?:\.\d+)?\s+(?:milliseconds|seconds|second|minutes|minute|"
-    r"hours|hour|days|day|ms|secs|sec|mins|hrs|hr|[smhd])"
-    r")"
-)
-_BOUND_NOUN = r"(?:timeout|bound|limit|cap|deadline)s?"
-_DURATION_CLAIM = re.compile(
-    rf"(?<![\w.]){_DURATION_TOKEN}\b(?!`{{0,3}}[ \t]+{_BOUND_NOUN}\b)",
-    re.IGNORECASE,
-)
-# Emphasis underscores around a duration (`_3h_`, `__3h__`, `_3 hours_`) are
-# word characters, so they would hide the claim's word boundary. A run of
-# underscores on either side of a duration token is read as a boundary when
-# the whole run sits at a word edge: nothing word-like (or a `.`) before the
-# leading run, nothing word-like after the trailing run. Those underscores
-# become spaces in the scan text. An identifier keeps its underscores and
-# stays a non-claim, because a letter or digit touches the run
-# (`retry_3h_window`, `foo_3h`, `_3h_window`, `3h_window`).
-_EMPHASISED_DURATION = re.compile(
-    rf"(?<![\w.])(_*)({_DURATION_TOKEN})(_*)(?!\w)", re.IGNORECASE
-)
 
 
-def _unwrap_emphasised_duration(match: re.Match[str]) -> str:
-    return " " * len(match.group(1)) + match.group(2) + " " * len(match.group(3))
-
-
-# Section and file references that merely look like a duration: `§3d`,
-# `section 3d`, `foo.py:12d`, and tokens that are paths (`docs/3d/x.md`; a
-# duration-shaped directory later in the path is still just a path).
-# A section id followed by a duration unit word ("section 5 minutes") is a
-# real claim, not a reference, so the id is not erased in that case.
-_UNIT_WORD = (
-    r"(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
-    r"ms|secs?|mins?|hrs?|wks?|[smhd])\b"
-)
-_NOT_A_CLAIM = rf"(?![\w.]|\s+{_UNIT_WORD})"
-_SECTION_REFERENCE = re.compile(
-    rf"§\s*\d[\w.]*{_NOT_A_CLAIM}"
-    rf"|\bsections?\s+\d[\w.]*{_NOT_A_CLAIM}",
-    re.IGNORECASE,
-)
-# A file:line reference (`foo.py:12`, `src/pkg/foo.py:7m`) is a run of path
-# characters that ends in `<name>.<ext>` (the name holding a letter or `_`, the
-# extension starting with a letter), then `:` and a line number. It is found by
-# reading each run of path characters once (`_next_file_line`), never by one
-# regex with nested quantifiers over the run: that regex tried every split of a
-# long token and took seconds on a 4000-character hash, blob or minified line.
-_PATH_RUN = re.compile(r"[\w./+-]+")
-_LINE_NUMBER = re.compile(r":(\d\w*)")
-_EXTENSION = re.compile(r"\.[A-Za-z]\w*", re.IGNORECASE)
-_NAME_LETTER = re.compile(r"[A-Za-z_]", re.IGNORECASE)
-# Only the FIRST lexical component of a path-like token can be a claim glued
-# to it ("waits 3d/foo.py"), read from the token's one normalised form
-# (`_reference_form`: wrappers, then a `?query` / `#fragment` suffix, then
-# sentence punctuation stripped). That component is tested with the
-# formatting wrappers on each side of it stripped too (`_first_component`),
-# so a component wrapped on both sides (`**3h**/a.py`, `` `41m`/x.md ``) is
-# read as `3h` / `41m`. When it is a duration ("3d", "days", "2.5h", the
-# `41m` of `41m?x/y.md`), the token stays visible to the scan with its outer
-# formatting wrappers (the opening delimiters leading, the closing ones and
-# trailing punctuation trailing) turned into spaces, so the scan sees a word
-# boundary before the claim (`_3d/foo.py_` is read as ` 3d/foo.py `).
-# Underscores left right after the duration (`3h_/a.py`) are read as a
-# boundary by `_EMPHASISED_DURATION`. Later components never make a token a
-# claim (`docs/3d/x.md` is just a path). Only the scan text is rewritten,
-# never the review artifact.
-_DURATION_COMPONENT = re.compile(
-    r"^(?:\d+(?:\.\d+)?)?(?:milliseconds|seconds?|minutes?|hours?|days?|weeks?|"
-    r"ms|secs?|mins?|hrs?|wks?|[smhd])$",
-    re.IGNORECASE,
-)
-# The `(...)` target of a Markdown link; the label stays visible to the scan.
-# A `](` whose run never closes is matched too and kept as it is, so the scan
-# moves past it once instead of re-reading it from every later `](` in it.
-_LINK_TARGET = re.compile(r"(?<=\])\([^)\s]*\)?")
-_PATH_PREFIX = re.compile(r"^(?:/|\./|\.\./|~/)")
-_FILE_EXTENSION = re.compile(r"\.[A-Za-z]\w*$")
-_OPENING_WRAPPERS = "\"'`*_([{<"
-_CLOSING_WRAPPERS = _OPENING_WRAPPERS + ".,;:)]}>"
-# The formatting wrappers that can sit on either side of a path's first
-# component, alone or composed (`**3h**`, `_~~3h~~_`): emphasis and
-# strikethrough marks, quotes, backticks, braces and angle brackets. Round and
-# square brackets are not among them: the path-token pass never lets one into
-# a token before its first `/`, and a file:line run holds none.
-_FORMATTING_WRAPPERS = "\"'`*_~{}<>"
-# Sentence punctuation that can close a path (`see docs/x.md?`).
-_SENTENCE_END = "?!"
-# A URI scheme (RFC 3986: a letter, then letters, digits, `+`, `-`, `.`) opening
-# the token, as in a bare URL or a `<...>` autolink. A scheme cannot start with
-# a digit, so a duration glued in front of a URL never reads as one.
-_URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
-
-
-_UNIT_AFTER = re.compile(rf"\s+{_UNIT_WORD}", re.IGNORECASE)
-
-
-def _first_component(form: str) -> str:
-    """The first `/`-component of `form`, formatting wrappers stripped from each side.
-
-    This is the text tested against `_DURATION_COMPONENT`: `**3h**/a.py`,
-    `` `41m`/x.md `` and `"3h"/a.py` all give a duration, `docs/3d/x.md` gives
-    `docs`.
-    """
-    return form.split("/", 1)[0].strip(_FORMATTING_WRAPPERS)
-
-
-def _blank_link_target(match: re.Match[str]) -> str:
-    target = match.group(0)
-    return "()" if target.endswith(")") else target
-
-
-def _blank_file_line(line: str, start: int, end: int, number: str) -> str:
-    """What the scan should see instead of the file:line reference `line[start:end]`."""
-    token = line[start:end]
-    # A file:line reference follows the same path-token rule: only the first
-    # `/`-component can be a claim. When it is a duration the whole token stays
-    # visible, for the path-token pass to handle (`3d/foo.py:12`).
-    if "/" in token and _DURATION_COMPONENT.match(_first_component(token)):
-        return token
-    # A file:line reference followed by a spaced duration unit word is a claim
-    # (`x.y:3 days`): only the reference is erased, the number stays.
-    if _UNIT_AFTER.match(line, end):
-        return " " + number
-    return " "
-
-
-def _ends_in_file_name(line: str, start: int, end: int) -> bool:
-    """Whether the path run `line[start:end]` ends in `<name>.<ext>`."""
-    mark = max(line.rfind(separator, start, end) for separator in "./+-")
-    if mark < start or line[mark] != "." or not _EXTENSION.fullmatch(line, mark, end):
-        return False
-    name_start = max(start, line.rfind(".", start, mark) + 1, line.rfind("/", start, mark) + 1)
-    return _NAME_LETTER.search(line, name_start, mark) is not None
-
-
-def _next_file_line(line: str, pos: int) -> tuple[int, int, str] | None:
-    """The leftmost file:line reference at or after `pos`: (start, end, line number).
-
-    A run that is not a file:line reference from its first position is not one
-    from any later position either (the name and extension tests only see less
-    of it), so each run is read once and the walk is linear in the line.
-    """
-    while True:
-        run = _PATH_RUN.search(line, pos)
-        if run is None:
-            return None
-        start, end = run.span()
-        number = _LINE_NUMBER.match(line, end)
-        if number and _ends_in_file_name(line, start, end):
-            return start, number.end(), number.group(1)
-        pos = end
-
-
-def _blank_references(line: str) -> str:
-    """`line` with each section and file:line reference blanked for the scan.
-
-    The references are taken leftmost first and never overlap, the way one
-    `re.sub` over both kinds would take them; each kind's next match is looked
-    up again only once the previous replacement has passed its start.
-    """
-    pieces: list[str] = []
-    pos = 0
-    section = _SECTION_REFERENCE.search(line)
-    file_line = _next_file_line(line, 0)
-    while section is not None or file_line is not None:
-        if file_line is None or (section is not None and section.start() < file_line[0]):
-            start, end, replacement = section.start(), section.end(), " "
-        else:
-            start, end, number = file_line
-            replacement = _blank_file_line(line, start, end, number)
-        pieces.append(line[pos:start])
-        pieces.append(replacement)
-        pos = end
-        if section is not None and section.start() < pos:
-            section = _SECTION_REFERENCE.search(line, pos)
-        if file_line is not None and file_line[0] < pos:
-            file_line = _next_file_line(line, pos)
-    pieces.append(line[pos:])
-    return "".join(pieces)
-
-
-# A path-like token is judged one piece at a time, split at the delimiters that
-# can glue a claim to a path (`41m:/x/y.md`, `3h;src/a.py`, `41m,docs/x.md`).
-# A `:` that opens `//` is a URL scheme and is not a split point.
-_PATH_DELIMITERS = re.compile(r"([;,]+|:+(?!//))")
-
-
-def _blank_path_token(match: re.Match[str]) -> str:
-    pieces = _PATH_DELIMITERS.split(match.group(0))
-    # Odd entries are the delimiters themselves; they are kept as they are.
-    return "".join(
-        piece if index % 2 else _blank_path_piece(piece)
-        for index, piece in enumerate(pieces)
-    )
-
-
-def _reference_form(token: str) -> str:
-    """The one normalised form that every check on a path piece reads.
-
-    The opening and closing Markdown wrappers come off first (`**docs/x.md**`,
-    `<./docs/notes>`), then a `?query` or `#fragment` suffix
-    (`docs/x.md?view=all`, and `41m?x/y.md` reads as `41m`), then trailing
-    sentence punctuation (`docs/x.md#top.`).
-    """
-    form = token.lstrip(_OPENING_WRAPPERS).rstrip(_CLOSING_WRAPPERS)
-    form = form.split("?", 1)[0].split("#", 1)[0]
-    return form.rstrip(_CLOSING_WRAPPERS + _SENTENCE_END)
-
-
-def _blank_path_piece(token: str) -> str:
-    form = _reference_form(token)
-    # Fail closed: a duration-shaped FIRST component of the normalised form,
-    # however the piece or that component is wrapped or suffixed, keeps the
-    # piece visible to the scan. Its outer wrappers become spaces so the claim
-    # has a word boundary in front of it.
-    if _DURATION_COMPONENT.match(_first_component(form)):
-        unwrapped = token.lstrip(_OPENING_WRAPPERS)
-        core = unwrapped.rstrip(_CLOSING_WRAPPERS)
-        leading = " " * (len(token) - len(unwrapped))
-        trailing = " " * (len(unwrapped) - len(core))
-        return leading + core + trailing
-    # A piece with no `/` is not a path; it stays visible (`41m` in `41m,x/y`).
-    if "/" not in token:
-        return token
-    return " " if _is_path_form(form) else token
-
-
-def _is_path_form(form: str) -> bool:
-    """Whether the normalised form of a piece is clearly a path.
-
-    That is an explicit path prefix, a URI scheme, or a file extension on the
-    last component (`**./docs/notes**`, `docs/x.md?view=all`, `docs/x.md?`).
-    A plain `word/word` such as `days/run` or `3d/day` is a rate, so a
-    duration claim in front of it ("3 days/run") still counts.
-    """
-    return bool(
-        _PATH_PREFIX.match(form)
-        or _URI_SCHEME.match(form)
-        or _FILE_EXTENSION.search(form.rsplit("/", 1)[-1])
-    )
-
-
-# A path-like token: a run holding a `/`. The lookbehind lets it start only
-# where a run starts, the one place the scan can ever match it (a start later
-# in the same run needs the same `/` and fails the same way); without it every
-# start inside a long run with no `/` re-read the rest of the run.
-_PATH_TOKEN_IN_TEXT = re.compile(r"(?<![^\s/\[\]()])[^\s/\[\]()]*/[^\s\])]*")
-
-
-# A whitespace-delimited token, read whole before the path-token pass splits
-# it at brackets. Without this pass, `docs/(_3h_)/x.md` became the path
-# token `docs/(_3h_` (no extension, so kept) and the path `/x.md`, and the
-# later component `_3h_` stayed visible as a claim.
-_WHITESPACE_TOKEN = re.compile(r"\S+")
-# The brackets a path's later components may hold, each closer mapped to the
-# opener it pairs with.
-_BRACKET = re.compile(r"[\[\]()]")
-_OPENERS = "(["
-_OPENER_OF = {")": "(", "]": "["}
-
-
-def _shield_later_components(piece: str, line_number: bool) -> str:
-    """`piece` with the later components of each recognised path in it blanked.
-
-    Only a path's first component can be a claim, so this pass blanks a
-    path's later components and nothing else: the span from its first `/` to
-    its end. It never blanks the first component (the text before that `/`)
-    or anything in front of it, so `note(3h/run.md`, `x)3h/run.md` and
-    `took(3h)/run.md` keep their `3h` for the passes that read it as a claim.
-
-    A path runs from its first `/` while the brackets after that `/` pair up
-    (`docs/(3h)/x.md`, `docs/_(3h)_/x.md`). A closer with no opener to pair
-    with ends it there, and the scan looks for the next path from that closer
-    on (`(docs/a.md)3h/b.md`: the path is `docs/a.md`, and `3h/b.md` after
-    the `)` is a path of its own whose `3h` stays). An opener left unpaired
-    ends the path just before it (`./docs/(3h`), so neither an unpaired
-    bracket nor the text after it is ever blanked as a later component.
-
-    A path is recognised when its text, from the start of the piece or from
-    the closer that ended the path before it, is clearly a path
-    (`_is_path_form` of `_reference_form`). Anything else is left as it is,
-    for the passes after this one.
-
-    When a `:` and a line number follow the piece (`line_number`) and the
-    path that runs to the piece's end has a file name last, that name stays,
-    so the file:line pass still reads `foo.py:7m` as a reference (and
-    `x.md:3 days` as a claim).
-    """
-    parts: list[str] = []
-    kept = 0
-    start = 0
-    slash = piece.find("/")
-    while slash >= 0:
-        openers: list[int] = []
-        resume = len(piece)
-        for bracket in _BRACKET.finditer(piece, slash):
-            mark = bracket.group()
-            if mark in _OPENERS:
-                openers.append(bracket.start())
-            elif openers and piece[openers[-1]] == _OPENER_OF[mark]:
-                openers.pop()
-            else:
-                resume = bracket.start()
-                break
-        end = openers[0] if openers else resume
-        if _is_path_form(_reference_form(piece[start:end])):
-            stop = end
-            name = piece.rindex("/", slash, end) + 1
-            if line_number and end == len(piece) and _FILE_EXTENSION.search(piece, name):
-                stop = name
-            parts += [piece[kept:slash], " " * (stop - slash)]
-            kept = stop
-        start = resume
-        slash = piece.find("/", resume)
-    return "".join(parts) + piece[kept:]
-
-
-def _shield_path_token(match: re.Match[str]) -> str:
-    # Each piece between `;`, `,` and `:` delimiters is its own path, as in
-    # the path-token pass (`docs/x.md,(3h)/y.md` keeps the `3h` claim).
-    pieces = _PATH_DELIMITERS.split(match.group(0))
-    for index in range(0, len(pieces), 2):
-        line_number = (
-            index + 1 < len(pieces)
-            and pieces[index + 1].startswith(":")
-            and pieces[index + 2][:1].isdigit()
-        )
-        pieces[index] = _shield_later_components(pieces[index], line_number)
-    return "".join(pieces)
-
-
-def _strip_references(line: str) -> str:
-    line = _LINK_TARGET.sub(_blank_link_target, line)
-    line = _WHITESPACE_TOKEN.sub(_shield_path_token, line)
-    line = _blank_references(line)
-    return _PATH_TOKEN_IN_TEXT.sub(_blank_path_token, line)
-
-
-# --- quoted inputs in the Evidence and Minor notes sections ------------------
-#
-# Evidence and Minor notes record what the reviewer ran and fed to it, so a
-# duration-shaped token there may be a quoted probe input, not the reviewer's
-# own timing claim. Only the inside of a well-formed backtick code span, or of
-# a fenced block that closes inside the section, counts as quoted, and only in
-# those two sections. Everything else stays in scope: prose in every section,
-# every heading line (so every verdict line), the Issues section quoted or not,
-# and any markup that does not close where it opens.
-#
-# A section is one of the two only under the documented level-three heading:
-# `### Evidence` or `### Minor notes` (bold allowed, as in `### **Evidence**`).
-# Other levels, `###Evidence` with no space, a `#` run glued to the title, and
-# the bare `MINOR NOTES:` label all stay in scope.
-#
-# Sections are found with `_HEADING`, the pattern the adapters split sections
-# with, so the scan and the parser never disagree on where a section ends. That
-# pattern does not know about fences: a `# comment` inside a fenced block is a
-# heading to the parser, so it ends the section here too.
-_QUOTED_INPUT_SECTIONS = frozenset({"EVIDENCE", "MINOR NOTES"})
-# Exactly three `#` (up to three spaces before them), then at least one space.
-_QUOTED_INPUT_HEADING = re.compile(r"^ {0,3}### +")
-# A fence line: up to three spaces, three or more backticks or tildes, then the
-# rest of the line (an opener's info string; a closer allows only whitespace).
-_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_BACKTICK_RUN = re.compile(r"`+")
-# A number at the end of a fence opener, bounded the way `_DURATION_CLAIM`
-# bounds one, so `\s+` across the newline would join it to a unit below.
-_NUMBER_AT_END = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*$")
-
-
-def _is_quoted_input_section(line: str, heading: re.Match[str]) -> bool:
-    if _QUOTED_INPUT_HEADING.match(line) is None:
-        return False
-    if _strip_marks(_heading_title(heading)).upper() not in _QUOTED_INPUT_SECTIONS:
-        return False
-    # A closing `#` run counts only when a space or tab sets it apart from the
-    # title (`### Evidence ###`); `### Evidence#` is not the documented heading.
-    line = line.rstrip()
-    title_end = line.rstrip("#")
-    return title_end == line or title_end.endswith((" ", "\t"))
-
-
-def _is_tagged_bullet(line: str) -> bool:
-    bullet = _BULLET.match(line)
-    return bool(bullet and _TAG.match(bullet.group(1)))
-
-
-def _fence_opener(line: str) -> str | None:
-    """The fence marker that `line` opens, or None.
-
-    A backtick fence whose info string holds a backtick is not a fence
-    (CommonMark); that line is read for inline code spans instead.
-    """
-    fence = _FENCE_LINE.match(line)
-    if fence is None:
-        return None
-    marker, info = fence.group(1), fence.group(2)
-    if marker[0] == "`" and "`" in info:
-        return None
-    return marker
-
-
-def _closes_fence(line: str, marker: str) -> bool:
-    fence = _FENCE_LINE.match(line)
-    return (
-        fence is not None
-        and fence.group(1)[0] == marker[0]
-        and len(fence.group(1)) >= len(marker)
-        and not fence.group(2).strip()
-    )
-
-
-def _blank_code_spans(line: str) -> str:
-    """`line` with the inside of each inline code span turned into spaces.
-
-    A span opens at a run of backticks and closes at the next run of exactly
-    the same length on the same line. The backticks themselves stay, so the
-    text on either side keeps the neighbours it had. Fail closed: when any run
-    finds no closing run on its line (a span never crosses a line), or any
-    backtick follows a backslash, the line is returned unchanged.
-    """
-    if "`" not in line or "\\`" in line:
-        return line
-    runs = [run.span() for run in _BACKTICK_RUN.finditer(line)]
-    pieces: list[str] = []
-    pos = 0
-    index = 0
-    while index < len(runs):
-        open_start, open_end = runs[index]
-        width = open_end - open_start
-        close = index + 1
-        while close < len(runs) and runs[close][1] - runs[close][0] != width:
-            close += 1
-        if close == len(runs):
-            return line
-        close_start, close_end = runs[close]
-        pieces.append(line[pos:open_end])
-        pieces.append(" " * (close_start - open_end))
-        pos = close_start
-        index = close + 1
-    pieces.append(line[pos:])
-    return "".join(pieces)
-
-
-def _blank_quoted_section(lines: list[str], out: list[str], start: int, stop: int) -> None:
-    """Blank the quoted inputs of `lines[start:stop]` into `out`."""
-    i = start
-    while i < stop:
-        marker = _fence_opener(lines[i])
-        if marker is None:
-            out[i] = _blank_code_spans(lines[i])
-            i += 1
-            continue
-        close = i + 1
-        while close < stop and not _closes_fence(lines[close], marker):
-            close += 1
-        if close == stop:
-            # Fail closed: an unclosed fence leaves its own line and every
-            # later line of the section in scope, as written.
-            return
-        if _NUMBER_AT_END.search(lines[i]):
-            # The opener ends in a number that the scan reads as a claim
-            # together with the block's first line ("3", then "hours"), so the
-            # claim is not wholly inside the block: nothing in it is quoted.
-            i = close + 1
-            continue
-        # The fence lines stay as written; only the lines between are quoted.
-        for inner in range(i + 1, close):
-            out[inner] = ""
-        i = close + 1
-
-
-def _blank_quoted_inputs(lines: list[str]) -> list[str]:
-    """`lines` with the quoted inputs of Evidence and Minor notes blanked."""
-    out = list(lines)
-    i = 0
-    while i < len(lines):
-        heading = _HEADING.match(lines[i])
-        line = lines[i]
-        i += 1
-        if heading is None or not _is_quoted_input_section(line, heading):
-            continue
-        end = i
-        while end < len(lines) and not _HEADING.match(lines[end]):
-            end += 1
-        # A `[BUG]` / `[SECURITY]` bullet is a finding wherever it sits (the
-        # adapter collects it, and in Evidence every bullet after it), so the
-        # section's quoting ends at the first one.
-        stop = i
-        while stop < end and not _is_tagged_bullet(lines[stop]):
-            stop += 1
-        _blank_quoted_section(lines, out, i, stop)
-        i = end
-    return out
-
-
-# --- quoted examples (double quotes, any non-verdict line) -------------------
-#
-# A duration the reviewer quotes as an example of input text is not a
-# measured-interval claim. The span is a same-line pair of ASCII double
-# quotes whose interior is 1..200 characters, contains a duration token,
-# and is not bare: the stripped interior does not fullmatch a duration
-# token, and it contains whitespace. So `"ran for 120 seconds"` is an
-# example; `"41 seconds"` and `"3d/foo.py"` stay claims (`took "41 seconds"`
-# still needs INTERVAL endpoints). Unmatched quotes, interiors longer than
-# 200, heading lines, and grok `cleared`/`flagged` verdict-value lines fail
-# closed (stay in scope). Backtick spans stay the Evidence / Minor notes
-# rule above; a backtick-wrapped `"…"` is handled here.
-#
-# The walk is left-to-right str.find of `"`. No regex, no nested
-# quantifiers; a 100 KB adversarial line stays linear.
-
-_QUOTED_EXAMPLE_MAX = 200
-_REFUSAL_LINE_MAX = 200
-
-
-def _is_verdict_or_heading_line(line: str) -> bool:
-    return bool(
-        _HEADING.match(line)
-        or _GROK_VERDICT.match(line)
-        or _GROK_VERDICT_LABEL.match(line)
-        or _CLAUDE_VERDICT_HEADING.match(line)
-        or _CLAUDE_VERDICT_LABEL.match(line)
-    )
-
-
-def _is_quoted_example(interior: str) -> bool:
-    stripped = interior.strip()
-    if not stripped or len(interior) > _QUOTED_EXAMPLE_MAX:
-        return False
-    if _DURATION_CLAIM.search(stripped) is None:
-        return False
-    if _DURATION_CLAIM.fullmatch(stripped):
-        return False
-    if not any(ch.isspace() for ch in stripped):
-        return False
-    return True
-
-
-def _blank_double_quoted_examples(line: str) -> str:
-    """`line` with quoted-example interiors turned into spaces."""
-    if '"' not in line:
-        return line
-    pieces: list[str] = []
-    pos = 0
-    length = len(line)
-    while pos < length:
-        open_at = line.find('"', pos)
-        if open_at < 0:
-            pieces.append(line[pos:])
-            break
-        pieces.append(line[pos : open_at + 1])
-        close_limit = open_at + 1 + _QUOTED_EXAMPLE_MAX
-        close_at = line.find('"', open_at + 1, close_limit + 1)
-        if close_at < 0:
-            close_at = line.find('"', close_limit + 1)
-            if close_at < 0:
-                pieces.append(line[open_at + 1 :])
-                break
-            pieces.append(line[open_at + 1 : close_at])
-            pieces.append('"')
-            pos = close_at + 1
-            continue
-        interior = line[open_at + 1 : close_at]
-        if _is_quoted_example(interior):
-            pieces.append(" " * len(interior))
-        else:
-            pieces.append(interior)
-        pieces.append('"')
-        pos = close_at + 1
-    return "".join(pieces)
-
-
-def _blank_quoted_examples(original: str, scanned: str) -> str:
-    if _is_verdict_or_heading_line(original):
-        return scanned
-    return _blank_double_quoted_examples(scanned)
-
-
-def _scan_line(original: str, quoted_blanked: str) -> str:
-    scanned = _blank_quoted_examples(original, quoted_blanked)
-    return _EMPHASISED_DURATION.sub(
-        _unwrap_emphasised_duration, _strip_references(scanned)
-    )
-
-
-def _iter_scanned_lines(text: str):
-    lines = text.splitlines()
-    quoted = _blank_quoted_inputs(lines)
-    for number, (original, blanked) in enumerate(zip(lines, quoted), start=1):
-        yield number, original, _scan_line(original, blanked)
-
-
-def _text_for_duration_scan(text: str) -> str:
-    return "\n".join(
-        scanned
-        for _, original, scanned in _iter_scanned_lines(text)
-        if not _INTERVAL_LINE.match(original)
-    )
-
-
-def _named_refusal(rule: str, line_number: int, line: str) -> str:
+def _named_refusal(rule: str, line_number: int, line: str, detail: str = "") -> str:
     shown = line if len(line) <= _REFUSAL_LINE_MAX else line[:_REFUSAL_LINE_MAX]
-    return f"{rule}: line {line_number}: {shown}"
-
-
-def _first_duration_claim_line(text: str) -> tuple[int, str] | None:
-    """The first original line that participates in a duration claim.
-
-    The claim is found on the joined scan text, the same string
-    `_has_duration_claim` searches, so a number at the end of one line and a
-    unit on the next (`3` then `hours`) still names the line that holds the
-    number.
-    """
-    pairs = [
-        (number, original, scanned)
-        for number, original, scanned in _iter_scanned_lines(text)
-        if not _INTERVAL_LINE.match(original)
-    ]
-    if not pairs:
-        return None
-    joined = "\n".join(scanned for _, _, scanned in pairs)
-    match = _DURATION_CLAIM.search(joined)
-    if match is None:
-        return None
-    index = joined.count("\n", 0, match.start())
-    number, original, _ = pairs[index]
-    return number, original
-
-
-def _first_incomplete_interval_line(text: str) -> tuple[int, str] | None:
-    for number, line in enumerate(text.splitlines(), start=1):
-        matched = _INTERVAL_LINE.match(line)
-        if matched is None:
-            continue
-        _, missing = _parse_interval_body(matched.group(1))
-        if missing:
-            return number, line
-    return None
-
-
-def _has_duration_claim(text: str) -> bool:
-    return _DURATION_CLAIM.search(_text_for_duration_scan(text)) is not None
+    refusal = f"{rule}: line {line_number}: {shown}"
+    return f"{refusal} ({detail})" if detail else refusal
 
 
 def _parse_interval_body(body: str) -> tuple[dict | None, list[str]]:
     matched = _INTERVAL_PARTS.match(body.strip())
     if not matched:
         return None, list(_INTERVAL_FIELDS)
-    start_event = matched.group("start_event").strip()
-    start_source = matched.group("start_source").strip()
-    end_event = matched.group("end_event").strip()
-    end_source = matched.group("end_source").strip()
-    duration = matched.group("duration").strip()
-    missing: list[str] = []
-    if not start_event:
-        missing.append("start_event")
-    if not start_source:
-        missing.append("start_source")
-    if not end_event:
-        missing.append("end_event")
-    if not end_source:
-        missing.append("end_source")
-    if not duration:
-        missing.append("duration")
+    record = {name: matched.group(name).strip() for name in _INTERVAL_FIELDS}
+    missing = [name for name in _INTERVAL_FIELDS if not record[name]]
     if missing:
         return None, missing
-    return {
-        "start_event": start_event,
-        "start_source": start_source,
-        "end_event": end_event,
-        "end_source": end_source,
-        "duration": duration,
-    }, []
+    return record, []
 
 
-def _collect_intervals(text: str) -> tuple[list[dict], list[list[str]]]:
-    complete: list[dict] = []
-    incomplete: list[list[str]] = []
-    for match in _INTERVAL_LINE.finditer(text):
-        record, missing = _parse_interval_body(match.group(1))
-        if missing:
-            incomplete.append(missing)
-        else:
-            complete.append(record)
-    return complete, incomplete
+def _record_block(lines: list[str]) -> tuple[int, int]:
+    """Where the INTERVAL record sits in `lines`, as `(start, end)` indexes.
+
+    `end` is one past the last non-blank line and `start` is the first line
+    of the run of INTERVAL lines that ends there, so `start == end` when the
+    last non-blank line is not an INTERVAL line.
+    """
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    start = end
+    while start and _INTERVAL_LINE.match(lines[start - 1]):
+        start -= 1
+    return start, end
+
+
+def _review_lines(text: str) -> list[str]:
+    """The lines an adapter reads: `text` without its INTERVAL record.
+
+    The record follows the verdict block, so without this a review whose last
+    section is Issues or FINDINGS would read the record as prose in that
+    section. Only the trailing record is removed; an INTERVAL line anywhere
+    else stays and is read like any other line.
+    """
+    lines = text.splitlines()
+    start, end = _record_block(lines)
+    return lines[:start] + lines[end:]
 
 
 def _require_intervals(text: str) -> list[dict]:
-    complete, incomplete = _collect_intervals(text)
-    claim = _first_duration_claim_line(text)
-    if claim is None:
-        return complete
-    if complete:
-        return complete
-    if incomplete:
-        located = _first_incomplete_interval_line(text)
-        number, line = located if located is not None else claim
-        raise ParseError(_named_refusal(INTERVAL_ENDPOINTS_MISSING, number, line))
-    number, line = claim
-    raise ParseError(_named_refusal(INTERVAL_ENDPOINTS_MISSING, number, line))
+    """The measured records of `text`'s INTERVAL record, in order.
+
+    `[]` for `INTERVAL: none`. Raises ParseError naming the first line that
+    fails, in text order, when the record is missing, malformed, missing an
+    endpoint, contradictory or duplicated.
+    """
+    lines = text.splitlines()
+    start, end = _record_block(lines)
+    if start == end:
+        last = lines[end - 1] if end else ""
+        raise ParseError(_named_refusal(INTERVAL_MISSING, end, last))
+    records: list[dict] = []
+    seen: set[str] = set()
+    saw_none = False
+    for index in range(start, end):
+        line = lines[index]
+        number = index + 1
+        body = _INTERVAL_LINE.match(line).group(1)
+        if body.lower() == "none":
+            if saw_none or records:
+                raise ParseError(_named_refusal(INTERVAL_CONTRADICTORY, number, line))
+            saw_none = True
+            continue
+        if not _INTERVAL_FROM.match(body):
+            raise ParseError(_named_refusal(INTERVAL_MALFORMED, number, line))
+        record, missing = _parse_interval_body(body)
+        if missing:
+            raise ParseError(
+                _named_refusal(
+                    INTERVAL_ENDPOINTS_MISSING, number, line, "missing " + ", ".join(missing)
+                )
+            )
+        if not _INTERVAL_DURATION.fullmatch(record["duration"]):
+            raise ParseError(
+                _named_refusal(
+                    INTERVAL_MALFORMED,
+                    number,
+                    line,
+                    "duration is not a number then ms, s, m, h or d",
+                )
+            )
+        if saw_none:
+            raise ParseError(_named_refusal(INTERVAL_CONTRADICTORY, number, line))
+        key = line.strip()
+        if key in seen:
+            raise ParseError(_named_refusal(INTERVAL_DUPLICATE, number, line))
+        seen.add(key)
+        records.append(record)
+    return records
 
 
 def _attach_intervals(result: dict, intervals: list[dict]) -> dict:
-    if result["status"] == "success" and intervals:
+    if result["status"] == "success":
         result["intervals"] = intervals
     return result
 

@@ -78,6 +78,7 @@ def test_shadow_parse_success_sends_only_trimmed_payload_and_regex_stays_authori
         "review preamble that must not leave the harness\n\n"
         + GROK_FLAGGED
         + "\n## NOTES\nprivate appendix that must not leave the harness\n"
+        + "\nINTERVAL: none\n"
     )
 
     result = review_phase.run_phase(_envelope(return_text))
@@ -282,7 +283,7 @@ def test_shadow_run_on_a_return_holding_the_3000_space_heading_finishes_within_a
     monkeypatch.setenv("REVIEW_PHASE_JEV_SHADOW", "1")
     client = StubClient(("changes_requested", 0.88))
     monkeypatch.setattr(review_phase, "JevClient", client.factory)
-    return_text = GROK_FLAGGED + "\n" + THREE_THOUSAND_SPACE_LINE + "\n"
+    return_text = GROK_FLAGGED + "\n" + THREE_THOUSAND_SPACE_LINE + "\n\nINTERVAL: none\n"
 
     start = time.perf_counter()
     result = review_phase.run_phase(_envelope(return_text))
