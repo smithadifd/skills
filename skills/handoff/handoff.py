@@ -187,8 +187,17 @@ def notes_dir():
     return path
 
 
+def _name_part(value):
+    """File-name part for a user-supplied value. A value that redaction would
+    change is replaced by the fixed stem, never a partly masked name."""
+    value = str(value)
+    if redact(value) != value:
+        return "redacted"
+    return _safe(value)
+
+
 def default_path(repo, slug):
-    return os.path.join(notes_dir(), "handoff-%s-%s.md" % (_safe(repo), _safe(slug)))
+    return os.path.join(notes_dir(), "handoff-%s-%s.md" % (_name_part(repo), _name_part(slug)))
 
 
 def write_note(content, repo, slug, out=None, now=None):

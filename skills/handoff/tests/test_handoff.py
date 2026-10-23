@@ -211,3 +211,47 @@ def test_cli_unwritable_output_is_a_clean_error(private_tmp, capsys):
     out = private_tmp / "no-such-dir" / "n.md"
     assert handoff.main(["--repo", "r", "--slug", "s", "--input", FIXTURE, "--out", str(out)]) == 1
     assert "handoff:" in capsys.readouterr().err
+
+
+CRED_SLUGS = [
+    ("x Authorization: Bearer abc123", "abc123"),
+    ("token=" + "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2", "a1b2c3d4"),
+]
+
+
+@pytest.mark.parametrize("slug,needle", CRED_SLUGS)
+def test_default_path_and_stdout_carry_no_slug_credential(private_tmp, capsys, slug, needle):
+    assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE]) == 0
+    out = capsys.readouterr().out
+    path = out.splitlines()[0]
+    assert os.path.basename(path) == "handoff-r-redacted.md"
+    assert os.path.exists(path)
+    assert needle not in out and needle not in path
+    assert needle not in os.listdir(os.path.dirname(path))[0]
+
+
+@pytest.mark.parametrize("slug,needle", CRED_SLUGS)
+def test_default_path_helper_uses_fixed_stem_for_a_credential(private_tmp, slug, needle):
+    path = handoff.default_path("r", slug)
+    assert os.path.basename(path) == "handoff-r-redacted.md"
+
+
+def test_credential_in_repo_argument_is_not_a_file_name(private_tmp, capsys):
+    repo = "token=" + "ghp_" + "a1b2c3d4e5f6g7h8i9j0k1l2"
+    assert handoff.main(["--repo", repo, "--slug", "s", "--input", FIXTURE]) == 0
+    out = capsys.readouterr().out
+    assert "a1b2c3d4" not in out
+    assert os.path.basename(out.splitlines()[0]) == "handoff-redacted-s.md"
+
+
+def test_ordinary_slug_path_is_unchanged(private_tmp):
+    path = handoff.default_path("my-repo", "plain slug 1")
+    assert os.path.basename(path) == "handoff-my-repo-plain-slug-1.md"
+
+
+def test_explicit_out_path_is_unaffected_by_slug_redaction(private_tmp, capsys):
+    out = private_tmp / "named.md"
+    slug = "x Authorization: Bearer zq9w8e7r"
+    assert handoff.main(["--repo", "r", "--slug", slug, "--input", FIXTURE, "--out", str(out)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == str(out)
+    assert "zq9w8e7r" not in out.read_text()
