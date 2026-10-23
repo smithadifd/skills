@@ -246,6 +246,15 @@ _GROK_VERDICT_LABEL = re.compile(
 )
 
 
+def _match_grok_verdict_value(line: str) -> re.Match[str] | None:
+    """The `cleared` / `flagged` value line, read the way the adapter reads it.
+
+    The adapter strips the candidate line first, so an indented value line is
+    a verdict; the quoted-input scan uses this same match.
+    """
+    return _GROK_VERDICT.match(line.strip())
+
+
 def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     """`## FINDINGS` bullets + `## VERDICT <cleared|flagged> — <sentence>`."""
     lines = text.splitlines()
@@ -269,7 +278,7 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
             else:
                 for candidate in lines[i + 1:]:
                     if candidate.strip():
-                        matched = _GROK_VERDICT.match(candidate.strip())
+                        matched = _match_grok_verdict_value(candidate)
                         if matched:
                             verdict = matched.group(1).lower()
                         break
@@ -1070,7 +1079,7 @@ _REFUSAL_LINE_MAX = 200
 def _is_verdict_or_heading_line(line: str) -> bool:
     return bool(
         _HEADING.match(line)
-        or _GROK_VERDICT.match(line)
+        or _match_grok_verdict_value(line)
         or _GROK_VERDICT_LABEL.match(line)
         or _CLAUDE_VERDICT_HEADING.match(line)
         or _CLAUDE_VERDICT_LABEL.match(line)

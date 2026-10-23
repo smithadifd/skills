@@ -2753,6 +2753,60 @@ def test_duration_outside_a_closed_span_or_fence_in_prose_still_refuses(summary)
     _assert_claim_refused(_summary_approve(summary))
 
 
+@pytest.mark.parametrize(
+    "inner",
+    [
+        pytest.param("## Notes about it, took 2h", id="heading-line"),
+        pytest.param("### Probe took 2h", id="level-three-heading"),
+        pytest.param("VERDICT: APPROVE - it took 2h", id="verdict-label"),
+        pytest.param("## Verdict: APPROVE it took 2h", id="verdict-heading"),
+    ],
+)
+def test_heading_or_verdict_line_inside_a_closed_fence_stays_in_scope(inner):
+    _assert_claim_refused(_summary_approve(f"Probes:\n```\n{inner}\n```"))
+
+
+# Every verdict form the adapters accept stays in scope when it is indented,
+# because the adapters strip or skip leading whitespace before they match.
+INDENTED_VERDICTS = {
+    "grok-value-line": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n   cleared - the probe `waits 3d` passed\n",
+    ),
+    "grok-value-line-tab": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n\tcleared - the probe `waits 3d` passed\n",
+    ),
+    "grok-value-line-backtick": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n  `cleared - the probe `waits 3d` passed\n",
+    ),
+    "grok-label": (
+        "grok-notools",
+        "## FINDINGS\n- none\n\n## VERDICT\n  VERDICT: cleared - the probe `waits 3d`\n",
+    ),
+    "claude-label": (
+        "claude-fresh",
+        "### Evidence\n- Ran: `checks`\n   VERDICT: APPROVE - the probe `waits 3d` passed\n",
+    ),
+    "claude-heading": (
+        "claude-fresh",
+        "  ## Verdict: APPROVE `3d`\n\n### Evidence\n- Ran: checks passed\n",
+    ),
+    "claude-bold-heading": (
+        "claude-fresh",
+        "  ## **Verdict**: APPROVE `3d`\n\n### Evidence\n- Ran: checks passed\n",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("backend", "text"), list(INDENTED_VERDICTS.values()), ids=list(INDENTED_VERDICTS)
+)
+def test_indented_verdict_line_quoting_a_duration_still_refuses(backend, text):
+    _assert_claim_refused(text, backend)
+
+
 def test_unterminated_fence_keeps_later_spans_in_scope_too():
     _assert_claim_refused(_summary_approve("```\nopen\n\nlater `it took 2h` here"))
 
