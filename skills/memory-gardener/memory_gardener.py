@@ -127,10 +127,10 @@ DEFAULT_SHARD_TAXONOMY = [
       "portfolio-case", "roadmap"]),
     ("infra", "Home-lab infrastructure, networking & hosting",
      ["infra", "router", "syslog", "docker", "vpn",
-      "media", "nas", "backup"]),
+      "media", "nas", "backup", "server"]),
     ("automation", "Scheduled automations, pipelines & digests",
      ["ai-coding", "digest", "briefing", "podcast", "streaming",
-      "reader", "broker", "scheduled", "watchlist",
+      "feed", "reader", "broker", "scheduled", "watchlist",
       "condenser", "transcript"]),
     ("secrets", "Secrets, password manager, dotfiles & sync",
      ["op-", "oplock", "password", "secret", "sync", "dotfiles",
@@ -1732,13 +1732,23 @@ def select_taxonomy(memory_dir, explicit_path=None):
 
 def classify_shard(stem, taxonomy):
     """Return the shard name for a note's filename stem, or None for the core.
-    First keyword that is a substring of the (lowercased) stem wins."""
-    s = stem.lower()
+    The stem is split into tokens on `-`, `_` and `.`; the first keyword whose
+    tokens appear as a contiguous run of the stem's tokens wins. A keyword
+    never matches inside a longer word (`feed` is not in `breastfeed`)."""
+    tokens = _shard_tokens(stem)
     for name, _label, keys in taxonomy:
         for k in keys:
-            if k in s:
-                return name
+            want = _shard_tokens(k)
+            if not want:
+                continue
+            for i in range(len(tokens) - len(want) + 1):
+                if tokens[i:i + len(want)] == want:
+                    return name
     return None
+
+
+def _shard_tokens(text):
+    return [t for t in re.split(r"[-_.]", text.lower()) if t]
 
 
 def _shard_file(name):

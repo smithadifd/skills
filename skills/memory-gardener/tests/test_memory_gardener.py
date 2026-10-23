@@ -771,6 +771,24 @@ def test_default_taxonomy_keywords_do_not_match_inside_longer_words():
         "home-serverless-migration",
     ):
         assert mg.classify_shard(stem, tax) is None
+    # As whole tokens they classify, wherever they sit in the stem.
+    for stem, shard in (
+        ("rss-feed", "automation"),
+        ("feed-refresh", "automation"),
+        ("home-server", "infra"),
+        ("server-maintenance", "infra"),
+        ("home_server.setup", "infra"),
+    ):
+        assert mg.classify_shard(stem, tax) == shard
+
+
+def test_multi_token_keyword_matches_a_contiguous_run_anywhere():
+    tax = [("pipes", "Pipes", ["night-batch"])]
+    assert mg.classify_shard("night-batch-notes", tax) == "pipes"
+    assert mg.classify_shard("old-night-batch-notes", tax) == "pipes"
+    assert mg.classify_shard("old-night-batch", tax) == "pipes"
+    assert mg.classify_shard("night-old-batch", tax) is None
+    assert mg.classify_shard("nights-batch", tax) is None
 
 
 def test_default_taxonomy_has_zero_no_person_deny_hits():
@@ -906,6 +924,9 @@ def test_taxonomy_precedence_store_local_wins_defaults_stop_limit_regression(
 
 def test_taxonomy_precedence_defaults_only_when_no_file_exists(tmp_path, capsys):
     work = _seed_stop_limit_store(tmp_path)
+    # A note the built-in defaults file under secrets by a whole-token keyword.
+    with open(work / "MEMORY.md", "a") as index:
+        index.write("- [Password vault](password-vault.md) — Defaults shard this.\n")
 
     budget_rc, budget_io, shard_rc, shard_io = _run_budget_and_shard(
         work, capsys)
