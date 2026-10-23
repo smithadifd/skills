@@ -46,7 +46,7 @@ The ledger CLI's write verbs take `--expect-revision <event id | none>`. The app
 - A state event inserted between the pending-close stamp and the closed write: the closed write is refused, the status is unchanged, and resume reports an unconfirmed close.
 - An outside writer appends `closed` immediately after the pending-close stamp (winning that revision): resume does not trust it, because its key is not `ticket-close/<key>/<stamp id>/<pass id>`.
 - A later `item.stopped` after a trusted close: resume no longer trusts the close.
-- Resuming a validly closed ticket reports it closed and appends no claim; a close followed only by another session's `session.opened`/`session.closed` pair is still trusted; a close followed by an unmatched `session.opened` is not.
+- Resuming a validly closed ticket reports it closed and appends no claim; a close followed by the closing pass's own `session.closed` and then another session's complete `session.opened`/`session.closed` pair is still trusted; a close missing the closing pass's own release is not; a close followed by an unmatched `session.opened` is not.
 - Lost response: the CLI commits but returns unparseable output; the store finds the key, advances its revision, and the next write lands. A retry of the same request returns the stored event, not `stale_revision`.
 - Ambiguous failure with nothing committed: the key is absent, the write raises `StoreUnavailable`, and the revision is unchanged.
 - A CLI without `--expect-revision` is refused at selection.
