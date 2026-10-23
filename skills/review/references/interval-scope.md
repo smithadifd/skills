@@ -1,4 +1,4 @@
-DESIGN: the interval scan blanks quoted input (closed code spans and fences) on every line except the lines the selected adapter consumed; the adapter reports those lines, so the scan holds no second copy of the parsing rules.
+DESIGN: the interval scan blanks quoted input (closed code spans and fences) everywhere except where the selected adapter consumed lines: on a consumed finding line closed spans are blanked but fenced content and bare claims stay visible, and a consumed verdict or heading line is scanned as written; the adapter reports those lines, so the scan holds no second copy of the parsing rules.
 
 # Interval scope from the adapter's consumed lines
 
@@ -8,10 +8,9 @@ A review quotes probe inputs (`41m`, a fenced `500ms`). The scan must ignore tho
 
 ## Adapter return shape
 
-Each adapter returns `(verdict, findings, consumed)`. `consumed` is a sorted list of half-open `(start, end)` zero-based line ranges into `text.splitlines()`, covering exactly the lines the adapter inspected to decide something:
-- the line that set the verdict (heading, label, value line, the clean sentinel);
-- each section heading it matched (`_HEADING`), since a heading moves its section boundary;
-- each finding bullet it collected, with its continuation lines and any clean-marker or placeholder bullet it skipped, taken from the same loop iteration that collected it (`_bullets` returns the end index it already tracks).
+Each adapter returns `(verdict, findings, consumed)`. `consumed` has one entry per line of `text.splitlines()` (a line number indexes it): `None`, `"decision"` or `"finding"`. It is filled by marking half-open line ranges where the parse happens, covering exactly the lines the adapter inspected to decide something (a decision mark is never downgraded to a finding mark):
+- `decision`: the line that set the verdict (heading, label, value line, the clean sentinel) and each section heading it matched (`_HEADING`), since a heading moves its section boundary;
+- `finding`: each bullet it collected with its continuation lines, and any clean-marker or placeholder bullet it skipped, taken from the same loop iteration that collected it (`_bullets` returns the end index it already tracks; a tagged bullet's range runs to the next heading, as `_bullets` does).
 
 Lines the adapter ignored (summary prose, Evidence bullets, anything under a heading it does not collect) are not consumed. A line the adapter reads is consumed whether or not it sits in a fence, because the adapters know nothing of fences. Ranges are produced where the parse happens, never recomputed by a second pass.
 
@@ -21,13 +20,13 @@ Parse first, then scan: `verdict, findings, consumed = selected(text)`, then `_r
 
 ## The scan rule
 
-For each line index `i`: if `i` is consumed, scan it as written (spans are not blanked). Otherwise blank the inside of closed inline spans and closed fences exactly as #59 does (CommonMark: a run of N backticks closes on the next run of exactly N on the same line; a fence closes on a same-marker line of at least the opener's length with no info string). Everything else the scan already does (emphasis, references, double-quoted examples, bound nouns, the INTERVAL line exclusion) is unchanged and runs after.
+For each line index `i`: a `decision` line is scanned as written (a verdict line hiding a claim in a span was an accepted-with-no-INTERVAL bug). A `finding` line has the inside of its closed inline spans blanked, so a finding may name a probe in backticks, and nothing else: its bare claims stay visible, and a `finding` line inside a fence is not blanked as fenced content. Any other line has closed inline spans and closed fences blanked exactly as #59 does (CommonMark: a run of N backticks closes on the next run of exactly N on the same line; a fence closes on a same-marker line of at least the opener's length with no info string). Everything else the scan already does (emphasis, references, double-quoted examples, bound nouns, the INTERVAL line exclusion) is unchanged and runs after.
 
-Consumed membership is a boolean list of length `len(lines)` filled once from the ranges. A fence opener or closer line that is itself consumed is still a fence line; only the lines between are quoted, and the consumed ones among them stay as written.
+The marks are filled once. A fence opener or closer line is still a fence line; only the lines between are quoted, and the consumed ones among them keep the treatment above. The scan's double-quoted-example pass also skips `decision` lines through the marks, not through its own verdict regexes.
 
 ## JEV fallback: scan everything as prose
 
-JEV runs only when no adapter could parse the return, so there is no verdict line, no finding bullet and no line anchor to report; its input is free prose. Decide: `consumed=None`, which blanks nothing (no span, no fence), and the whole text is scanned as written. Reason: with no parser to say which lines carry the verdict, any line could, and quoting would be the same guess the first attempt kept getting wrong. Cost: a JEV-decided review that quotes `41m` in backticks is refused; it can quote with an INTERVAL line or reword. The refusal is retryable, a silent pass is not.
+JEV runs only when no adapter could parse the return, so there is no verdict line, no finding bullet and no line anchor to report; its input is free prose. Decide: `consumed=None`, which blanks nothing (no span, no fence, no double-quoted example), and the whole text is scanned as written. Reason: with no parser to say which lines carry the verdict, any line could, and quoting would be the same guess the first attempt kept getting wrong. Cost: a JEV-decided review that quotes `41m` in backticks is refused; it can quote with an INTERVAL line or reword. The refusal is retryable, a silent pass is not.
 
 ## Unclosed markup
 
@@ -41,10 +40,10 @@ One pass builds the consumed flags (O(lines)); one left-to-right pass blanks spa
 
 Quoted, unconsumed lines: summary inline spans `41m` `2h` `10000000ms` (parses); `took 2d` in a span (parses); backtick and tilde fences holding `500ms` (parses); a double-backtick span holding a backtick (parses); Evidence spans and fences under every heading form, title and bare label (parse); the real SK13 review shape (parses).
 Still claims: bare `41m`; `_3h_`; `"41 seconds"`; a span beside a bare duration; the same token in and out of a span (refuse). Unterminated backtick, mismatched run, escaped backtick, span across lines, unterminated fence (and a later span after it), wrong-marker closer, too-short closer, backtick in a fence info string (refuse). Backtick-wrapped path-first-component: quoted when closed (parses), claim when unclosed (refuses).
-Consumed lines (all refuse): a heading, `## Verdict:`, `VERDICT:` label inside a fence; indented verdicts for every form (grok value line with spaces, tab, backtick; grok label; Claude label; heading; bold heading); fenced `[BUG]` / `[SECURITY]` / indented numbered bullets at top level, under Evidence, and with no verdict heading; a fenced bullet under Issues and Minor notes; Sol r2 (a): a later untagged bullet and an indented continuation after a tagged or fenced bullet, each with a bare claim.
+Consumed lines (all refuse): a span-quoted claim on a verdict or heading line (an indented grok value line with a backticked claim among them); a heading, `## Verdict:`, `VERDICT:` label inside a fence; indented verdicts for every form (grok value line with spaces, tab, backtick; grok label; Claude label; heading; bold heading); fenced `[BUG]` / `[SECURITY]` / indented numbered bullets at top level, under Evidence, and with no verdict heading; a fenced bullet under Issues and Minor notes; Sol r2 (a): a later untagged bullet and an indented continuation after a tagged or fenced bullet, each with a bare claim.
 Backend scope: Sol r2 (b): a Grok review with a fenced quoted example under a `### Issues` heading (parses, Grok does not consume it); the same text on the Claude backend (refuses where the bullet is a finding); Grok `## FINDINGS` bullets (refuse).
 JEV: forced fallback with a span-quoted duration in Evidence (refuses); with a bare duration (refuses); when `_try_other_adapters` succeeds, that adapter's ranges apply.
-Changes against #59 to accept knowingly (finding and Minor notes bullets are consumed, so spans in them are scanned): a span in an Issues bullet, a span in a fenced tagged bullet, `minor-notes-inline`, and the JEV-quoted Evidence case now refuse.
+Paired tests for the finding-line rule: a quoted span on a consumed finding line parses (`- [BUG] a.py:3 - the probe `took 41m` is mishandled`, also a span in an Issues and a Minor notes bullet); a bare claim on a consumed finding line refuses; a fenced claim on a consumed finding line refuses (the same bullet inside a closed fence). Changes against #59 to accept knowingly: the JEV-decided review that quotes a duration in a span now refuses.
 Linear growth, in the existing growth parametrization: #59's shapes (long backtick run, many unbalanced backticks, many fence-like lines, many unclosed fence openers, many spans on one line) plus many consumed bullets (every line a bullet) and many tiny ranges.
 
 ## Mutations that must turn tests red
@@ -53,11 +52,12 @@ Linear growth, in the existing growth parametrization: #59's shapes (long backti
 2. Blank nothing: every "Quoted, unconsumed lines" case.
 3. Drop the continuation lines from a bullet's range (end off by one): Sol r2 (a).
 4. Drop section headings from `consumed`: the fenced-heading cases.
+4b. Blank spans on `decision` lines too: the verdict-line span cases; blank fences on `finding` lines: the fenced-claim case.
 5. Grok returns Claude's ranges: Sol r2 (b).
 6. JEV passes a list instead of `None`: both JEV cases.
 7. Treat an unterminated fence or backtick as closed: the unclosed-markup cases.
 8. Rescan unclosed fences per line, or rebuild consumed flags per line: the growth cases.
 
-## Open point for the supervisor
+## Decided
 
-Scanning consumed lines as written means a finding that names a probe in backticks demands an interval. If that proves too strict, the narrower alternative is to blank closed spans (not fences) on consumed finding lines; it needs no new parsing knowledge, but it is a policy change, not a design fix.
+A finding that names a probe in backticks does not demand an interval (spans are blanked on finding lines), and neither does any other closed span outside a verdict or heading line. Fenced content on a finding line, and any span on a verdict or heading line, do.
