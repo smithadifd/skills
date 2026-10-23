@@ -184,3 +184,54 @@ def test_write_through_does_not_follow_a_symlinked_final_component(layout):
         write_page.write_through(
             os.path.realpath(repo), ["docs", "page.md"], 1, b"pwned", "update")
     assert target.read_text() == "untouched\n"
+
+
+# The page is published by directory entry, never written through its inode.
+
+
+def test_update_of_a_hard_link_leaves_the_other_file_untouched(layout):
+    repo, outside = layout
+    other = repo / "src.txt"
+    other.write_text("not documentation\n")
+    page = repo / "docs" / "page.md"
+    os.link(other, page)
+    result = run(repo, repo / "docs", page, "update", "new page\n")
+    assert result.returncode == 0, result.stderr.decode()
+    assert other.read_bytes() == b"not documentation\n"
+    assert page.read_bytes() == b"new page\n"
+    assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
+
+
+def test_a_failed_write_leaves_the_page_and_no_temporary_file(layout, monkeypatch):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    page.write_bytes(b"original page\n")
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(write_page.os, "write", failing_write)
+    with pytest.raises(OSError):
+        write_page.write_through(
+            os.path.realpath(repo), ["docs", "page.md"], 1, b"replacement", "update")
+    monkeypatch.undo()
+    assert page.read_bytes() == b"original page\n"
+    assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
+
+
+def test_create_refuses_when_the_page_appears_before_the_link(layout, monkeypatch):
+    repo, _ = layout
+    page = repo / "docs" / "page.md"
+    real_link = os.link
+
+    def racing_link(src, dst, **kwargs):
+        page.write_bytes(b"someone else got here first\n")
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(write_page.os, "link", racing_link)
+    with pytest.raises(write_page.Refusal, match="exists"):
+        write_page.write_through(
+            os.path.realpath(repo), ["docs", "page.md"], 1, b"mine", "create")
+    monkeypatch.undo()
+    assert page.read_bytes() == b"someone else got here first\n"
+    assert [p.name for p in (repo / "docs").iterdir()] == ["page.md"]
