@@ -2760,10 +2760,40 @@ def test_duration_outside_a_closed_span_or_fence_in_prose_still_refuses(summary)
         pytest.param("### Probe took 2h", id="level-three-heading"),
         pytest.param("VERDICT: APPROVE - it took 2h", id="verdict-label"),
         pytest.param("## Verdict: APPROVE it took 2h", id="verdict-heading"),
+        pytest.param("- [BUG] a.py:3 - CI took 41m after the merge", id="tagged-bug-bullet"),
+        pytest.param("* [SECURITY] a.py:3 - CI took 41m after it", id="tagged-security-bullet"),
+        pytest.param("  1. [bug] a.py:3 - CI took 41m after it", id="indented-numbered-tagged"),
     ],
 )
 def test_heading_or_verdict_line_inside_a_closed_fence_stays_in_scope(inner):
     _assert_claim_refused(_summary_approve(f"Probes:\n```\n{inner}\n```"))
+    _assert_claim_refused(_quoted_approve(f"- Probes:\n```\n{inner}\n```"))
+
+
+def test_tagged_bullet_in_a_fence_with_no_verdict_heading_still_refuses():
+    # The adapter reads the bullet as a finding and as the verdict.
+    _assert_claim_refused(
+        "Review:\n```\n- [BUG] a.py:3 - CI took 41m after the merge\n```\n"
+    )
+
+
+def test_tagged_bullet_in_a_fence_quoting_only_in_a_span_parses():
+    _assert_quoted_parses(
+        "Review:\n```\n- [BUG] a.py:3 - the probe `took 41m` is mishandled\n```\n"
+    )
+
+
+def test_tagged_bullet_outside_a_fence_with_a_span_quote_still_refuses():
+    _assert_claim_refused(
+        "Review:\n- [BUG] a.py:3 - `x` then CI took 41m after the merge\n"
+    )
+
+
+def test_fenced_bullet_in_a_findings_section_is_refused_or_in_scope():
+    for section in ("### Issues", "### Minor notes"):
+        _assert_claim_refused(
+            f"## Verdict: APPROVE\n\n{section}\n- ok\n  ```\n  - it took 41m\n  ```\n"
+        )
 
 
 # Every verdict form the adapters accept stays in scope when it is indented,

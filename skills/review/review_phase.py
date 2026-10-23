@@ -1018,13 +1018,44 @@ def _blank_code_spans(line: str) -> str:
     return "".join(pieces)
 
 
+def _findings_section_flags(lines: list[str]) -> list[bool]:
+    """Per line: whether it sits under a heading whose bullets the adapters collect.
+
+    That is an Issues, Minor notes or Findings section, found with `_HEADING`
+    and `_CLAUDE_SECTIONS` the way `parse_claude_fresh` and `parse_grok_notools`
+    find them. The adapters know nothing of fences, so neither does this.
+    """
+    flags: list[bool] = []
+    current = False
+    for line in lines:
+        heading = _HEADING.match(line)
+        if heading:
+            title = _strip_marks(_heading_title(heading)).upper()
+            current = any(title.startswith(prefix) for prefix, _ in _CLAUDE_SECTIONS)
+        flags.append(current)
+    return flags
+
+
+def _is_read_as_finding(line: str, in_findings: bool) -> bool:
+    """Whether an adapter collects `line` as a finding bullet.
+
+    A `[BUG]` / `[SECURITY]` bullet is one wherever it sits; any other bullet
+    is one under a findings section.
+    """
+    bullet = _BULLET.match(line)
+    return bool(bullet and (in_findings or _TAG.match(bullet.group(1))))
+
+
 def _blank_quoted_inputs(lines: list[str]) -> list[str]:
     """`lines` with the inside of each code span and closed fence blanked.
 
     Heading lines and verdict lines are never blanked, inside a fence or out.
+    A line an adapter reads as a finding keeps its text inside a fence and has
+    only its own code spans blanked, as it would outside one.
     """
     out = list(lines)
     stop = len(lines)
+    in_findings = _findings_section_flags(lines)
     i = 0
     while i < stop:
         if _is_verdict_or_heading_line(lines[i]):
@@ -1050,8 +1081,16 @@ def _blank_quoted_inputs(lines: list[str]) -> list[str]:
             continue
         # The fence lines stay as written; only the lines between are quoted.
         for inner in range(i + 1, close):
-            if not _is_verdict_or_heading_line(lines[inner]):
-                out[inner] = ""
+            line = lines[inner]
+            if _is_verdict_or_heading_line(line):
+                continue
+            if _is_read_as_finding(line, in_findings[inner]):
+                # The adapter collects this line as a finding whatever fence
+                # it sits in, so it is read like any other finding line: only
+                # its own code spans are quoted.
+                out[inner] = _blank_code_spans(line)
+                continue
+            out[inner] = ""
         i = close + 1
     return out
 
@@ -1066,8 +1105,8 @@ def _blank_quoted_inputs(lines: list[str]) -> list[str]:
 # example; `"41 seconds"` and `"3d/foo.py"` stay claims (`took "41 seconds"`
 # still needs INTERVAL endpoints). Unmatched quotes, interiors longer than
 # 200, heading lines, and grok `cleared`/`flagged` verdict-value lines fail
-# closed (stay in scope). Backtick spans stay the Evidence / Minor notes
-# rule above; a backtick-wrapped `"…"` is handled here.
+# closed (stay in scope). Backtick spans and fences are the quoted-input rule
+# above, applied first; a backtick-wrapped `"…"` is handled here.
 #
 # The walk is left-to-right str.find of `"`. No regex, no nested
 # quantifiers; a 100 KB adversarial line stays linear.
