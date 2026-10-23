@@ -1164,43 +1164,45 @@ class LedgerStore:
 
         The closed status was built from a snapshot that missed that event, so
         it may have overwritten the event's owner, claim, blocked-by or status.
-        The note comes first so no resume can validate the close; the state
-        that follows puts those fields back as the interleaved event left them.
-        Neither carries a revision check: they only undo this close.
+        The ledger CLI has no compare-and-set, so any state written here could
+        overwrite a newer outside write in turn. This therefore appends only a
+        note: it names the close and the interleaved event, and resume reads it
+        to refuse the close and tell the person what to reconcile by hand.
         """
 
         events = self._events()
+        note_text = f"{_CLOSE_NOTE}{stop_id}"
+        note = [e for e in events if e["kind"] == "item.note" and (e.get("payload") or {}).get("text") == note_text]
         ours = [
-            event
-            for event in events
-            if event["kind"] == "item.state"
-            and (event.get("payload") or {}).get("status") == "closed"
-            and (event.get("payload") or {}).get("source") == self.holder
+            e
+            for e in events
+            if e["kind"] == "item.state"
+            and (e.get("payload") or {}).get("status") == "closed"
+            and (e.get("payload") or {}).get("source") == self.holder
         ]
-        if not ours:
+        if not note or not ours:
             return
-        before = [event for event in events if int(event["id"]) < int(ours[-1]["id"])]
-        latest: Mapping[str, Any] = {}
-        for event in before:
-            if event["kind"] == "item.state":
-                latest = event.get("payload") or {}
-        restored = {**_carried_state(before), "status": latest.get("status") or "open"}
-        for kind, body, name in (
-            ("item.note", {"text": f"{_VOID_NOTE}{stop_id}"}, "void"),
-            ("item.state", restored, "restore"),
-        ):
-            body = {**body, "source": self.holder}
-            self._run(
-                "append",
-                "--kind",
-                kind,
-                "--item",
-                self.key,
-                "--idempotency-key",
-                f"ticket-close-{name}/{self.key}/{stop_id}/{int(ours[-1]['id'])}",
-                "--payload",
-                json.dumps(body, sort_keys=True, separators=(",", ":")),
+        between = [e for e in events if int(note[-1]["id"]) < int(e["id"]) < int(ours[-1]["id"])]
+        detail = "an event this close missed"
+        if between:
+            event = between[-1]
+            fields = {k: v for k, v in (event.get("payload") or {}).items() if k != "source"}
+            detail = (
+                f"ledger event {int(event['id'])} by {_event_writer(event)} "
+                f"({event['kind']}: {json.dumps(fields, sort_keys=True, separators=(',', ':'))})"
             )
+        body = {"text": f"{_VOID_NOTE}{stop_id} interleaved: {detail}", "source": self.holder}
+        self._run(
+            "append",
+            "--kind",
+            "item.note",
+            "--item",
+            self.key,
+            "--idempotency-key",
+            f"ticket-close-void/{self.key}/{stop_id}/{int(ours[-1]['id'])}",
+            "--payload",
+            json.dumps(body, sort_keys=True, separators=(",", ":")),
+        )
 
     def record_decision(self, decision: DecisionRecord) -> None:
         _validate_decision(decision)
@@ -1381,6 +1383,7 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
     stop_ids: list[int] = []
     close_id: int | None = None
     voided = False
+    void_detail = ""
     tried: list[dict[str, Any]] = []
     plan: dict[str, Any] | None = None
     plan_ref: str | None = None
@@ -1420,8 +1423,9 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
             close_id = int(named) if named.isdigit() else None
             voided = False
         elif event["kind"] == "item.note" and str(payload.get("text", "")).startswith(_VOID_NOTE):
-            named = payload["text"][len(_VOID_NOTE) :]
-            voided = voided or (named.isdigit() and int(named) == close_id)
+            named, _, detail = payload["text"][len(_VOID_NOTE) :].partition(" interleaved: ")
+            if named.isdigit() and int(named) == close_id:
+                voided, void_detail = True, detail
     status = card["status"]
     # Only the stop the latest close note names is the close, and only while closed.
     if status == "closed" and close_id in stop_ids and not voided:
@@ -1437,7 +1441,7 @@ def _normalize_ledger_card(card: Mapping[str, Any], events: Sequence[Mapping[str
         "plan_ref": plan_ref,
         "tried": tried,
         "pass": _live_pass(events),
-        **({"close_voided": True} if voided else {}),
+        **({"close_voided": True, "close_void_detail": void_detail} if voided else {}),
     }
 
 
@@ -1776,7 +1780,9 @@ class TicketPass:
         if card.get("close_voided"):
             self.reconciliation += (
                 "the last close was invalidated because another writer's event landed while it was "
-                "being confirmed; the ticket is not closed",
+                f"being confirmed ({card.get('close_void_detail') or 'no detail recorded'}); the "
+                "ticket is not closed, and the close's status write may have overwritten that event, "
+                "so reconcile the ticket's status, owner, claim and blocked-by by hand",
             )
         # A closed status counts only when the final stamp is the confirmed close
         # and the card still validates; otherwise the pass resumes before close.

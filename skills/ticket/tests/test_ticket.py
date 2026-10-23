@@ -1656,24 +1656,82 @@ def check_an_interleaved_state_during_close_invalidates_the_close(cli, make_stor
     with pytest.raises(ticket.TicketHeld, match="between this write's revision check and its append"):
         session.close("Done.", refs=("reviews/1",), next_skills=("ticket",))
 
-    # The outside event's fields are put back, and the close no longer counts.
-    assert latest_state(cli) == {
-        "status": "blocked",
-        "owner": "outside-owner",
-        "blocked_by": ["EK-1"],
-    }
+    # The skill writes no state as a repair: the status read stays as the close
+    # left it, and the last state event is still the close's own.
+    events = cli("export-item", KEY)["events"]
+    void = [e for e in events if e["kind"] == "item.note" and e["payload"]["text"].startswith("ticket-close-void/v1 ")]
+    assert len(void) == 1
+    assert [e for e in events if e["kind"] == "item.state" and e["id"] > void[0]["id"]] == []
+    assert latest_state(cli)["status"] == "closed"
     card = make_store("reader").read_card()
-    assert card["status"] == "blocked"
+    assert card["status"] == "closed"
     assert card["close_voided"] is True
     assert all(stamp["close"] is False for stamp in card["stamps"])
     resumed = ticket.TicketPass.open(KEY, source(), make_store("resume"), resume=True)
     assert resumed.phase != "closed"
-    assert any("close was invalidated" in line for line in resumed.reconciliation)
+    flag = "\n".join(resumed.reconciliation)
+    assert "close was invalidated" in flag
+    assert "ledger event" in flag
+    assert '"owner":"outside-owner"' in flag and '"blocked_by":["EK-1"]' in flag
     resumed.end()
+
+
+def check_a_newer_state_after_a_failed_close_is_never_overwritten(cli, make_store):
+    """The repair must not write state: a state that lands during it stays the latest."""
+
+    class RaceThenRepair(ticket.LedgerStore):
+        stage = 0
+
+        def _run(self, *args):
+            if args[0] == "append" and "item.state" in args and self.stage == 1:
+                self.stage = 2
+                cli("state", KEY, "--status", "blocked", "--owner", "outside-owner")
+            if args[0] == "append" and "item.note" in args and self.stage == 2 and "ticket-close-void/v1" in " ".join(args):
+                self.stage = 3
+                cli("state", KEY, "--status", "open", "--owner", "newer-owner")
+            return super()._run(*args)
+
+    template = make_store()
+    store = RaceThenRepair(KEY, TITLE, cli=template.cli, db=template.db, writer="closing")
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    session.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    store.stage = 1
+    with pytest.raises(ticket.TicketHeld):
+        session.close("Done.", refs=("reviews/1",), next_skills=("ticket",))
+    assert store.stage == 3
+    assert latest_state(cli) == {"status": "open", "owner": "newer-owner"}
+
+
+def test_resume_never_trusts_a_voided_close_whatever_else_the_card_says(tmp_path, monkeypatch):
+    store = closed_markdown_store(tmp_path, monkeypatch)
+    edit_card(store, lambda card: card.update(close_voided=True, close_void_detail="ledger event 9 by someone"))
+    resumed = resume(store)
+    assert resumed.phase != "closed"
+    assert any("ledger event 9 by someone" in line for line in resumed.reconciliation)
+
+
+def test_a_voided_close_note_unmarks_the_close_stamp_even_while_the_status_reads_closed():
+    events = [
+        {"id": 1, "kind": "item.stopped", "payload": {"point": "Done.", "phase": "close"}},
+        {"id": 2, "kind": "item.note", "payload": {"text": f"{ticket._CLOSE_NOTE}1"}},
+        {"id": 3, "kind": "item.note", "payload": {"text": f"{ticket._VOID_NOTE}1 interleaved: ledger event 9"}},
+    ]
+    card = {"item_id": KEY, "title": TITLE, "status": "closed"}
+    normalized = ticket._normalize_ledger_card(card, events)
+    assert normalized["stamps"][0]["close"] is False
+    assert normalized["close_voided"] is True
+    events.append({"id": 4, "kind": "item.note", "payload": {"text": f"{ticket._CLOSE_NOTE}1"}})
+    again = ticket._normalize_ledger_card(card, events)
+    assert again["stamps"][0]["close"] is True and "close_voided" not in again
 
 
 def test_ledger_interleaved_write_during_open_leaves_no_orphan_claim(tmp_path, monkeypatch):
     check_an_interleaved_write_during_open_leaves_no_orphan_claim(*fake_ledger_harness(tmp_path, monkeypatch))
+
+
+def test_ledger_newer_state_after_a_failed_close_is_never_overwritten(tmp_path, monkeypatch):
+    check_a_newer_state_after_a_failed_close_is_never_overwritten(*fake_ledger_harness(tmp_path, monkeypatch))
 
 
 def test_ledger_interleaved_state_during_close_invalidates_the_close(tmp_path, monkeypatch):
@@ -1728,6 +1786,7 @@ def test_real_ledger_cli_adapter_when_configured(tmp_path):
     check_the_pass_record_is_released_on_every_exit_path(harness("exit-paths")[1])
     check_an_interleaved_write_during_open_leaves_no_orphan_claim(*harness("open-race"))
     check_an_interleaved_state_during_close_invalidates_the_close(*harness("close-race"))
+    check_a_newer_state_after_a_failed_close_is_never_overwritten(*harness("newer-state"))
     check_a_write_between_the_check_and_the_append_is_refused_by_name(*harness("interleaved"))
     check_a_writer_that_passed_the_revision_check_is_refused(harness("append-key")[1])
     check_a_stale_view_is_refused_by_the_cli_writer_name(*harness("stale-view"))
