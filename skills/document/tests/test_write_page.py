@@ -288,10 +288,32 @@ def test_a_directory_close_failure_after_publication_is_not_reported_as_unchange
     page = repo / "docs" / "page.md"
     if mode == "update":
         page.write_bytes(b"old\n")
+    opened = []
+    real_open = os.open
+
+    def recording_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        if kwargs.get("dir_fd") is not None or args[1] & os.O_DIRECTORY:
+            opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(write_page.os, "open", recording_open)
     _dir_close_failing(monkeypatch)
+    failing_close = write_page.os.close
+    closed = []
+
+    def counting_close(fd):
+        closed.append(fd)
+        return failing_close(fd)
+
+    monkeypatch.setattr(write_page.os, "close", counting_close)
     code = _main_with_stdin(monkeypatch, repo, page, mode, b"new\n")
     monkeypatch.undo()
     err = capsys.readouterr().err
+    # Every directory descriptor opened (repository and docs) had a close
+    # attempted although the first close failed.
+    assert len(opened) >= 3
+    assert set(opened) <= set(closed)
     assert code == 1
     assert "written, but closing a directory failed" in err
     assert "unchanged" not in err
@@ -308,17 +330,30 @@ def test_a_temporary_file_cleanup_failure_after_publication_is_not_reported_as_u
     def unlink_failing(path, **kwargs):
         raise OSError(13, "Permission denied")
 
+    real_fsync = os.fsync
+    directory_syncs = []
+
+    def counting_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directory_syncs.append(fd)
+        return real_fsync(fd)
+
     monkeypatch.setattr(write_page.os, "unlink", unlink_failing)
+    monkeypatch.setattr(write_page.os, "fsync", counting_fsync)
     code = _main_with_stdin(monkeypatch, repo, page, "create", b"new\n")
     monkeypatch.undo()
     err = capsys.readouterr().err
+    leftovers = [p.name for p in (repo / "docs").iterdir() if p.name != "page.md"]
     assert code == 1
-    assert "written, but removing the temporary file failed" in err
+    assert len(leftovers) == 1
+    # The message names the file a person has to delete.
+    assert f"written, but removing the temporary file {leftovers[0]} failed" in err
     assert "unchanged" not in err
     assert page.read_bytes() == b"new\n"
-    for leftover in (repo / "docs").iterdir():
-        if leftover.name != "page.md":
-            real_unlink(leftover)
+    # The directory is still synced after the cleanup failure.
+    assert len(directory_syncs) == 1
+    for name in leftovers:
+        real_unlink(repo / "docs" / name)
 
 
 def test_a_failure_before_publication_still_reports_the_page_unchanged(

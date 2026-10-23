@@ -246,15 +246,21 @@ def write_through(real_repo, rel_parts, root_depth, text, mode):
             # page is already in place and a failure must not claim otherwise.
             if not published:
                 _unlink_quietly(tmp, fd)
+        # Both steps are attempted; the first failure is the one reported. A
+        # temporary file left behind is a second link to the page, so its
+        # name is given for a person to delete.
+        first_failure = None
         try:
             if mode == "create":
                 _unlink_quietly(tmp, fd)
         except OSError as exc:
-            raise Published("removing the temporary file", exc.strerror)
+            first_failure = Published(f"removing the temporary file {tmp}", exc.strerror)
         try:
             os.fsync(fd)
         except OSError as exc:
-            raise Published("syncing the directory", exc.strerror)
+            first_failure = first_failure or Published("syncing the directory", exc.strerror)
+        if first_failure is not None:
+            raise first_failure
         completed = True
     finally:
         # Every handle is closed even if one close fails. A failed close
