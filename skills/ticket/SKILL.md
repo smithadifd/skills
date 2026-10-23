@@ -64,8 +64,11 @@ the session claim (see "Concurrency"):
   when that stamp is no longer the last one;
 - `record_decision(decision)` — `who`, `who_kind`, optional `relayed_by`,
   `standing`, outside `source`, `effect`, tags, verbatim words, phase, and
-  evidence reference;
-- `record_review(review)` — round, verdict, findings, reviewer, and evidence;
+  evidence reference; a plan go adds `criteria`, the ordered criterion texts
+  it approved;
+- `record_review(review)` — round, verdict, findings, reviewer, evidence,
+  the plan revision it reviewed, and `criteria`, the ordered criterion texts
+  it reviewed;
 - `record_plan(plan)` — the latest plan-card snapshot (criteria with `passes`
   and review evidence, skips, diff statement, open questions, revision);
   returns the ref the store keeps it under, which the stop stamps cite;
@@ -154,13 +157,21 @@ session out.
 4. On a resume, `TicketPass.open(..., resume=True)` (with `pass_id=` when it
    continues the same pass) pulls the ticket, then reads the card and rebuilds
    the pass from it: the plan snapshot, the review-round
-   count, the recorded go decisions, and the phase. It reconciles the plan
-   against the fresh ticket and lists every difference in `reconciliation`. A
-   new, changed, or removed acceptance criterion sends the pass back to the plan
-   step for a new plan card and a new plan go; a criterion whose `passes` is not
-   backed by a recorded review round is reset to false. A resume re-enters plan
-   go or outward go only when the store holds that stop's stamp for the plan
-   revision or review round. Without the plan go stamp it resumes at plan;
+   count, the recorded go decisions, and the phase. The pass holds the plan
+   the card stored, with its criteria in stored order, and compares the fresh
+   ticket's criteria with those texts and that order; it lists every
+   difference in `reconciliation`. A new, changed, removed, or reordered
+   acceptance criterion is a change, and so is a review round or plan go
+   whose recorded criteria differ from the card's plan. Below the round cap a
+   change sends the pass back to the plan step for a new plan revision and a
+   new plan go; no earlier review round or go covers it. A stored plan whose
+   revision or criteria cannot be read is refused as a corrupt card
+   (`plan_unidentifiable`): the pass ends and nothing is written. A criterion
+   whose `passes` is not backed by a recorded review round is reset to false.
+   The full rule, state by state, is in
+   [references/resume-plan-identity.md](references/resume-plan-identity.md).
+   A resume re-enters plan go or outward go only when the store holds that
+   stop's stamp for the plan revision or review round. Without the plan go stamp it resumes at plan;
    without the outward go or round-cap stamp it resumes in a state whose only
    step writes that stamp (see Build and review). It flags why. An
    unconfirmed close stamp is flagged and the ticket stays open. State every
@@ -210,7 +221,10 @@ with its `pass_id`. The plan snapshot names the pass that presented it, and a
 plan go names that pass too: `record_go("plan", …)` refuses unless the stored
 plan is the revision this pass presented, and a go naming another pass opens
 nothing. A different pass that resumes at an unapproved plan goes back to the
-plan step and presents it again.
+plan step and presents it again. The go also records the plan's criterion
+texts in order, and it opens nothing once the card's plan holds other
+criteria: building, outward go, outward actions, close and resume all refuse
+it.
 
 ## 5. Build and review
 
@@ -248,6 +262,9 @@ After plan go:
    round, writes the stamp, and waits at outward go. This applies only when
    that round reviewed the current plan revision; a passing round of an
    earlier plan covers nothing in a new one, so the pass resumes at build.
+   When the ticket's criteria change after round three is stored, no round is
+   left for a new plan: the resume stops and says so, and a person restores
+   the criteria or opens a new ticket.
 
 ## 6. Outward go — hard stop
 
@@ -260,10 +277,12 @@ request, Jira comment, status change, message, merge, release, or deploy. Call
 `require_outward_go()` before each outward action; it checks the store.
 
 One check backs outward go wherever the pass relies on it, read from the card
-each time: the final review is a passing round of the current plan revision,
-every criterion cites that round and its evidence, and its outward go stop
-stamp is stored. Resuming at outward go, `record_go("outward", …)`,
-`require_outward_go()` and `close` all refuse when it fails.
+each time: the card's plan is the plan this pass holds, every review round and
+plan go of that revision names the card's criteria in order, the final review
+is a passing round of the current plan revision, every criterion cites that
+round and its evidence, and its outward go stop stamp is stored. Resuming at
+outward go, `record_go("outward", …)`, `require_outward_go()` and `close` all
+refuse when it fails.
 
 After approval, perform only the listed outward actions under the target
 repository's rules. Then call `close(point, refs=…, next_skills=…)`. It first
@@ -275,6 +294,12 @@ references and the same checks; only then does it confirm the close, and it
 runs them once more on the confirmed card. A resume applies the same checks to
 a closed card. A mismatch raises and leaves the ticket open, in the
 store and on resume; repair the card before reporting the ticket closed.
+
+A closed ticket stays closed when its source criteria change later: closed
+validation reads only the card, and the resume flags the change. Follow-up
+work is a new ticket. A change seen after the outward go but before close
+spends that go: the resume says the outward go authorizes nothing now, and
+outward actions already taken are not undone.
 
 ## More-information exits
 

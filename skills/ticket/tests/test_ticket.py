@@ -356,7 +356,10 @@ def test_resume_flags_changed_acceptance_criteria_and_never_keeps_them_passing()
     )
     resumed = resume(store, changed, pass_id=session.pass_id)
     assert resumed.phase == "plan"
-    assert [item.passes for item in resumed.plan.acceptance_criteria] == [True, False]
+    # The pass holds the plan the card stored, never one rebuilt from the source.
+    assert [(item.text, item.passes) for item in resumed.plan.acceptance_criteria] == [
+        (text, True) for text in live.acceptance_criteria
+    ]
     flags = "\n".join(resumed.reconciliation)
     assert "new or changed on the ticket: Plan and outward work require two approvals." in flags
     assert "removed from the ticket: Plan and outward work require explicit approval." in flags
@@ -364,6 +367,9 @@ def test_resume_flags_changed_acceptance_criteria_and_never_keeps_them_passing()
 
     resumed.present_plan(ticket.PlanCard(resumed.ticket))
     assert resumed.plan_revision == 2
+    assert [(item.text, item.passes) for item in resumed.plan.acceptance_criteria] == [
+        (text, False) for text in changed.acceptance_criteria
+    ]
     with pytest.raises(ticket.GateRequired):
         resumed.begin_build()
 
@@ -500,6 +506,8 @@ def one_fault_go(gate, fault, pass_id):
         tags=({"type": "ticket", "id": KEY},),
         verbatim="Go.",
         phase="plan" if gate == "plan" else "review",
+        # A plan go names the criteria it approves: the plan at revision 2 holds the ticket's.
+        criteria=fixture_ticket().acceptance_criteria if gate == "plan" else None,
     )
     if fault == "role":
         fields.update(who="API owner", who_kind="role", relayed_by="the person")
@@ -2014,9 +2022,12 @@ def test_an_outward_stop_whose_stored_round_lost_its_number_is_refused_as_invali
     resumed = resume(store)
     assert resumed.phase == "outward_stop"
     fault(store.card)
-    with pytest.raises(ticket.TicketError, match="carries no round number"):
+    # The card changed under the live pass: the refusal ends it.
+    with pytest.raises(ticket.StoreUnavailable, match="carries no round number") as refused:
         resumed.record_outward_stop()
-    assert resumed.live
+    assert refused.value.code == "review_changed"
+    assert not resumed.live
+    assert not any(stamp["point"].startswith("Waiting at outward go") for stamp in store.card["stamps"])
 
 
 def test_a_round_three_pass_of_an_earlier_plan_names_why_the_cap_stop_is_missing(tmp_path):
@@ -2029,10 +2040,24 @@ def test_a_round_three_pass_of_an_earlier_plan_names_why_the_cap_stop_is_missing
     changed = dataclasses_replace(
         fixture_ticket(), acceptance_criteria=(*fixture_ticket().acceptance_criteria[:1], "Retries are logged.")
     )
-    replanned = resume(store, changed)
-    replanned.present_plan(ticket.PlanCard(replanned.ticket))
-    replanned.record_go("plan", evidence="conversation:plan-go-2", verbatim="Go with plan two.")
-    later = resume(store, changed, pass_id=replanned.pass_id)
+    # A resume on the changed source now stops here, with no round left for a
+    # new plan. The card below is one an earlier rule left: plan revision 2,
+    # presented and approved after round three passed plan revision 1.
+    other_pass = "0123456789abcdef"
+    plan = ticket.PlanCard(changed).as_dict()
+    plan.update(revision=2, ticket_status=changed.status)
+    plan["pass"] = other_pass
+    handle = fresh_handle(store)
+    handle.record_plan(plan)
+    handle.write_stamp("Waiting at plan go for plan revision 2.", "plan", ("ticket",), (".ticket/EK-14.md",))
+    handle.record_decision(
+        dataclasses_replace(
+            one_fault_go("plan", "none", other_pass),
+            effect=plan_go_effect(2, other_pass),
+            criteria=changed.acceptance_criteria,
+        )
+    )
+    later = resume(store, changed)
     assert later.phase == "cap_stop"
     assert (
         "cap stop not recorded: review round 3 passed plan revision 1, not the current plan revision 2, "
@@ -2070,7 +2095,6 @@ OUTWARD_GO_FAULTS = {
     "final review labelled no plan revision": lambda card: card["reviews"][-1].pop("plan_revision"),
     "evidence that is not text": both(final_review(evidence=5), with_criteria(lambda item: item.update(review_evidence=5))),
     "empty evidence": both(final_review(evidence=""), with_criteria(lambda item: item.update(review_evidence=""))),
-    "no criteria": lambda card: card["plan"].update(acceptance_criteria=[]),
     "criteria citing the earlier round": with_criteria(
         lambda item: item.update(review_round=1, review_evidence="reviews/1")
     ),
@@ -2142,8 +2166,15 @@ CRITERIA_EDITS = {
     "one criterion's text changed": change_one_criterion_text,
     "criteria reordered": reorder_criteria,
 }
-CARD_PLAN_EDITS = {"plan revision changed": bump_plan_revision, **CRITERIA_EDITS}
+CARD_PLAN_EDITS = {
+    "plan revision changed": bump_plan_revision,
+    # Revision 1 read without coercion: True and 1.0 are not the whole number 1.
+    "plan revision true": lambda card: card["plan"].update(revision=True),
+    "plan revision 1.0": lambda card: card["plan"].update(revision=1.0),
+    **CRITERIA_EDITS,
+}
 PLAN_DIFFERS = "the card's plan is not plan revision 1 with this pass's acceptance criteria in order"
+REVIEW_DIFFERS = "review round 1 reviewed other acceptance criteria than plan revision 1 on the card"
 
 
 @pytest.mark.parametrize("edit", CARD_PLAN_EDITS.values(), ids=CARD_PLAN_EDITS.keys())
@@ -2190,4 +2221,317 @@ def test_a_closed_card_whose_criteria_were_edited_does_not_resume_as_closed(tmp_
     assert resumed.phase != "closed"
     flags = "\n".join(resumed.reconciliation)
     assert "the store is marked closed but the close does not validate" in flags
-    assert PLAN_DIFFERS in flags
+    # A closed card is checked on the card alone: its review no longer covers its plan.
+    assert REVIEW_DIFFERS in flags
+
+
+# A resumed pass compares the ticket source with the criterion texts and order
+# the card stored. Any later edit of the source, a reorder included, is a change.
+
+FIRST, SECOND = fixture_ticket().acceptance_criteria
+SOURCE_EDITS = {
+    "reorder": (lambda texts: tuple(reversed(texts)), "the acceptance criteria were reordered on the ticket"),
+    "text": (
+        lambda texts: (texts[0], texts[1] + " Twice."),
+        f"acceptance criterion is new or changed on the ticket: {SECOND} Twice.",
+    ),
+    "added": (lambda texts: (*texts, "Retries are logged."), "new or changed on the ticket: Retries are logged."),
+    "removed": (lambda texts: texts[:1], f"acceptance criterion was removed from the ticket: {SECOND}"),
+}
+
+
+def edited_source(kind):
+    """The fixture ticket with its criteria edited at the source."""
+
+    edit, _ = SOURCE_EDITS[kind]
+    live = fixture_ticket()
+    return dataclasses_replace(live, acceptance_criteria=edit(live.acceptance_criteria))
+
+
+def named_change(kind):
+    return SOURCE_EDITS[kind][1]
+
+
+@pytest.mark.parametrize("kind", SOURCE_EDITS)
+def test_a_source_change_after_a_passing_review_resumes_at_plan_with_a_flag(kind):
+    store = MemoryStore()
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    changed = edited_source(kind)
+    resumed = resume(store, changed, pass_id=session.pass_id)
+    assert resumed.phase == "plan"
+    assert resumed.approved("outward") is False
+    flags = "\n".join(resumed.reconciliation)
+    assert "review round 1 passed plan revision 1; the criteria changed since (" in flags
+    assert named_change(kind) in flags
+    assert "that round covers nothing in a new plan" in flags
+    # The pass holds the stored plan until it presents the source's criteria as revision 2.
+    assert [item.text for item in resumed.plan.acceptance_criteria] == [FIRST, SECOND]
+    resumed.present_plan(ticket.PlanCard(changed))
+    resumed.record_go("plan", evidence="conversation:plan-go-2", verbatim="Go with plan two.")
+    resumed.begin_build()
+    assert (resumed.plan_revision, resumed.phase) == (2, "build")
+
+
+@pytest.mark.parametrize("kind", SOURCE_EDITS)
+def test_a_source_change_after_round_three_passed_stops_naming_the_change(kind):
+    store = MemoryStore()
+    session = to_build(store)
+    session.record_review("changes", evidence="reviews/1")
+    session.record_review("changes", evidence="reviews/2")
+    session.record_review("pass", evidence="reviews/3", passed_criteria=(0, 1))
+    session.end()
+    before = copy.deepcopy(store.card)
+    resumed = resume(store, edited_source(kind))
+    assert (resumed.phase, resumed.live) == ("stopped", False)
+    flags = "\n".join(resumed.reconciliation)
+    assert "review round 3 passed plan revision 1; the criteria changed since (" in flags
+    assert named_change(kind) in flags
+    assert "no review round is left for a new plan" in flags
+    assert "does not carry that round" not in flags
+    assert store.card == before
+
+
+@pytest.mark.parametrize("kind", SOURCE_EDITS)
+def test_a_source_change_after_close_keeps_the_ticket_closed(kind):
+    store = MemoryStore()
+    approved_for_close(store).close("Done.", refs=("example/repo#14",))
+    before = copy.deepcopy(store.card)
+    resumed = resume(store, edited_source(kind))
+    assert (resumed.phase, resumed.live) == ("closed", False)
+    flags = "\n".join(resumed.reconciliation)
+    assert "the ticket's criteria changed after close (" in flags
+    assert named_change(kind) in flags
+    assert "the ticket stays closed" in flags
+    assert store.card == before
+
+
+def test_a_source_change_after_the_round_cap_stays_stopped_and_writes_nothing():
+    store = MemoryStore()
+    session = to_build(store)
+    for round_number in (1, 2, 3):
+        session.record_review("changes", evidence=f"reviews/{round_number}")
+    assert session.phase == "stopped"
+    before = copy.deepcopy(store.card)
+    resumed = resume(store, edited_source("reorder"))
+    assert (resumed.phase, resumed.live) == ("stopped", False)
+    flags = "\n".join(resumed.reconciliation)
+    assert named_change("reorder") in flags
+    assert "review stopped at the round cap" in flags
+    assert store.card == before
+
+
+def test_a_source_change_after_the_outward_go_resumes_at_plan_naming_the_go():
+    store = MemoryStore()
+    session = approved_for_close(store)
+    resumed = resume(store, edited_source("reorder"), pass_id=session.pass_id)
+    assert resumed.phase == "plan"
+    flags = "\n".join(resumed.reconciliation)
+    assert "the outward go of plan revision 1 authorizes nothing now" in flags
+    assert "outward actions already taken are not undone" in flags
+    with pytest.raises(ticket.TicketError):
+        resumed.require_outward_go()
+    resumed.present_plan(ticket.PlanCard(resumed.ticket))
+    assert resumed.approved("outward") is False
+
+
+def test_a_card_and_source_reordered_together_after_a_passing_review_resume_at_plan():
+    store = MemoryStore()
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    session.end()
+    store.card["plan"]["acceptance_criteria"].reverse()
+    changed = edited_source("reorder")
+    # The source matches the card, so only the review and the go show the change.
+    resumed = resume(store, changed)
+    assert resumed.phase == "plan"
+    assert REVIEW_DIFFERS in "\n".join(resumed.reconciliation)
+    resumed.end()
+    again = resume(store, changed)
+    assert again.phase == "plan"
+    again.present_plan(ticket.PlanCard(changed))
+    again.record_go("plan", evidence="conversation:plan-go-2", verbatim="Go with plan two.")
+    again.begin_build()
+    assert (again.plan_revision, again.phase) == (2, "build")
+
+
+def test_a_review_round_covers_nothing_once_the_card_plan_differs_from_its_criteria():
+    store = MemoryStore()
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    session.end()
+    # The card's plan and its plan go are edited alike, the review is not.
+    store.card["plan"]["acceptance_criteria"].reverse()
+    store.card["decisions"][0]["criteria"].reverse()
+    resumed = resume(store, edited_source("reorder"))
+    assert resumed.phase == "plan"
+    flags = "\n".join(resumed.reconciliation)
+    assert REVIEW_DIFFERS in flags
+    assert "plan go" not in flags
+
+
+# A plan go names the acceptance criteria it approved and opens nothing for others.
+
+GO_DIFFERS = "the plan go of plan revision {} approved other acceptance criteria than the card's plan"
+
+
+def test_a_plan_go_is_not_reused_for_criteria_edited_on_the_card_and_the_source():
+    # No review exists yet, so no review round can show the edit.
+    store = MemoryStore()
+    session = to_build(store)
+    store.card["plan"]["acceptance_criteria"][1]["text"] = SECOND + " Twice."
+    resumed = resume(store, edited_source("text"), pass_id=session.pass_id)
+    assert resumed.phase == "plan"
+    assert GO_DIFFERS.format(1) in resumed.reconciliation[-1]
+    assert resumed.approved("plan") is False
+    with pytest.raises(ticket.TicketError):
+        resumed.begin_build()
+
+
+def test_a_plan_go_is_not_reused_when_only_an_earlier_revision_was_reviewed():
+    store = MemoryStore()
+    session = to_build(store)
+    session.record_review("changes", evidence="reviews/1")
+    replanned = resume(store, edited_source("added"), pass_id=session.pass_id)
+    replanned.present_plan(ticket.PlanCard(replanned.ticket))
+    replanned.record_go("plan", evidence="conversation:plan-go-2", verbatim="Go with plan two.")
+    replanned.begin_build()
+    replanned.end()
+    # Plan revision 2 has no review; its card plan and the source are edited alike.
+    edited = (FIRST, SECOND, "Retries are logged twice.")
+    store.card["plan"]["acceptance_criteria"][2]["text"] = edited[2]
+    resumed = resume(store, dataclasses_replace(fixture_ticket(), acceptance_criteria=edited))
+    assert resumed.phase == "plan"
+    assert GO_DIFFERS.format(2) in resumed.reconciliation[-1]
+    assert resumed.approved("plan") is False
+
+
+def test_a_plan_go_opens_no_build_for_criteria_the_card_no_longer_holds():
+    store = MemoryStore()
+    session = to_plan_go(store)
+    session.record_go("plan", evidence="conversation:plan-go", verbatim="Go.")
+    store.card["plan"]["acceptance_criteria"].reverse()
+    with pytest.raises(ticket.GateRequired):
+        session.begin_build()
+    assert session.phase == "plan_go"
+
+
+def reorder_plan_go_criteria(card):
+    card["decisions"][0]["criteria"].reverse()
+
+
+@pytest.mark.parametrize("step", ("outward go", "outward action", "close"))
+def test_a_plan_go_for_other_criteria_authorizes_no_outward_step(tmp_path, step):
+    store = concrete_store(tmp_path)
+    session = to_build(store)
+    session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    if step != "outward go":
+        session.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+    edit_card(store, reorder_plan_go_criteria)
+    with pytest.raises(ticket.StoreUnavailable) as refused:
+        if step == "outward go":
+            session.record_go("outward", evidence="conversation:outward", verbatim="Ship it.")
+        elif step == "outward action":
+            session.require_outward_go()
+        else:
+            session.close("Done.", refs=("example/repo#14",))
+    assert GO_DIFFERS.format(1) in str(refused.value)
+    assert not session.live
+    card = store.read_card()
+    assert card["status"] == "open"
+    assert len(card["decisions"]) == (1 if step == "outward go" else 2)
+
+
+@pytest.mark.parametrize("revision", (True, 1.0))
+def test_a_plan_go_is_not_recorded_against_a_non_integer_plan_revision(revision):
+    store = MemoryStore()
+    session = to_plan_go(store)
+    store.card["plan"]["revision"] = revision
+    with pytest.raises(ticket.StoreUnavailable, match="no plan go was recorded") as refused:
+        session.record_go("plan", evidence="conversation:plan-go", verbatim="Go.")
+    assert refused.value.code == "plan_changed"
+    assert store.card["decisions"] == []
+
+
+def test_an_outward_stop_whose_stored_round_reviewed_other_criteria_is_refused():
+    store = type("Store", (LosesTheOutwardStamp, MemoryStore), {})()
+    session = to_build(store)
+    with pytest.raises(RuntimeError, match="before the outward stop stamp"):
+        session.record_review("pass", evidence="reviews/1", passed_criteria=(0, 1))
+    store.lose = False
+    resumed = resume(store)
+    assert resumed.phase == "outward_stop"
+    store.card["reviews"][-1]["criteria"].reverse()
+    with pytest.raises(ticket.StoreUnavailable, match="no longer the passing round") as refused:
+        resumed.record_outward_stop()
+    assert refused.value.code == "review_changed"
+    assert not resumed.live
+    assert not any(stamp["point"].startswith("Waiting at outward go") for stamp in store.card["stamps"])
+
+
+@pytest.mark.parametrize(
+    "criteria", ([], [""], [" "], [FIRST, 5], FIRST), ids=("empty", "blank", "space", "number", "text")
+)
+def test_a_review_or_go_with_invalid_criteria_is_not_stored(criteria):
+    store = MemoryStore()
+    with pytest.raises(ticket.TicketError, match="criteria"):
+        store.record_review(ticket.ReviewRecord(1, "pass", evidence="reviews/1", plan_revision=1, criteria=criteria))
+    with pytest.raises(ticket.TicketError, match="criteria"):
+        store.record_decision(dataclasses_replace(one_fault_go("plan", "none", "0123456789abcdef"), criteria=criteria))
+    assert store.card is None
+
+
+# A stored plan whose revision or criteria cannot be read is refused as a
+# corrupt card: the pass ends and nothing is written.
+
+UNIDENTIFIABLE = {
+    "revision missing": lambda plan: plan.pop("revision"),
+    "revision true": lambda plan: plan.update(revision=True),
+    "revision 1.0": lambda plan: plan.update(revision=1.0),
+    "revision as text": lambda plan: plan.update(revision="1"),
+    "revision zero": lambda plan: plan.update(revision=0),
+    "criteria as a mapping": lambda plan: plan.update(acceptance_criteria={"text": FIRST}),
+    "criteria as text": lambda plan: plan.update(acceptance_criteria=FIRST),
+    "no criteria": lambda plan: plan.update(acceptance_criteria=[]),
+    "criterion as text": lambda plan: plan["acceptance_criteria"].__setitem__(0, FIRST),
+    "criterion without text": lambda plan: plan["acceptance_criteria"][0].pop("text"),
+    "numeric criterion text": lambda plan: plan["acceptance_criteria"][0].update(text=5),
+    "empty criterion text": lambda plan: plan["acceptance_criteria"][0].update(text=""),
+}
+
+
+def at_plan_go(store):
+    to_plan_go(store).end()
+
+
+def at_outward_go(store):
+    # The card holds both go decisions as well as the plan.
+    approved_for_close(store).end()
+
+
+def closed(store):
+    approved_for_close(store).close("Done.", refs=("example/repo#14",))
+
+
+@pytest.mark.parametrize("stage", (at_plan_go, at_outward_go, closed))
+@pytest.mark.parametrize("fault", UNIDENTIFIABLE.values(), ids=UNIDENTIFIABLE.keys())
+def test_a_stored_plan_that_cannot_be_identified_is_refused_and_writes_nothing(stage, fault):
+    store = MemoryStore()
+    stage(store)
+    fault(store.card["plan"])
+    before = copy.deepcopy(store.card)
+    with pytest.raises(ticket.StoreUnavailable, match="cannot be identified") as refused:
+        resume(store)
+    assert refused.value.code == "plan_unidentifiable"
+    assert store.card == before
+
+
+def test_a_live_pass_whose_stored_plan_cannot_be_identified_is_refused_and_ends():
+    store = MemoryStore()
+    session = approved_for_close(store)
+    store.card["plan"]["revision"] = True
+    before = copy.deepcopy(store.card)
+    with pytest.raises(ticket.StoreUnavailable, match="cannot be identified"):
+        resume(store, pass_id=session.pass_id)
+    # The refusal releases the pass's record; nothing else is written.
+    assert store.card == {**before, "pass": None}

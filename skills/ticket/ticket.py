@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Protocol, Sequence
@@ -353,11 +354,16 @@ class DecisionRecord:
     phase: str
     evidence: str | None = None
     relayed_by: str | None = None
+    # A plan go names the acceptance criteria it approved, in order; it
+    # approves nothing for any other criteria.
+    criteria: tuple[str, ...] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["source"] = self.source.as_dict()
         result["tags"] = [dict(tag) for tag in self.tags]
+        if self.criteria is not None:
+            result["criteria"] = list(self.criteria)
         return {key: value for key, value in result.items() if value is not None}
 
 
@@ -370,10 +376,15 @@ class ReviewRecord:
     evidence: str | None = None
     # The plan revision this round reviewed; a later plan is not covered by it.
     plan_revision: int | None = None
+    # The acceptance criteria this round reviewed, in order; a plan with other
+    # criteria is not covered by it.
+    criteria: tuple[str, ...] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["findings"] = list(self.findings)
+        if self.criteria is not None:
+            result["criteria"] = list(self.criteria)
         return {key: value for key, value in result.items() if value is not None}
 
 
@@ -484,6 +495,15 @@ def _validate_decision(decision: DecisionRecord) -> None:
         if set(tag) != {"type", "id"} or tag["type"] not in TAG_TYPES:
             raise TicketError("a decision tag requires a known type and id")
         _ref(tag["id"], "decision tag id")
+    if decision.criteria is not None:
+        _criteria_texts(decision.criteria, "a decision's criteria")
+
+
+def _criteria_texts(value: Any, name: str) -> None:
+    """Ordered acceptance criterion texts: a non-empty sequence of non-empty strings."""
+
+    if type(value) not in (list, tuple) or not value or not all(_is_text(item) for item in value):
+        raise TicketError(f"{name} must be a non-empty list of non-empty text")
 
 
 def _validate_review(review: ReviewRecord) -> None:
@@ -499,6 +519,8 @@ def _validate_review(review: ReviewRecord) -> None:
         _ref(review.evidence, "review evidence")
     if review.plan_revision is not None and (type(review.plan_revision) is not int or review.plan_revision < 1):
         raise TicketError("a review's plan revision must be at least 1")
+    if review.criteria is not None:
+        _criteria_texts(review.criteria, "a review's criteria")
 
 
 def _validate_plan(plan: Mapping[str, Any], key: str) -> None:
@@ -1016,27 +1038,146 @@ def _plan_pass(card: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _has_go(card: Mapping[str, Any], gate: str, revision: int, key: str) -> bool:
-    """A gate is open only through a person's settled ratification in the store.
+def _go_decisions(card: Mapping[str, Any], gate: str, revision: int, key: str) -> list[Mapping[str, Any]]:
+    """The person's settled ratifications of ``gate`` for plan revision ``revision``.
 
-    A plan go counts only for the plan revision the stored plan's own pass presented.
+    A plan go names the pass that presented the stored plan.
     """
 
-    if revision < 1:
-        return False
+    if type(revision) is not int or revision < 1:
+        return []
     effect = _go_effect(gate, revision, _plan_pass(card) if gate == "plan" else None)
     tag = {"type": "ticket", "id": key}
+    found = []
     for decision in card.get("decisions") or ():
+        if not isinstance(decision, Mapping):
+            continue
         source = decision.get("source") or {}
         if (
             decision.get("effect") == effect
             and decision.get("who_kind") == "person"
             and decision.get("standing") == "settled"
+            and isinstance(source, Mapping)
             and source.get("what") == "ratification"
             and tag in (decision.get("tags") or ())
         ):
-            return True
-    return False
+            found.append(decision)
+    return found
+
+
+def _approved_criteria(decision: Mapping[str, Any], texts: Sequence[str]) -> bool:
+    """A plan go approved exactly these criterion texts, in this order."""
+
+    return decision.get("criteria") == list(texts)
+
+
+def _reviewed_criteria(review: Mapping[str, Any], texts: Sequence[str]) -> bool:
+    """A review round reviewed exactly these criterion texts, in this order."""
+
+    return review.get("criteria") == list(texts)
+
+
+def _has_go(card: Mapping[str, Any], gate: str, revision: int, key: str) -> bool:
+    """A gate is open only through a person's settled ratification in the store.
+
+    A plan go counts only for the plan revision the stored plan's own pass
+    presented, and only for the acceptance criteria the card's plan holds.
+    """
+
+    decisions = _go_decisions(card, gate, revision, key)
+    if gate != "plan":
+        return bool(decisions)
+    texts = _card_texts(card)
+    return texts is not None and any(_approved_criteria(decision, texts) for decision in decisions)
+
+
+def _plan_identity(stored: Any) -> tuple[int, tuple[str, ...]] | None:
+    """The stored plan's revision and criterion texts in order, or None when they cannot be read.
+
+    The revision is a whole number of at least 1, read without coercion; the
+    criteria are a non-empty list whose every entry carries its text.
+    """
+
+    if not isinstance(stored, Mapping):
+        return None
+    revision = stored.get("revision")
+    if type(revision) is not int or revision < 1:
+        return None
+    criteria = stored.get("acceptance_criteria")
+    if type(criteria) is not list or not criteria:
+        return None
+    texts = []
+    for item in criteria:
+        if not isinstance(item, Mapping) or not _is_text(item.get("text")):
+            return None
+        texts.append(item["text"])
+    return revision, tuple(texts)
+
+
+def _card_texts(card: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The card's plan criterion texts in stored order, or None when they cannot be read."""
+
+    plan = card.get("plan")
+    criteria = plan.get("acceptance_criteria") if isinstance(plan, Mapping) else None
+    if type(criteria) is not list or not criteria:
+        return None
+    if not all(isinstance(item, Mapping) and _is_text(item.get("text")) for item in criteria):
+        return None
+    return tuple(item["text"] for item in criteria)
+
+
+def _source_differences(stored: Sequence[str], source: Sequence[str]) -> list[str]:
+    """How the ticket source's criteria differ from the stored ones: positional and exact.
+
+    An added, removed or edited criterion is named; the same texts in another
+    order are a reorder. Both are changes.
+    """
+
+    if tuple(stored) == tuple(source):
+        return []
+    added = Counter(source) - Counter(stored)
+    removed = Counter(stored) - Counter(source)
+    differences = []
+    for text in source:
+        if added[text] > 0:
+            added[text] -= 1
+            differences.append(f"acceptance criterion is new or changed on the ticket: {text}")
+    for text in stored:
+        if removed[text] > 0:
+            removed[text] -= 1
+            differences.append(f"acceptance criterion was removed from the ticket: {text}")
+    if not differences:
+        differences.append("the acceptance criteria were reordered on the ticket")
+    return differences
+
+
+def _coverage_problems(card: Mapping[str, Any], revision: int, key: str) -> list[str]:
+    """What the card's records of plan revision ``revision`` fail of covering the card's plan.
+
+    Every review round of that revision, and every plan go of it, must name
+    exactly the criterion texts the card's plan holds, in order. A mismatch
+    means the card's plan was edited after that round or that go.
+    """
+
+    texts = _card_texts(card)
+    problems = []
+    for review in card.get("reviews") or ():
+        if (
+            isinstance(review, Mapping)
+            and type(review.get("plan_revision")) is int
+            and review["plan_revision"] == revision
+            and (texts is None or not _reviewed_criteria(review, texts))
+        ):
+            problems.append(
+                f"review round {review.get('round')} reviewed other acceptance criteria than plan revision "
+                f"{revision} on the card"
+            )
+    plan_goes = _go_decisions(card, "plan", revision, key)
+    if any(texts is None or not _approved_criteria(go, texts) for go in plan_goes):
+        problems.append(
+            f"the plan go of plan revision {revision} approved other acceptance criteria than the card's plan"
+        )
+    return problems
 
 
 def _plan_go_point(revision: int) -> str:
@@ -1087,14 +1228,17 @@ def _close_card_problems(
     ]
     if len(card.get("reviews") or ()) != rounds:
         problems.append("the review rounds differ")
-    return problems + _review_problems(card, revision, plan_texts)
+    return problems + _review_problems(card, revision, plan_texts, key)
 
 
-def _passing_final_review(card: Mapping[str, Any], revision: int) -> Mapping[str, Any] | None:
-    """The card's final review when it is a passing round of plan revision ``revision``.
+def _passing_final_review(
+    card: Mapping[str, Any], revision: int, texts: Sequence[str]
+) -> Mapping[str, Any] | None:
+    """The card's final review when it is a passing round of plan revision ``revision``
+    that reviewed the criterion texts ``texts``, in order.
 
     A passing round carries its round number and its evidence; a round that
-    reviewed another plan revision covers nothing in this one.
+    reviewed another plan revision, or other criteria, covers nothing in this one.
     """
 
     reviews = card.get("reviews") or ()
@@ -1105,6 +1249,7 @@ def _passing_final_review(card: Mapping[str, Any], revision: int) -> Mapping[str
         and type(final.get("round")) is int
         and type(final.get("plan_revision")) is int
         and final["plan_revision"] == revision
+        and _reviewed_criteria(final, texts)
         and isinstance(final.get("evidence"), str)
         and final["evidence"]
     ):
@@ -1131,18 +1276,19 @@ def _card_plan_problems(card: Mapping[str, Any], revision: int, plan_texts: Sequ
     return []
 
 
-def _review_problems(card: Mapping[str, Any], revision: int, plan_texts: Sequence[str]) -> list[str]:
+def _review_problems(card: Mapping[str, Any], revision: int, plan_texts: Sequence[str], key: str) -> list[str]:
     """What the card fails of reaching outward go: the plan this pass holds
-    (plan revision ``revision`` with the criterion texts ``plan_texts``), a
-    passing final round of that revision, every criterion citing it, and its
-    outward go stop stamp.
+    (plan revision ``revision`` with the criterion texts ``plan_texts``), its
+    review rounds and plan go naming the card's criteria, a passing final round
+    of that revision, every criterion citing it, and its outward go stop stamp.
 
     Outward authorization, outward actions, close and resume all read it from
     the card at the moment they rely on it.
     """
 
     problems = _card_plan_problems(card, revision, plan_texts)
-    final = _passing_final_review(card, revision)
+    problems += _coverage_problems(card, revision, key)
+    final = _passing_final_review(card, revision, _card_texts(card) or ())
     recorded = _recorded_rounds(card.get("reviews") or ())
     criteria = [
         Criterion(item.get("text"), item.get("passes") is True, item.get("review_evidence"), item.get("review_round"))
@@ -1160,29 +1306,22 @@ def _review_problems(card: Mapping[str, Any], revision: int, plan_texts: Sequenc
 
 
 def _reconcile(
-    stored: Mapping[str, Any], ticket: Ticket, reviews: Sequence[Mapping[str, Any]]
-) -> tuple[PlanCard, list[str], bool]:
-    """Rebuild a plan from its snapshot against the fresh ticket.
+    stored: Mapping[str, Any], texts: Sequence[str], ticket: Ticket, reviews: Sequence[Mapping[str, Any]]
+) -> tuple[PlanCard, list[str], list[str]]:
+    """Rebuild the plan the card stored, its criteria in stored order, and
+    compare those criteria with the fresh ticket's.
 
-    Returns the plan, a list of flagged differences, and whether the
-    acceptance criteria changed (which needs a new plan and plan go).
+    ``texts`` are the stored criterion texts, already read by ``_plan_identity``.
+    Returns the plan, a list of flagged differences, and the ticket source's
+    differences from the stored criteria (any of which needs a new plan and
+    plan go).
     """
 
     plan = PlanCard(ticket)
     flags: list[str] = []
-    changed = False
     rounds = _recorded_rounds(reviews)
-    stored_criteria = {
-        item.get("text"): item for item in stored.get("acceptance_criteria") or () if isinstance(item, Mapping)
-    }
     restored: list[Criterion] = []
-    for text in ticket.acceptance_criteria:
-        item = stored_criteria.get(text)
-        if item is None:
-            flags.append(f"acceptance criterion is new or changed on the ticket: {text}")
-            changed = True
-            restored.append(Criterion(text))
-            continue
+    for item, text in zip(stored["acceptance_criteria"], texts):
         candidate = Criterion(
             text,
             item.get("passes") is True,
@@ -1193,10 +1332,6 @@ def _reconcile(
             flags.append(f"passes is not backed by a recorded review round, reset to false: {text}")
             candidate = Criterion(text)
         restored.append(candidate)
-    for text in stored_criteria:
-        if text not in ticket.acceptance_criteria:
-            flags.append(f"acceptance criterion was removed from the ticket: {text}")
-            changed = True
     plan._criteria = tuple(restored)
     for step_data in stored.get("steps") or ():
         step = next((item for item in plan.steps if item.name == step_data.get("name")), None)
@@ -1213,7 +1348,7 @@ def _reconcile(
         flags.append(f"ticket status changed: {stored['ticket_status']} -> {ticket.status}")
     if stored.get("ticket_updated_at") not in (None, ticket.updated_at):
         flags.append("ticket was updated since the plan card was written")
-    return plan, flags, changed
+    return plan, flags, _source_differences(texts, ticket.acceptance_criteria)
 
 
 def _ends_on_failure(method):
@@ -1377,10 +1512,23 @@ class TicketPass:
         reviews = list(card.get("reviews") or ())
         self._rounds = len(reviews)
         stored = card.get("plan")
+        changes: list[str] = []
         if stored:
-            plan, flags, changed = _reconcile(stored, self._ticket, reviews)
+            identity = _plan_identity(stored)
+            if identity is None:
+                # Nothing can be compared with a plan that cannot be read, and
+                # no new revision can follow it, so the pass ends here.
+                raise StoreUnavailable(
+                    "the card's stored plan cannot be identified: its revision must be a whole number of at "
+                    "least 1 and its acceptance criteria a non-empty list of entries with text. The card is "
+                    "corrupt, so nothing was written and the pass ends; a person repairs the card.",
+                    code="plan_unidentifiable",
+                )
+            self._revision, texts = identity
+            # The pass holds the plan the card stored, in stored order; the
+            # ticket source is only compared with it.
+            plan, flags, changes = _reconcile(stored, texts, self._ticket, reviews)
             self._plan = plan
-            self._revision = int(stored.get("revision") or 0)
             self._plan_ref = card.get("plan_ref")
             self._plan_pass = _plan_pass(card)
             self.reconciliation = tuple(flags)
@@ -1390,7 +1538,13 @@ class TicketPass:
         if card.get("status") == "closed":
             problems = self._closed_problems(card)
             if not problems:
+                # A closed ticket never reopens on a source edit.
                 self._phase = "closed"
+                if changes:
+                    self.reconciliation += (
+                        f"the ticket's criteria changed after close ({'; '.join(changes)}); the ticket stays "
+                        "closed; follow-up work is a new ticket",
+                    )
                 return
             self.reconciliation += (
                 "the store is marked closed but the close does not validate: "
@@ -1402,8 +1556,17 @@ class TicketPass:
         if not stored:
             self._phase = "orient"
             return
-        if changed:
-            self._phase = "plan"
+        if _has_stamp(card, _CAP_POINT, "review"):
+            if changes:
+                self.reconciliation += (
+                    f"the acceptance criteria changed since plan revision {self._revision} was stored "
+                    f"({'; '.join(changes)}); review stopped at the round cap, so no new plan can be reviewed",
+                )
+            self._phase = "stopped"
+            return
+        changes += _coverage_problems(card, self._revision, self._ticket.key)
+        if changes:
+            self._resume_changed(card, reviews, "; ".join(changes))
             return
         # A hard stop is re-entered only when the store holds its stop stamp;
         # otherwise the pass resumes at the step before the stop.
@@ -1427,10 +1590,10 @@ class TicketPass:
         last = reviews[-1] if reviews else None
         self._last_review = last
         # A passing round covers only the plan revision it reviewed.
-        final = _passing_final_review(card, self._revision)
+        final = _passing_final_review(card, self._revision, self._plan_texts())
         passed_this_plan = final is not None
         stamped = passed_this_plan and _has_stamp(card, _outward_go_point(final["round"]), "review")
-        if not _review_problems(card, self._revision, self._plan_texts()):
+        if not _review_problems(card, self._revision, self._plan_texts(), self._ticket.key):
             self._phase = "outward_go"
         elif passed_this_plan and not stamped:
             # A passing round reaches outward go only once its stop stamp is
@@ -1443,37 +1606,87 @@ class TicketPass:
             )
             self._phase = "outward_stop"
         elif self._rounds >= MAX_REVIEW_ROUNDS:
-            # The cap stops the pass only once its stop stamp is stored. A
-            # process that died between storing the last round and writing
-            # that stamp leaves the pass able to write it, and nothing else.
-            if _has_stamp(card, _CAP_POINT, "review"):
-                self._phase = "stopped"
-            elif passed_this_plan:
-                # Only an edited card holds a stamped passing round of this
-                # plan that the plan card does not carry; it is not a
-                # non-converged review.
+            # The cap stops the pass only once its stop stamp is stored (that
+            # case returned above). A process that died between storing the
+            # last round and writing that stamp leaves the pass able to write
+            # it, and nothing else.
+            if passed_this_plan:
+                # A source change never reaches here, so only an edited card
+                # holds a stamped passing round of this plan that the plan
+                # card does not carry; it is not a non-converged review.
                 self.reconciliation += (
                     f"review round {last.get('round')} passed with its outward go stop stamp, but the plan "
                     "card does not carry that round; a person reconciles the card",
                 )
                 self._phase = "stopped"
             else:
-                # Three stored rounds mean ``last`` is a stored review here.
-                if last.get("verdict") == "pass":
-                    why = (
-                        f"review round {last.get('round')} passed plan revision {last.get('plan_revision')}, "
-                        f"not the current plan revision {self._revision}, so the round cap is reached "
-                        "without a passing round of this plan"
-                    )
-                else:
-                    why = f"review round {self._rounds} is stored without its stop stamp"
-                self.reconciliation += (f"cap stop not recorded: {why}; record_cap_stop() writes it",)
-                self._phase = "cap_stop"
+                self._resume_at_cap_stop(last)
         else:
             self._phase = "build"
 
+    def _resume_at_cap_stop(self, last: Mapping[str, Any]) -> None:
+        """Resume where the only step is writing the round-cap stop stamp."""
+
+        # Three stored rounds mean ``last`` is a stored review here.
+        if last.get("verdict") == "pass":
+            why = (
+                f"review round {last.get('round')} passed plan revision {last.get('plan_revision')}, "
+                f"not the current plan revision {self._revision}, so the round cap is reached "
+                "without a passing round of this plan"
+            )
+        else:
+            why = f"review round {self._rounds} is stored without its stop stamp"
+        self.reconciliation += (f"cap stop not recorded: {why}; record_cap_stop() writes it",)
+        self._phase = "cap_stop"
+
+    def _resume_changed(self, card: Mapping[str, Any], reviews: Sequence[Mapping[str, Any]], what: str) -> None:
+        """Resume after the criteria changed since the card stored its plan.
+
+        No review round or go of the stored plan covers a new plan. Below the
+        round cap the pass presents a new plan revision; at the cap it stops.
+        """
+
+        revision = self._revision
+        last = reviews[-1] if reviews else None
+        self._last_review = last
+        held = (
+            isinstance(last, Mapping)
+            and last.get("verdict") == "pass"
+            and type(last.get("round")) is int
+            and type(last.get("plan_revision")) is int
+            and last["plan_revision"] == revision
+        )
+        if held:
+            passed = f"review round {last['round']} passed plan revision {revision}; the criteria changed since ({what})"
+            if self._rounds >= MAX_REVIEW_ROUNDS:
+                self.reconciliation += (
+                    passed + "; no review round is left for a new plan; a person restores the criteria or "
+                    "opens a new ticket",
+                )
+                self._phase = "stopped"
+            else:
+                self.reconciliation += (passed + "; that round covers nothing in a new plan",)
+                self._phase = "plan"
+        else:
+            self.reconciliation += (
+                f"the acceptance criteria changed since plan revision {revision} was stored ({what}); "
+                f"plan revision {revision} must be presented again as a new revision for a new plan go",
+            )
+            if self._rounds >= MAX_REVIEW_ROUNDS:
+                self._resume_at_cap_stop(last)
+            else:
+                self._phase = "plan"
+        if _go_decisions(card, "outward", revision, self._ticket.key):
+            self.reconciliation += (
+                f"the outward go of plan revision {revision} authorizes nothing now; outward actions already "
+                "taken are not undone",
+            )
+
     def _closed_problems(self, card: Mapping[str, Any]) -> list[str]:
-        """What a closed card fails of the checks ``close`` made before confirming."""
+        """What a closed card fails of the checks ``close`` made before confirming.
+
+        It reads only the card, never the ticket source.
+        """
 
         stamps = card.get("stamps") or []
         last = stamps[-1] if stamps else {}
@@ -1487,7 +1700,7 @@ class TicketPass:
             _validate_stamp(point, "close", next_skills, refs)
         except TicketError as exc:
             problems.append(f"the close stamp is malformed ({exc})")
-        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds, self._plan_texts())
+        problems += _close_card_problems(card, self._ticket.key, self._revision, self._rounds, _card_texts(card) or ())
         return problems
 
     def _snapshot(self, plan: PlanCard, revision: int, plan_pass: str | None = None) -> dict[str, Any]:
@@ -1541,17 +1754,24 @@ class TicketPass:
         if not evidence or not verbatim:
             raise TicketError("a go record requires evidence and verbatim words")
         pass_id = None
+        criteria = None
         if gate == "plan":
             # The go is bound to the plan this pass presented: the stored plan
-            # must still be that revision, presented by this pass.
+            # must still be that revision, presented by this pass. The go names
+            # the criteria it approves.
             stored = self.store.read_card().get("plan") or {}
-            if stored.get("revision") != self._revision or stored.get("pass") != self._pass_id:
+            if (
+                type(stored.get("revision")) is not int
+                or stored["revision"] != self._revision
+                or stored.get("pass") != self._pass_id
+            ):
                 raise StoreUnavailable(
                     f"the stored plan is not plan revision {self._revision} as pass {self._pass_id} "
                     "presented it, so no plan go was recorded",
                     code="plan_changed",
                 )
             pass_id = self._pass_id
+            criteria = self._plan_texts()
         else:
             self._require_review_on_card("no outward go was recorded")
         self.store.record_decision(
@@ -1565,6 +1785,7 @@ class TicketPass:
                 verbatim=verbatim,
                 phase="plan" if gate == "plan" else "review",
                 evidence=evidence,
+                criteria=criteria,
             )
         )
 
@@ -1618,6 +1839,7 @@ class TicketPass:
             reviewer=reviewer,
             evidence=evidence,
             plan_revision=self._revision,
+            criteria=self._plan_texts(),
         )
         _validate_review(review)
         before = self.store.read_card().get("reviews") or []
@@ -1664,12 +1886,17 @@ class TicketPass:
         self._require_phase("outward_stop")
         last = self._last_review or {}
         # The card is read again: the round must still be the passing round of
-        # this plan revision that the resume found, with the same evidence.
-        reviews = self.store.read_card().get("reviews") or ()
+        # this plan revision and these criteria that the resume found, with the
+        # same evidence. Otherwise the card changed under the pass, which ends.
+        card = self.store.read_card()
+        reviews = card.get("reviews") or ()
         stored = reviews[-1] if reviews and isinstance(reviews[-1], Mapping) else {}
         if type(stored.get("round")) is not int:
-            raise TicketError("the stored final review carries no round number, so no outward stop was written")
-        final = _passing_final_review({"reviews": reviews}, self._revision)
+            raise StoreUnavailable(
+                "the stored final review carries no round number, so no outward stop was written",
+                code="review_changed",
+            )
+        final = _passing_final_review(card, self._revision, self._plan_texts())
         if final is None or (final["round"], final["evidence"]) != (last.get("round"), last.get("evidence")):
             raise StoreUnavailable(
                 f"the stored final review is no longer the passing round of plan revision {self._revision} "
@@ -1712,7 +1939,7 @@ class TicketPass:
         self._require_review_on_card("no outward action is allowed")
 
     def _require_review_on_card(self, refused: str) -> None:
-        problems = _review_problems(self.store.read_card(), self._revision, self._plan_texts())
+        problems = _review_problems(self.store.read_card(), self._revision, self._plan_texts(), self._ticket.key)
         if problems:
             raise StoreUnavailable(f"{refused}: " + "; ".join(problems), code="review_changed")
 
