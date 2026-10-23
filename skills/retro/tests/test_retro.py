@@ -334,3 +334,85 @@ def test_error_result_needs_a_non_zero_exit_line():
     assert not retro.failed_run(event("boom\nExit code 1"))
     assert not retro.failed_run(event("Exit code 1\nboom", error=False))
     assert not retro.failed_run({"error": "true", "text": "Exit code 1"})
+
+
+# ---- round 2
+
+
+def write_runs(path, runs):
+    """runs: list of (tool_use_id or None for an orphan result, command, result text)."""
+    recs = []
+    for index, (tid, command, text) in enumerate(runs):
+        if tid is not None:
+            recs.append({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": command}}]}})
+        recs.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tid or f"orphan{index}",
+             "is_error": True, "content": text}]}})
+    path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    return path
+
+
+def scan_file(path):
+    result = run("scan", path)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_exit_line_must_be_the_whole_first_line(tmp_path):
+    text = "Exit code 1 trailing text\nsrc/a.py:1:1: E501 long"
+    src = write_runs(tmp_path / "t.jsonl", [("a", "ruff check", text), ("b", "ruff check", text)])
+    assert scan_file(src)["mechanical_candidates"] == []
+    assert not retro.failed_run({"error": True, "text": "Exit code 0\nE501"})
+    assert retro.failed_run({"error": True, "text": "Exit code 12\r\nE501"})
+
+
+def test_orphan_failed_results_are_never_grouped(tmp_path):
+    text = "Exit code 1\nsrc/a.py:1:1: E501 long"
+    src = write_runs(tmp_path / "t.jsonl", [(None, "", text), (None, "", text)])
+    out = scan_file(src)
+    assert out["mechanical_candidates"] == [] and out["unclassified"] == []
+
+
+def test_empty_tool_name_is_skipped(tmp_path):
+    text = "Exit code 1\nsrc/a.py:1:1: E501 long"
+    src = write_runs(tmp_path / "t.jsonl", [("a", "", text), ("b", "FOO=1", text)])
+    out = scan_file(src)
+    assert out["mechanical_candidates"] == [] and out["unclassified"] == []
+
+
+def test_repeated_repo_learning_builds_as_a_learning():
+    item = {"id": "note", "severity": "low", "learning": "Run make seed first.",
+            "path": "docs/setup.md", "evidence": ["seen twice"],
+            "instances": [{"ref": "line 1", "excerpt": "a"}, {"ref": "line 2", "excerpt": "b"}]}
+    data = retro.build({"findings": [item]})
+    assert data["findings"][0]["type"] == "repo-learning"
+    assert retro.validate(data) == []
+
+
+def test_finding_ids_must_be_unique_and_non_empty():
+    data = built()
+    data["findings"][1]["id"] = data["findings"][0]["id"]
+    assert any("duplicate id" in p for p in retro.validate(data))
+    data = built()
+    data["findings"][0]["id"] = " "
+    assert any("id must be" in p for p in retro.validate(data))
+
+
+def test_build_refuses_duplicate_ids(tmp_path):
+    bad = draft()
+    bad["findings"][1]["id"] = bad["findings"][0]["id"]
+    src = tmp_path / "bad.json"
+    src.write_text(json.dumps(bad))
+    result = run("build", src, "--out", tmp_path / "f.json")
+    assert result.returncode == 1 and "duplicate id" in result.stderr
+
+
+def test_approve_needs_exactly_one_match(tmp_path):
+    out = tmp_path / "f.json"
+    run("build", FIX / "draft.json", "--out", out)
+    data = json.loads(out.read_text())
+    data["findings"].append(copy.deepcopy(data["findings"][-1]))
+    out.write_text(json.dumps(data))
+    assert run("approve", out, "deps").returncode == 2
+    assert run("approve", out, "nope").returncode == 2

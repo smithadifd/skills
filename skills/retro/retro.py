@@ -31,7 +31,7 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
 RULE_CODE = re.compile(r"\b[A-Z]{1,4}\d{2,4}\b")
 TEST_NODE = re.compile(r"[\w./-]+\.py::[\w:\[\]./-]+")
-EXIT_LINE = re.compile(r"Exit code (\d+)")
+EXIT_LINE = re.compile(r"Exit code [1-9][0-9]*")
 WRAPPERS = {"env", "npx", "command", "time", "sudo"}
 CORRECTION_CUE = re.compile(
     r"^\s*(no\b|don'?t\b|do not\b|stop\b|again\b|i said\b|that'?s not\b|wrong\b)", re.I
@@ -135,8 +135,8 @@ def failed_run(event):
     """True only for an error result that starts with a non-zero exit-status line."""
     if event["error"] is not True:
         return False
-    match = EXIT_LINE.match(event["text"])
-    return bool(match) and int(match.group(1)) != 0
+    first = event["text"].split("\n", 1)[0].rstrip("\r")
+    return EXIT_LINE.fullmatch(first) is not None
 
 
 def _identifiers(text):
@@ -163,7 +163,11 @@ def scan(path):
             flagged += event["has_flag"]
             if not failed_run(event):
                 continue
-            tool = _tool(commands.get(event["id"], ""))
+            if event["id"] not in commands:
+                continue
+            tool = _tool(commands[event["id"]])
+            if not tool:
+                continue
             excerpt = next((ln for ln in event["text"].splitlines()[1:] if ln.strip()), "")[:120]
             instance = {"ref": f"line {event['line']}", "excerpt": excerpt}
             idents = _identifiers(event["text"])
@@ -211,7 +215,12 @@ def classify(item):
     seen = len({i["ref"] for i in _instances(item)})
     if item.get("mechanical") and seen >= MIN_INSTANCES:
         return "encode-in-structure"
-    if not item.get("mechanical") and (item.get("obsolete_rule") or seen >= MIN_INSTANCES):
+    wants_learning = (
+        item.get("learning") and not item.get("already_documented") and not item.get("diff")
+    )
+    if not item.get("mechanical") and not wants_learning and (
+        item.get("obsolete_rule") or seen >= MIN_INSTANCES
+    ):
         return "skill-or-rule-edit"
     if item.get("learning") and not item.get("already_documented"):
         return "repo-learning"
@@ -291,6 +300,11 @@ def validate(data):
         if not isinstance(item, dict):
             problems.append(f"{label}: not an object")
             continue
+        ident = item.get("id")
+        if not isinstance(ident, str) or not ident.strip():
+            problems.append(f"{label}: id must be a non-empty string")
+        elif sum(1 for f in findings if isinstance(f, dict) and f.get("id") == ident) > 1:
+            problems.append(f"{label}: duplicate id")
         try:
             _instances(item)
         except RetroError:
@@ -356,14 +370,14 @@ def approve(path, finding_id):
     problems = validate(data)
     if problems:
         raise RetroError("refusing to approve an invalid findings file: " + "; ".join(problems))
-    for item in data.get("findings", []):
-        if item.get("id") == finding_id:
-            if item.get("type") != "skill-or-rule-edit":
-                raise RetroError(f"{finding_id} is not an edit finding")
-            item["approved"] = True
-            write_findings(data, path)
-            return
-    raise RetroError(f"no finding with id {finding_id}")
+    matches = [f for f in data.get("findings", []) if f.get("id") == finding_id]
+    if len(matches) != 1:
+        raise RetroError(f"expected exactly one finding with id {finding_id}, found {len(matches)}")
+    item = matches[0]
+    if item.get("type") != "skill-or-rule-edit":
+        raise RetroError(f"{finding_id} is not an edit finding")
+    item["approved"] = True
+    write_findings(data, path)
 
 
 # ------------------------------------------------------------------------ CLI
