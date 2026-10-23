@@ -2927,17 +2927,20 @@ def test_interval_parts_match_finishes_10000_spaces_well_under_a_second():
         "import time, sys\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "import review_phase\n"
+        "body = sys.stdin.buffer.read().decode('utf-8')\n"
         "start = time.perf_counter()\n"
-        "matched = review_phase._INTERVAL_PARTS.match(sys.argv[2])\n"
+        "matched = review_phase._INTERVAL_PARTS.match(body)\n"
         "elapsed = time.perf_counter() - start\n"
         "print('matched' if matched else 'none')\n"
         "print(elapsed)\n"
     )
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", code, str(SKILL_DIR), TEN_THOUSAND_SPACE_PARTS],
+            [sys.executable, "-c", code, str(SKILL_DIR)],
+            input=TEN_THOUSAND_SPACE_PARTS,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=INTERVAL_PARTS_LIMIT_SECONDS,
             check=True,
         )
@@ -3020,8 +3023,9 @@ def test_interval_parts_match_finishes_10000_internal_spaces_well_under_a_second
         "import time, sys\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "import review_phase\n"
+        "body = sys.stdin.buffer.read().decode('utf-8')\n"
         "start = time.perf_counter()\n"
-        "matched = review_phase._INTERVAL_PARTS.match(sys.argv[2])\n"
+        "matched = review_phase._INTERVAL_PARTS.match(body)\n"
         "elapsed = time.perf_counter() - start\n"
         "print('matched' if matched else 'none')\n"
         "print(elapsed)\n"
@@ -3031,9 +3035,11 @@ def test_interval_parts_match_finishes_10000_internal_spaces_well_under_a_second
     )
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", code, str(SKILL_DIR), TEN_THOUSAND_INTERNAL_WS_PARTS],
+            [sys.executable, "-c", code, str(SKILL_DIR)],
+            input=TEN_THOUSAND_INTERNAL_WS_PARTS,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=INTERVAL_PARTS_LIMIT_SECONDS,
             check=True,
         )
@@ -3058,17 +3064,20 @@ def _interval_parts_timed_match(body: str) -> tuple[str, float]:
         "import time, sys\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "import review_phase\n"
+        "body = sys.stdin.buffer.read().decode('utf-8')\n"
         "start = time.perf_counter()\n"
-        "matched = review_phase._INTERVAL_PARTS.match(sys.argv[2])\n"
+        "matched = review_phase._INTERVAL_PARTS.match(body)\n"
         "elapsed = time.perf_counter() - start\n"
         "print('matched' if matched else 'none')\n"
         "print(elapsed)\n"
     )
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", code, str(SKILL_DIR), body],
+            [sys.executable, "-c", code, str(SKILL_DIR)],
+            input=body,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=INTERVAL_PARTS_LIMIT_SECONDS,
             check=True,
         )
