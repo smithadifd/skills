@@ -606,8 +606,14 @@ _OMP_RAW_HTML = re.compile(r"<[!?]|" + _OMP_HTML_TAG.pattern)
 # with `<` and a letter, `/`, `!` or `?`. It can interrupt a paragraph and
 # runs to the next blank line, so every prose line is checked for one.
 _OMP_HTML_BLOCK_START = re.compile(r" {0,3}<[A-Za-z/!?]")
-# A fence line, which ends a paragraph for the renderer and so for the reading.
-_OMP_FENCE_LINE = re.compile(r" {0,3}(?:`{3,}|~{3,})")
+# A fence opening, which ends a paragraph for the renderer and so for the
+# reading: up to three spaces, then three or more backticks whose info string
+# holds no backtick, or three or more tildes. It is matched on the raw line.
+_OMP_FENCE_LINE = re.compile(r" {0,3}(?:`{3,}(?![^`]*`)|~{3,})")
+# A line that starts like a backtick fence. One that is not a fence opening
+# (its info string holds a backtick) is refused: the renderer keeps it inside
+# the paragraph, but a record fence would open on it.
+_OMP_BACKTICK_RUN = re.compile(r" {0,3}`{3,}")
 # Every character reference an HTML5 decoder consumes: any `&...;`, a numeric
 # or hex reference with or without its semicolon (`&#101`, `&#x65`), and the
 # legacy named references HTML5 decodes without one (`&shy`, `&amp`).
@@ -759,13 +765,14 @@ def _omp_prose_segments(
     """The prose paragraphs, as runs of line indexes.
 
     A record, a blank line or a fence line ends a paragraph, which is where
-    the renderer ends one too. A line is blank as written, never after NFKC,
-    since NFKC turns a no-break or ideographic space into a space.
+    the renderer ends one too. Both are decided on the line as written, never
+    after NFKC, which turns a no-break space into a space and a fullwidth
+    backtick or tilde into a fence character.
     """
     segments: list[list[int]] = []
     current: list[int] = []
     for index, item in enumerate(canonical):
-        if item is None or _omp_blank(lines[index]) or _OMP_FENCE_LINE.match(item[0]):
+        if item is None or _omp_blank(lines[index]) or _OMP_FENCE_LINE.match(lines[index]):
             if current:
                 segments.append(current)
                 current = []
@@ -777,19 +784,44 @@ def _omp_prose_segments(
 
 
 def _refuse_omp_markup(
-    canonical: list[tuple[str, str] | None], segments: list[list[int]]
+    lines: list[str | None],
+    canonical: list[tuple[str, str] | None],
+    segments: list[list[int]],
 ) -> None:
     """Refuse raw HTML, links and images, whose letters a reader does not see.
 
     An HTML block start is refused on any line, since it can interrupt a
     paragraph. A tag or a `<!` or `<?` start, and then a link or an image, are
     refused on each whole paragraph, since a tag's attributes may span lines.
+    Each is decided on the text as written, which is what the renderer reads:
+    NFKC turns a fullwidth quote inside an attribute value into a real one and
+    so would hide the tag. The NFKC text is searched too, and can only add a
+    refusal. A line that starts with three or more backticks but is not a
+    fence opening is refused first, as written.
     """
-    for item in canonical:
-        if item is not None and _OMP_HTML_BLOCK_START.match(item[0]):
-            raise ReviewProseUnsafe("ReviewProseUnsafe: raw HTML outside review record")
+    for line in lines:
+        if (
+            line is not None
+            and _OMP_BACKTICK_RUN.match(line)
+            and not _OMP_FENCE_LINE.match(line)
+        ):
+            raise ReviewProseUnsafe(
+                "ReviewProseUnsafe: backtick line that is not a fence outside review record"
+            )
+    readings = [
+        lines,
+        [None if item is None else item[0] for item in canonical],
+    ]
+    for reading in readings:
+        for line in reading:
+            if line is not None and _OMP_HTML_BLOCK_START.match(line):
+                raise ReviewProseUnsafe(
+                    "ReviewProseUnsafe: raw HTML outside review record"
+                )
     paragraphs = [
-        "".join(canonical[index][0] for index in segment) for segment in segments
+        "".join(reading[index] for index in segment)
+        for reading in readings
+        for segment in segments
     ]
     for paragraph in paragraphs:
         if _OMP_RAW_HTML.search(paragraph):
@@ -884,9 +916,12 @@ def _omp_verdict_keys(cased: str, folded: str) -> list[re.Match[str]]:
 def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
     """Every value token in the prose, read as written; nothing is deleted.
 
-    Unsafe characters, then raw HTML, links and images, then mixed-script
-    words are refused before anything is matched. A value token is read on
-    each paragraph and belongs to the line it starts on. A line with a key
+    Unsafe characters, then backtick lines that are not fences, raw HTML,
+    links and images, then mixed-script words are refused before anything is
+    matched. Every CommonMark structure test reads the line as written; the
+    NFKC text feeds token matching and can only add a markup refusal. A
+    value token is read on each paragraph and belongs to the line it starts
+    on. A line with a key
     must hold a value token, unless it is key-only and the next non-blank item
     is the record or a line that holds one; it never looks back.
     """
@@ -897,7 +932,7 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
         for line in lines
     ]
     segments = _omp_prose_segments(lines, canonical)
-    _refuse_omp_markup(canonical, segments)
+    _refuse_omp_markup(lines, canonical, segments)
     _refuse_mixed_words(canonical)
     values: dict[int, list[str]] = {
         index: [] for index, item in enumerate(canonical) if item is not None
@@ -928,7 +963,7 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
                 (
                     later
                     for later in range(index + 1, len(canonical))
-                    if canonical[later] is None or canonical[later][1].strip()
+                    if canonical[later] is None or not _omp_blank(lines[later])
                 ),
                 None,
             )

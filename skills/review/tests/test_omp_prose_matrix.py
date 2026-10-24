@@ -4,7 +4,8 @@ Each case id is its row in the prose grammar's test matrix. A the record,
 B unsafe characters, C raw HTML refused, D links and images refused, E the
 fold and mixed-script words, F the key, G the value token, H key lines and
 bare keys, I prose placement and fences, J terminal errors, K the prompt
-contract, L whitespace the renderer reads differently from `str`. A prose
+contract, L whitespace the renderer reads differently from `str`, M
+CommonMark structure read as written, never after NFKC. A prose
 row runs in both orders, prose before the record and the record before the
 prose, unless it names one; a "parse" row goes through
 `parse_omp`, a "run_phase" row through `run_phase` with `backend: omp`.
@@ -12,9 +13,11 @@ prose, unless it names one; a "parse" row goes through
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -522,3 +525,216 @@ def test_whitespace_row(text, expected):
     findings = (result.get("artifacts") or {}).get("findings.json") or {}
     assert result["status"] == "failure", f"{result['status']} {findings.get('verdict')}"
     assert detail in result["reason"], result["reason"]
+
+
+# --- M. CommonMark structure read as written, never after NFKC --------------
+#
+# Every structure test (line splitting, blank lines, fence openings with the
+# info-string rule, HTML block starts, raw HTML tags and comments, links and
+# images, character references) reads the raw line; NFKC text feeds token
+# matching and can only add a refusal. M1-M4: a fullwidth quote or `<` is
+# legal inside an attribute value, so the tag is raw HTML. M5-M6: a fullwidth
+# backtick or tilde run is no fence, so the paragraph and its token run on.
+# M7-M8: a backtick line whose info string holds a backtick is no fence
+# either, and is refused; prose first, the record fence opens on it and
+# swallows the record. M9 is G18, and M10 a clean APPROVE paragraph.
+
+NOT_A_FENCE = (UNSAFE, "ReviewProseUnsafe: backtick line that is not a fence outside review record")
+MISSING = (review_phase.ReviewRecordMissing, "ReviewRecordMissing")
+
+STRUCTURE_ROWS = [
+    ("M1", "REQUEST CHAN<b x=\"\uff02\">GES", {"prose-first": HTML, "record-first": HTML}),
+    ("M2", "REQUEST CHAN<b x=a\uff02>GES", {"prose-first": HTML, "record-first": HTML}),
+    ("M3", "REQUEST CHAN<b x=a\uff1c>GES", {"prose-first": HTML, "record-first": HTML}),
+    ("M4", "REQUEST CHAN<b x='\uff07'>GES", {"prose-first": HTML, "record-first": HTML}),
+    ("M5", "REQUEST\n\uff40\uff40\uff40\nCHANGES", {"prose-first": DISAGREES_A, "record-first": DISAGREES_A}),
+    ("M6", "REQUEST\n\uff5e\uff5e\uff5e\nCHANGES", {"prose-first": DISAGREES_A, "record-first": DISAGREES_A}),
+    ("M7", "REQUEST\n```x`\nCHANGES", {"prose-first": MISSING, "record-first": NOT_A_FENCE}),
+    ("M8", "REQUEST\n```.`\nCHANGES", {"prose-first": MISSING, "record-first": NOT_A_FENCE}),
+    ("M9", "Decision: REQUEST\nCHANGES", {"prose-first": DISAGREES_A, "record-first": DISAGREES_A}),
+    ("M10", "The change is correct and tested.\nVerdict: APPROVE", {"prose-first": OK_A, "record-first": OK_A}),
+]
+
+
+def _expect_run_phase(text: str, expected: tuple) -> None:
+    result = review_phase.run_phase(_envelope(text + "INTERVAL: none\n"))
+    kind, detail = expected
+    if kind == "ok":
+        assert result["status"] == "success", result["reason"]
+        assert result["artifacts"]["findings.json"]["verdict"] == detail
+        return
+    findings = (result.get("artifacts") or {}).get("findings.json") or {}
+    assert result["status"] == "failure", f"{result['status']} {findings.get('verdict')}"
+    assert detail in result["reason"], result["reason"]
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        pytest.param(_ordered(prose, RA, order), expected, id=f"{case}.{order}")
+        for case, prose, by_order in STRUCTURE_ROWS
+        for order, expected in by_order.items()
+    ],
+)
+def test_structure_row(text, expected):
+    _expect_run_phase(text, expected)
+
+
+@functools.cache
+def _nfkc_changed() -> tuple[str, ...]:
+    """Every code point whose NFKC form differs from itself."""
+    return tuple(
+        chr(point)
+        for point in range(0x110000)
+        if not 0xD800 <= point <= 0xDFFF
+        and unicodedata.normalize("NFKC", chr(point)) != chr(point)
+    )
+
+
+def _has_letter(text: str) -> bool:
+    return any(unicodedata.category(character).startswith("L") for character in text)
+
+
+# Where the code point sits out of the reader's sight: inside a tag or a
+# comment, which the renderer does not show.
+HIDDEN_POSITIONS = {
+    "attr-double-quoted": "REQUEST CHAN<b x=\"{c}\">GES",
+    "attr-single-quoted": "REQUEST CHAN<b x='{c}'>GES",
+    "attr-unquoted": "REQUEST CHAN<b x=a{c}>GES",
+    "comment": "REQUEST CHAN<!--{c}-->GES",
+}
+# Where the reader sees it, between the halves of the token, or (bare-key)
+# on the line a key-only line takes as its value.
+VISIBLE_POSITIONS = {
+    "fence-run": "REQUEST\n{c}{c}{c}\nCHANGES",
+    "fence-info": "REQUEST\n```{c}`\nCHANGES",
+    "fence-info-letter": "REQUEST\n```{c}`x\nCHANGES",
+    "blank-line": "REQUEST\n{c}\nCHANGES",
+    "html-block-start": "REQUEST\n<{c}\nCHANGES",
+    "link-close": "REQUEST CHAN]{c}GES",
+    "link-open": "REQUEST CHAN{c}(GES",
+    "image": "REQUEST CHAN!{c}GES",
+    "bare-key": "Verdict:\n{c}\nAPPROVE",
+}
+
+
+def _approvals(template: str, points) -> list[str]:
+    """The code points whose prose, in either order beside APPROVE, approves."""
+    approved = []
+    for point in points:
+        prose = template.replace("{c}", point)
+        for order in BOTH:
+            try:
+                verdict, _ = review_phase.parse_omp(_ordered(prose, RA, order))
+            except review_phase.ParseError:
+                continue
+            if verdict == "approved":
+                approved.append(f"U+{ord(point):04X} {order}")
+                break
+    return approved
+
+
+@pytest.mark.parametrize("position", list(HIDDEN_POSITIONS))
+def test_sweep_no_nfkc_changing_code_point_in_a_hidden_position_approves(position):
+    """Every NFKC-changing code point, letters included, inside a tag or comment.
+
+    The tag or comment is raw HTML as written, so the reply is refused,
+    whatever NFKC makes of the code point.
+    """
+    approved = _approvals(HIDDEN_POSITIONS[position], _nfkc_changed())
+    assert approved == [], f"{len(approved)} approved, first {approved[:12]}"
+
+
+@pytest.mark.parametrize("position", list(VISIBLE_POSITIONS))
+def test_sweep_no_nfkc_changing_non_letter_in_a_visible_position_approves(position):
+    """Every NFKC-changing code point that is not a letter, raw or after NFKC.
+
+    Excluded: a code point that is a letter (category L*) as written or whose
+    NFKC form holds one. The reader sees a letter between the halves, which
+    the design declares is not a token (a visible letter inside a token,
+    `REQ-x-UEST`). Under Unicode 16.0 (Python 3.14) that is 4,467 of the
+    4,964 NFKC-changing code points, leaving 497 swept here; other Unicode
+    versions shift both counts slightly. The fence-info-letter position holds
+    the letter `x` by construction (the M7 shape): a backtick line that is not
+    a fence is refused, so that letter never decides it. NFKC turns a fullwidth
+    grave accent (U+FF40) there into a backtick and the line into a fence,
+    which is why the not-a-fence test reads the raw line.
+    """
+    points = [
+        point
+        for point in _nfkc_changed()
+        if not _has_letter(point) and not _has_letter(unicodedata.normalize("NFKC", point))
+    ]
+    assert points, "no non-letter NFKC-changing code point to sweep"
+    approved = _approvals(VISIBLE_POSITIONS[position], points)
+    assert approved == [], f"{len(approved)} approved, first {approved[:12]}"
+
+
+# The structure tests below read the raw text; the first three also search
+# the NFKC text, which can only add a refusal. On each, no code point the raw
+# reading matches is lost by NFKC, so reading it after NFKC alone could never
+# approve more, and no approval sweep can turn red when it is moved there;
+# this asserts that, over every code point the unsafe-character check admits. A
+# line NFKC leaves alone, around a code point the Latin fold leaves alone,
+# reads the same both ways, so only the other lines are compared.
+
+SUPERSET_CHECKS = {
+    "html-block-start": (
+        lambda line: review_phase._OMP_HTML_BLOCK_START.match(line),
+        ["<{c}", "<a{c}", "   <a{c}", "</{c}", "<!{c}", "<?{c}", "{c}<a"],
+    ),
+    "link-image": (
+        lambda line: review_phase._OMP_LINK.search(line),
+        ["]({c}", "x]({c}", "][{c}", "![{c}", "{c}](", "{c}![", "{c}]["],
+    ),
+    "comment-pi": (
+        lambda line: review_phase._OMP_RAW_HTML.search(line),
+        ["x<{c}", "x<!{c}", "x<?{c}", "{c}<!", "{c}<?"],
+    ),
+    "character-reference": (
+        lambda line: review_phase._OMP_HTML_REFERENCE.search(line),
+        ["&#1{c}", "&#x6{c}", "&amp{c}", "{c}&amp;"],
+    ),
+}
+
+
+@functools.cache
+def _admitted() -> tuple[tuple[str, ...], frozenset[str]]:
+    """The code points the unsafe-character check admits, and those it folds."""
+    admitted = tuple(
+        chr(point)
+        for point in range(0x110000)
+        if unicodedata.category(chr(point)) not in review_phase._OMP_UNSAFE_CATEGORIES
+        and chr(point) not in review_phase._OMP_UNSAFE_FILLERS
+    )
+    folded = frozenset(
+        point for point in admitted if review_phase._latin_fold(point) != point
+    )
+    return admitted, folded
+
+
+@pytest.mark.parametrize("check", list(SUPERSET_CHECKS))
+def test_the_nfkc_reading_never_loses_a_raw_structure_match(check):
+    matches, templates = SUPERSET_CHECKS[check]
+    admitted, folded = _admitted()
+    lost = []
+    for template in templates:
+        for point in admitted:
+            line = template.replace("{c}", point)
+            if point not in folded and unicodedata.is_normalized("NFKC", line):
+                continue
+            if matches(line) and not matches(review_phase._canonicalize_omp_prose(line)[0]):
+                lost.append(f"{template!r} U+{ord(point):04X}")
+    assert lost == [], f"{len(lost)} lost, first {lost[:12]}"
+
+
+def test_nfkc_never_makes_or_removes_a_line_ending():
+    """Line splitting reads the raw text; NFKC adds no `\\r` or `\\n` to any
+    code point and changes neither, so the split is the same either way."""
+    assert unicodedata.normalize("NFKC", "\r\n") == "\r\n"
+    made = [
+        f"U+{ord(point):04X}"
+        for point in _nfkc_changed()
+        if set(unicodedata.normalize("NFKC", point)) & {"\r", "\n"}
+    ]
+    assert made == []
