@@ -20,8 +20,16 @@ for the same slug finds the item and creates nothing; it reads the item's notes
 with `export-item` and adds whichever of the two notes is missing (an earlier
 call can have died between `new` and a `note`), so a retry never duplicates
 either. When `new` loses a race to a concurrent open (a `conflict`), the item is
-queried again and, if it now exists, resumed the same way. It writes no markdown
-note. It prints one line on stdout:
+queried again and, if it now exists, resumed the same way.
+
+Every one of those notes is appended with `--expect-revision`, the ledger's
+compare-and-set on the item's newest event id: the creator uses the id `new`
+returned, a resumer the newest id in the `export-item` it just read. When
+another writer got in first the append is refused as `stale_revision`, and the
+resumer reads the item again and decides again, so two openers racing cannot
+write the Ask or the rails note twice, and a rails update written in the gap
+is never buried under the default. It writes no markdown note. It prints one
+line on stdout:
 
     <item id> TAB <created|resumed> TAB <ledger_cli>
 
@@ -53,6 +61,11 @@ ITEM_PREFIX = "topic-"
 TIMEOUT_SECONDS = 60
 NOT_FOUND_CODES = ("empty", "missing_db")
 CONFLICT_CODE = "conflict"
+STALE_CODE = "stale_revision"
+# Re-reads after a refused (stale) append before giving up. A topic item has a
+# handful of writers, so more than a few consecutive stale answers means the
+# item is being written in a loop, not that an open is racing.
+MAX_ATTEMPTS = 8
 ASK_PREFIX = "Ask: "
 # The rails note: first line is the tag, then one `key: value` line per rail.
 # A newer note of the same grammar replaces the state; see SKILL.md.
@@ -66,6 +79,10 @@ class LedgerError(Exception):
 
 class LedgerConflict(LedgerError):
     """`new` refused because the item id already exists."""
+
+
+class LedgerStale(LedgerError):
+    """`note` refused because the item's newest event is not the expected one."""
 
 
 def _load_topics_dir():
@@ -157,11 +174,13 @@ def _failure(cli: str, verb: str, proc: subprocess.CompletedProcess) -> LedgerEr
         detail = str(error["message"])
     else:
         detail = proc.stderr.strip() or proc.stdout.strip() or "no output"
-    kind = (
-        LedgerConflict
-        if verb == "new" and isinstance(error, dict) and error.get("code") == CONFLICT_CODE
-        else LedgerError
-    )
+    code = error.get("code") if isinstance(error, dict) else None
+    if verb == "new" and code == CONFLICT_CODE:
+        kind = LedgerConflict
+    elif verb == "note" and code == STALE_CODE:
+        kind = LedgerStale
+    else:
+        kind = LedgerError
     return kind(
         f"ledger CLI {cli} {verb} failed (exit {proc.returncode}): {_one_line(detail)}"
     )
@@ -190,23 +209,49 @@ def _find(cli: str, item_id: str) -> bool:
     raise _failure(cli, "query", proc)
 
 
-def _new(cli: str, slug: str, item_id: str) -> None:
+def _event_id(cli: str, verb: str, proc: subprocess.CompletedProcess) -> int:
+    """The id of the event a successful write returned."""
+    envelope = _envelope(proc)
+    data = envelope.get("data") if envelope else None
+    event = data.get("event") if isinstance(data, dict) else None
+    event_id = event.get("id") if isinstance(event, dict) else None
+    if type(event_id) is not int or event_id < 1:
+        raise LedgerError(f"ledger CLI {cli} {verb} returned no event id")
+    return event_id
+
+
+def _new(cli: str, slug: str, item_id: str) -> int:
+    """Create the item; return its revision (the id of its first event)."""
     new = _call(
         cli,
         ["new", "--type", ITEM_TYPE, "--title", slug, "--id", item_id, "--json"],
     )
     if new.returncode != 0:
         raise _failure(cli, "new", new)
+    return _event_id(cli, "new", new)
 
 
-def _note(cli: str, item_id: str, text: str) -> None:
-    note = _call(cli, ["note", item_id, "--text", text, "--json"])
+def _note(cli: str, item_id: str, text: str, revision: int) -> int:
+    """Append a note only if the item's newest event is `revision`.
+
+    Returns the new revision. A refusal because another writer got in first
+    raises LedgerStale and writes nothing.
+    """
+    note = _call(
+        cli,
+        ["note", item_id, "--text", text, "--expect-revision", str(revision), "--json"],
+    )
     if note.returncode != 0:
         raise _failure(cli, "note", note)
+    return _event_id(cli, "note", note)
 
 
-def _note_texts(cli: str, item_id: str) -> list[str]:
-    """Every note on the item, from `export-item` (the card caps its notes)."""
+def _read_item(cli: str, item_id: str) -> tuple[int, list[str]]:
+    """The item's revision and every note on it, from `export-item`.
+
+    The card caps its notes, so it is not used. The revision is the newest
+    event id of any kind, which is what `--expect-revision` compares.
+    """
     proc = _call(cli, ["export-item", item_id, "--json"])
     if proc.returncode != 0:
         raise _failure(cli, "export-item", proc)
@@ -216,22 +261,70 @@ def _note_texts(cli: str, item_id: str) -> list[str]:
     if not isinstance(events, list):
         raise LedgerError(f"ledger CLI {cli} export-item returned no events for {item_id}")
     texts: list[str] = []
+    revision = 0
     for event in events:
-        if isinstance(event, dict) and event.get("kind") == "item.note":
+        if not isinstance(event, dict):
+            continue
+        event_id = event.get("id")
+        if type(event_id) is int and event_id > revision:
+            revision = event_id
+        if event.get("kind") == "item.note":
             payload = event.get("payload")
             text = payload.get("text") if isinstance(payload, dict) else None
             if isinstance(text, str):
                 texts.append(text)
-    return texts
+    if revision < 1:
+        raise LedgerError(f"ledger CLI {cli} export-item returned no event ids for {item_id}")
+    return revision, texts
+
+
+def _missing_note(texts: list[str], ask: str) -> Optional[str]:
+    """The next initial note the item lacks, or None when it has both.
+
+    The rails note is judged by its tag alone, so a rails update written by
+    anyone counts and the default is never added after it.
+    """
+    if not any(text.startswith(ASK_PREFIX) for text in texts):
+        return ASK_PREFIX + ask
+    if not any(text.strip().split("\n", 1)[0].strip() == RAILS_TAG for text in texts):
+        return RAILS_TEXT
+    return None
+
+
+def _complete(
+    cli: str,
+    item_id: str,
+    ask: str,
+    revision: Optional[int] = None,
+    texts: Optional[list[str]] = None,
+) -> None:
+    """Add the initial Ask and rails notes the item lacks, each at most once.
+
+    Every append is guarded by the revision it was decided against. When the
+    guard refuses, someone else wrote to the item in between, so the item is
+    read again and the decision is made again from what is there now.
+    """
+    for _ in range(MAX_ATTEMPTS):
+        if revision is None or texts is None:
+            revision, texts = _read_item(cli, item_id)
+        pending = _missing_note(texts, ask)
+        if pending is None:
+            return
+        try:
+            revision = _note(cli, item_id, pending, revision)
+        except LedgerStale:
+            revision, texts = None, None
+            continue
+        texts = [*texts, pending]
+    raise LedgerError(
+        f"ledger CLI {cli} note kept being refused as stale for {item_id}; "
+        "the item is changing faster than it can be completed"
+    )
 
 
 def _reconcile(cli: str, item_id: str, ask: str) -> None:
     """Add the initial Ask note and the rails note when the item lacks them."""
-    texts = _note_texts(cli, item_id)
-    if not any(text.startswith(ASK_PREFIX) for text in texts):
-        _note(cli, item_id, ASK_PREFIX + ask)
-    if not any(text.strip().split("\n", 1)[0].strip() == RAILS_TAG for text in texts):
-        _note(cli, item_id, RAILS_TEXT)
+    _complete(cli, item_id, ask)
 
 
 def open_item(cli: str, slug: str, ask: str) -> tuple[str, str]:
@@ -241,20 +334,24 @@ def open_item(cli: str, slug: str, ask: str) -> tuple[str, str]:
     `note` left the item without its Ask or rails note. If `new` conflicts, a
     concurrent open created the item between the lookup and the create, so look
     it up again: resume it when it is there, otherwise the conflict stands.
+    The creator's own notes and a resumer's are appended under the same
+    revision guard, so neither can duplicate the other's.
     """
     item_id = ITEM_PREFIX + slug
     if _find(cli, item_id):
         _reconcile(cli, item_id, ask)
         return item_id, "resumed"
     try:
-        _new(cli, slug, item_id)
+        revision = _new(cli, slug, item_id)
     except LedgerConflict:
         if not _find(cli, item_id):
             raise
         _reconcile(cli, item_id, ask)
         return item_id, "resumed"
-    _note(cli, item_id, ASK_PREFIX + ask)
-    _note(cli, item_id, RAILS_TEXT)
+    # The creator holds the revision `new` returned. If a resumer wrote to the
+    # item first, the guard refuses and the item is read again, so the Ask and
+    # rails notes are written once whichever opener gets there first.
+    _complete(cli, item_id, ask, revision, [])
     return item_id, "created"
 
 

@@ -8,7 +8,10 @@ The ledger is a fake executable the test writes to `tmp_path`. It records
 every argv, keeps its items in a JSON file, and accepts only the verbs and
 flags the real `ledger` CLI defines (`query`, `new`, `note`, `link`, `card`,
 `export-item`), exits 2 on anything else, and like the real one refuses writes
-without `LEDGER_HARNESS` and runs nothing without `LEDGER_DB`.
+without `LEDGER_HARNESS` and runs nothing without `LEDGER_DB`. Every write takes
+the next id from one event counter, and `note` honours `--expect-revision` as the
+real one does: it appends only when the item's newest event id equals the value,
+and otherwise exits 5 with `stale_revision` and writes nothing.
 
 Two state keys let a test stage what a real store does under failure and
 concurrency, at the CLI boundary: `fail_notes` (1-based `note` call numbers
@@ -16,6 +19,7 @@ that exit 1 without writing) and `inject_on_new` (an item another process
 creates just before this process's `new` is evaluated).
 """
 
+import importlib.util
 import json
 import os
 import stat
@@ -52,6 +56,21 @@ with open(STATE, encoding="utf-8") as handle:
     state = json.load(handle)
 argv = sys.argv[1:]
 state["calls"].append(argv)
+state.setdefault("last_event", 0)
+
+
+def next_event():
+    state["last_event"] += 1
+    return state["last_event"]
+
+
+def stamp(item):
+    # Give an item staged without event ids its ids, in order.
+    if "rev" not in item:
+        item["created_id"] = next_event()
+        item["note_ids"] = [next_event() for _ in item["notes"]]
+        item["rev"] = item["note_ids"][-1] if item["note_ids"] else item["created_id"]
+    return item
 
 
 def save():
@@ -117,10 +136,11 @@ if verb == "new":
     item_id = values.get("--id") or "it-generated"
     if state.get("inject_on_new"):
         racer = state.pop("inject_on_new")
-        items[racer["item_id"]] = racer
+        items[racer["item_id"]] = stamp(racer)
     if item_id in items:
         finish(3, False, error_code="conflict", message="item already exists: " + item_id)
     state["db"] = True
+    event_id = next_event()
     items[item_id] = {
         "item_id": item_id,
         "type": values["--type"],
@@ -128,34 +148,36 @@ if verb == "new":
         "status": values.get("--status", "open"),
         "notes": [],
         "links": [],
+        "created_id": event_id,
+        "note_ids": [],
+        "rev": event_id,
     }
-    finish(0, True, data={"item_id": item_id, "event": {"id": len(items)}})
+    finish(0, True, data={"item_id": item_id, "event": {"id": event_id}})
 item_id = bare[0]
 if item_id not in items:
     finish(1, False, error_code="not_found", message="item not found: " + item_id)
+item = stamp(items[item_id])
 if verb == "card":
-    item = items[item_id]
     finish(0, True, data={
         "item_id": item_id,
         "type": item["type"],
         "title": item["title"],
         "status": item["status"],
         "notes": [
-            {"event_id": number + 2, "text": text}
-            for number, text in enumerate(item["notes"])
+            {"event_id": note_id, "text": text}
+            for note_id, text in zip(item["note_ids"], item["notes"])
         ],
         "footer": "This card is a projection, not authority",
     })
 if verb == "export-item":
-    item = items[item_id]
     events = [{
-        "id": 1, "kind": "item.created", "item_id": item_id,
+        "id": item["created_id"], "kind": "item.created", "item_id": item_id,
         "payload": {"type": item["type"], "title": item["title"]},
     }]
     events += [
-        {"id": number + 2, "kind": "item.note", "item_id": item_id,
+        {"id": note_id, "kind": "item.note", "item_id": item_id,
          "payload": {"text": text}}
-        for number, text in enumerate(item["notes"])
+        for note_id, text in zip(item["note_ids"], item["notes"])
     ]
     finish(0, True, data={"item_id": item_id, "events": events})
 if verb == "note":
@@ -164,12 +186,27 @@ if verb == "note":
     state["note_calls"] = state.get("note_calls", 0) + 1
     if state["note_calls"] in state.get("fail_notes", []):
         finish(1, False, error_code="store_busy", message="database is locked")
-    items[item_id]["notes"].append(values["--text"])
+    expect = values.get("--expect-revision")
+    if expect is not None:
+        if expect != "none" and not (expect.isdigit() and int(expect) >= 1):
+            finish(2, False, error_code="usage", message="--expect-revision must be an event id or none")
+        if expect == "none" or int(expect) != item["rev"]:
+            finish(5, False, error_code="stale_revision", message=(
+                "stale revision for item " + item_id + ": expected " + expect
+                + ", current is " + str(item["rev"])
+            ))
+    event_id = next_event()
+    item["notes"].append(values["--text"])
+    item["note_ids"].append(event_id)
+    item["rev"] = event_id
+    finish(0, True, data={"item_id": item_id, "event": {"id": event_id}})
 if verb == "link":
     if values.get("--rel") not in LINK_RELS or "--target" not in values:
         finish(2, False, error_code="usage", message="--rel and --target are required")
-    items[item_id]["links"].append([values["--rel"], values["--target"]])
-finish(0, True, data={"item_id": item_id, "event": {"id": 1}})
+    event_id = next_event()
+    item["links"].append([values["--rel"], values["--target"]])
+    item["rev"] = event_id
+    finish(0, True, data={"item_id": item_id, "event": {"id": event_id}})
 """
 
 
@@ -245,8 +282,8 @@ def rig(tmp_path, monkeypatch):
 RAILS = "topic-rails\nstaged_drafts: none\npromote_or_park: open"
 QUERY = ["query", "--type", "topic", "--item", "topic-demo", "--json"]
 NEW = ["new", "--type", "topic", "--title", "demo", "--id", "topic-demo", "--json"]
-NOTE = ["note", "topic-demo", "--text", "Ask: " + ASK, "--json"]
-RAILS_NOTE = ["note", "topic-demo", "--text", RAILS, "--json"]
+NOTE = ["note", "topic-demo", "--text", "Ask: " + ASK, "--expect-revision", "1", "--json"]
+RAILS_NOTE = ["note", "topic-demo", "--text", RAILS, "--expect-revision", "2", "--json"]
 EXPORT = ["export-item", "topic-demo", "--json"]
 
 
@@ -542,3 +579,219 @@ def test_losing_the_create_race_resumes_the_winners_item(rig, winner_notes, extr
     notes = rig.card_notes()
     assert len([n for n in notes if n.startswith("Ask: ")]) == 1
     assert len([n for n in notes if n.split("\n", 1)[0] == "topic-rails"]) == 1
+
+
+UPDATE = "topic-rails\nstaged_drafts: notes-2026.md\npromote_or_park: parked"
+SECOND_ASK = "the second opener's ask"
+
+
+def load_helper():
+    spec = importlib.util.spec_from_file_location("ledger_item_under_test", HELPER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class Interleaver:
+    """Runs `between` just before the first opener's call number `boundary`.
+
+    No threads: the second opener runs to completion, in this thread, at that
+    boundary, and then the first opener carries on. The seam is the helper's one
+    subprocess entry, `_call`, the same boundary the fake ledger sits behind;
+    the second opener's own calls pass straight through and are not counted.
+    """
+
+    def __init__(self, module, boundary, between):
+        self.real_call = module._call
+        self.boundary = boundary
+        self.between = between
+        self.count = 0
+        self.fired = False
+        self.armed = True
+
+    def __call__(self, cli, verb_argv):
+        if self.armed:
+            index = self.count
+            self.count += 1
+            if index == self.boundary:
+                self.fired = True
+                self.armed = False
+                try:
+                    self.between()
+                finally:
+                    self.armed = True
+        return self.real_call(cli, verb_argv)
+
+
+def use_cli_env(rig, monkeypatch):
+    monkeypatch.setenv("LEDGER_DB", rig.env["LEDGER_DB"])
+    monkeypatch.setenv("LEDGER_HARNESS", rig.env["LEDGER_HARNESS"])
+
+
+def user_appends_rails(rig, text):
+    """A person's rails update, written straight through the CLI with no guard."""
+    proc = subprocess.run(
+        [str(rig.fake), "note", "topic-demo", "--text", text, "--json"],
+        env=rig.env, capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout
+
+
+def rails_notes(notes):
+    return [n for n in notes if n.split("\n", 1)[0] == "topic-rails"]
+
+
+def assert_first_notes_written_once(notes, update_landed, where):
+    assert len([n for n in notes if n.startswith("Ask: ")]) == 1, (where, notes)
+    rails = rails_notes(notes)
+    if update_landed:
+        # A person's rails update stays the newest; the default never follows it.
+        assert rails.count(UPDATE) == 1, (where, notes)
+        assert rails[-1] == UPDATE, (where, notes)
+        assert rails.count(RAILS) <= 1, (where, notes)
+    else:
+        assert rails == [RAILS], (where, notes)
+
+
+@pytest.mark.parametrize(
+    "update_in_the_gap", [False, True], ids=["no-update", "rails-update-in-the-gap"]
+)
+def test_the_winner_resuming_after_the_loser_finished_adds_nothing_and_buries_nothing(
+    rig, monkeypatch, update_in_the_gap
+):
+    # The winner has run `new` and stalls before its first note. A second opener
+    # finds the item, writes the Ask and rails notes, and a person may then
+    # update the rails. The winner resumes and runs the rest of its calls.
+    rig.write_config(ledger_cli=str(rig.fake))
+    use_cli_env(rig, monkeypatch)
+    cli = str(rig.fake)
+    module = load_helper()
+    second = {}
+
+    def second_opener_then_the_gap():
+        second["outcome"] = module.open_item(cli, "demo", SECOND_ASK)
+        if update_in_the_gap:
+            user_appends_rails(rig, UPDATE)
+
+    # The winner's calls are query (0), new (1), then its first note (2).
+    hook = Interleaver(module, 2, second_opener_then_the_gap)
+    monkeypatch.setattr(module, "_call", hook)
+
+    winner = module.open_item(cli, "demo", ASK)
+
+    assert hook.fired
+    assert winner == ("topic-demo", "created")
+    assert second["outcome"] == ("topic-demo", "resumed")
+    calls = rig.snapshot()["calls"]
+    assert NOTE in calls, "the winner did try its Ask note after the second opener"
+    notes = rig.card_notes()
+    assert "Ask: " + ASK not in notes, "and the ledger refused it as stale"
+    assert notes[0] == "Ask: " + SECOND_ASK
+    assert len([n for n in notes if n.startswith("Ask: ")]) == 1
+    if update_in_the_gap:
+        assert rails_notes(notes) == [RAILS, UPDATE], "the update is still the newest rails"
+        assert rails_of(notes) == {"staged_drafts": "notes-2026.md", "promote_or_park": "parked"}
+    else:
+        assert rails_notes(notes) == [RAILS]
+
+
+@pytest.mark.parametrize(
+    "update",
+    [None, "before-the-second-opener", "after-the-second-opener"],
+    ids=["no-update", "update-before-second-opener", "update-after-second-opener"],
+)
+def test_two_openers_interleaved_at_every_step_boundary_write_the_first_notes_once(
+    rig, monkeypatch, update
+):
+    rig.write_config(ledger_cli=str(rig.fake))
+    use_cli_env(rig, monkeypatch)
+    cli = str(rig.fake)
+    boundary = 0
+    while True:
+        rig.state.write_text(json.dumps({"items": {}, "calls": []}), encoding="utf-8")
+        module = load_helper()
+        outcomes = {}
+        landed = []
+
+        def user_update_if_the_item_exists():
+            if "topic-demo" in rig.snapshot()["items"]:
+                user_appends_rails(rig, UPDATE)
+                landed.append(True)
+
+        def second_opener():
+            if update == "before-the-second-opener":
+                user_update_if_the_item_exists()
+            outcomes["second"] = module.open_item(cli, "demo", SECOND_ASK)
+            if update == "after-the-second-opener":
+                user_update_if_the_item_exists()
+
+        hook = Interleaver(module, boundary, second_opener)
+        monkeypatch.setattr(module, "_call", hook)
+
+        outcomes["first"] = module.open_item(cli, "demo", ASK)
+        past_the_end = not hook.fired
+        hook.armed = False
+        if past_the_end:
+            second_opener()  # the boundary after the first opener's last call
+
+        where = f"boundary {boundary}"
+        assert sorted(state for _, state in outcomes.values()) == ["created", "resumed"], where
+        assert list(rig.snapshot()["items"]) == ["topic-demo"], where
+        assert_first_notes_written_once(rig.card_notes(), bool(landed), where)
+        if past_the_end:
+            break
+        boundary += 1
+    assert boundary >= 4, "the first opener makes at least query, new and two notes"
+
+
+@pytest.mark.parametrize(
+    "update",
+    [None, "before-the-winner", "after-the-winner"],
+    ids=["no-update", "update-before-winner", "update-after-winner"],
+)
+def test_a_resumer_interrupted_at_every_step_boundary_while_the_winner_finishes_writes_the_first_notes_once(
+    rig, monkeypatch, update
+):
+    # The winner has run `new` and holds the revision it returned. A second
+    # opener finds the item and reconciles it; at each boundary of that
+    # reconcile the winner runs the rest of its calls (`_complete` is exactly
+    # what `open_item` runs after `new`), so the resumer reads, the winner
+    # writes, and only then the resumer writes.
+    rig.write_config(ledger_cli=str(rig.fake))
+    use_cli_env(rig, monkeypatch)
+    cli = str(rig.fake)
+    boundary = 0
+    while True:
+        rig.state.write_text(json.dumps({"items": {}, "calls": []}), encoding="utf-8")
+        created = subprocess.run(
+            [str(rig.fake), "new", "--type", "topic", "--title", "demo",
+             "--id", "topic-demo", "--json"],
+            env=rig.env, capture_output=True, text=True, check=False,
+        )
+        assert created.returncode == 0, created.stdout
+        revision = json.loads(created.stdout)["data"]["event"]["id"]
+        module = load_helper()
+
+        def winner_finishes():
+            if update == "before-the-winner":
+                user_appends_rails(rig, UPDATE)
+            module._complete(cli, "topic-demo", ASK, revision, [])
+            if update == "after-the-winner":
+                user_appends_rails(rig, UPDATE)
+
+        hook = Interleaver(module, boundary, winner_finishes)
+        monkeypatch.setattr(module, "_call", hook)
+
+        outcome = module.open_item(cli, "demo", SECOND_ASK)
+        past_the_end = not hook.fired
+        hook.armed = False
+        if past_the_end:
+            winner_finishes()  # the boundary after the resumer's last call
+
+        where = f"boundary {boundary}"
+        assert outcome == ("topic-demo", "resumed"), where
+        assert_first_notes_written_once(rig.card_notes(), update is not None, where)
+        if past_the_end:
+            break
+        boundary += 1
+    assert boundary >= 3, "the resumer makes at least query, export and two notes"
