@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -65,9 +66,9 @@ import sys, time
 import ticket
 
 class SlowSave(ticket.MarkdownStore):
-    def _save(self, card):
+    def _save(self, card, directory):
         time.sleep(0.05)
-        super()._save(card)
+        super()._save(card, directory)
 
 handle = SlowSave(sys.argv[1], "EK-14", "Add guarded ticket pass")
 while True:  # the join binds the handle to the live pass; a stale read is retried
@@ -105,11 +106,11 @@ def test_G3_two_threads_on_one_store_handle_lose_no_write(repo):
     entered = threading.Event()
 
     class PausingSave(ticket.MarkdownStore):
-        def _save(self, card):
+        def _save(self, card, directory):
             if not entered.is_set():
                 entered.set()
                 time.sleep(0.3)
-            super()._save(card)
+            super()._save(card, directory)
 
     handle = PausingSave(repo, KEY, TITLE)
     _, token = handle.read()
@@ -470,11 +471,11 @@ def test_G19_a_failed_save_during_a_claim_leaves_the_handle_unbound(repo):
     failures = []
 
     class FullDisk(ticket.MarkdownStore):
-        def _save(self, card):
+        def _save(self, card, directory):
             if not failures:
                 failures.append(card)
                 raise OSError(errno.ENOSPC, "No space left on device")
-            super()._save(card)
+            super()._save(card, directory)
 
     handle = FullDisk(repo, KEY, TITLE)
     with pytest.raises(OSError, match="No space left"):
@@ -527,7 +528,7 @@ def test_G23_an_unopenable_lock_is_refused_with_a_code(repo):
     assert card_bytes(repo) is None
 
 
-# --- G24-G26: a read-only bound pass; the card read without following a link
+# --- G24-G28: a read-only bound pass; the card read and written through the verified directory
 
 
 def _temporary_files(repo):
@@ -586,3 +587,74 @@ def test_G26_a_card_that_is_not_a_regular_file_is_refused_unread(repo, kind):
     mode = os.lstat(card_path(repo)).st_mode
     assert stat.S_ISFIFO(mode) if kind == "fifo" else stat.S_ISDIR(mode)
     assert _temporary_files(repo) == []
+
+
+def test_G27_a_directory_swapped_for_a_link_after_the_open_gets_no_card_outside(repo, tmp_path):
+    store(repo).apply("none", [_tried("Before the swap.")])
+    _, token = store(repo).read()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    verified = repo / ".ticket.verified"
+    swaps = []
+
+    class SwapAfterOpen(ticket.MarkdownStore):
+        def _open_directory(self):
+            # Right after the real open: the directory moves aside and a link to the outside takes its place.
+            directory = super()._open_directory()
+            if not swaps:
+                swaps.append(directory)
+                os.rename(repo / ".ticket", verified)
+                os.symlink(outside, repo / ".ticket")
+            return directory
+
+    assert SwapAfterOpen(repo, KEY, TITLE).apply(token, [_tried("After the swap.")]) != token
+    assert len(swaps) == 1 and os.path.islink(repo / ".ticket")
+    assert list(outside.iterdir()) == []
+    assert card_bytes(repo) is None
+    assert sorted(p.name for p in verified.iterdir()) == [f"{KEY}.lock", f"{KEY}.md"]
+    written = (verified / f"{KEY}.md").read_text(encoding="utf-8")
+    assert written.count("<!-- ticket-card:v2") == 1
+    assert "Before the swap." in written and "After the swap." in written
+
+
+def _bind_socket(path):
+    """A Unix-socket node at ``path``, bound from its own directory: a socket path has a short limit."""
+
+    here = os.getcwd()
+    os.chdir(path.parent)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.bind(path.name)
+    finally:
+        os.chdir(here)
+
+
+@pytest.mark.parametrize("kind", ["in place", "after the check"])
+def test_G28_a_socket_at_the_card_path_is_refused_unread(repo, monkeypatch, kind):
+    if kind == "in place":
+        card_path(repo).parent.mkdir()
+        _bind_socket(card_path(repo))
+        attempts = (lambda: store(repo).read(), lambda: store(repo).apply("none", [_tried()]))
+    else:
+        store(repo).apply("none", [_tried("Before the socket.")])
+        real_open, swaps = os.open, []
+
+        def open_over_a_socket(path, flags, *args, **kwargs):
+            # The regular card the pre-open check saw is a socket by the time the card is opened.
+            if path == card_path(repo).name and "dir_fd" in kwargs and not swaps:
+                swaps.append(path)
+                card_path(repo).unlink()
+                _bind_socket(card_path(repo))
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(ticket.os, "open", open_over_a_socket)
+        attempts = (lambda: store(repo).read(),)
+    for attempt in attempts:
+        with pytest.raises(ticket.StoreUnavailable) as excinfo:
+            attempt()
+        assert refusal(excinfo) == "card_not_regular"
+    if kind == "after the check":
+        assert swaps == [f"{KEY}.md"]
+    assert stat.S_ISSOCK(os.lstat(card_path(repo)).st_mode)
+    assert _temporary_files(repo) == []
+    assert [p.name for p in card_path(repo).parent.iterdir() if p.name.endswith(".md")] == [f"{KEY}.md"]

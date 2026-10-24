@@ -28,7 +28,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections import Counter
@@ -1127,9 +1126,11 @@ class MarkdownStore:
 
         ``.ticket/`` is opened without following a link, and the lock file is
         opened through it, without following a link, and must be a regular
-        file. The card is read through the same descriptor while the lock is
-        held (``_load``). The operating system drops the lock if its holder
-        dies.
+        file. The card is read and written through the same descriptor while
+        the lock is held (``_load``, ``_save``): every operation on the card
+        goes through it, never through a path, so a ``.ticket`` swapped for a
+        link after this open cannot move the card. The operating system drops
+        the lock if its holder dies.
         """
 
         with self._threads:
@@ -1168,24 +1169,43 @@ class MarkdownStore:
                     code="lock_unopenable",
                 ) from exc
 
+    def _card_mode(self, directory: int) -> int | None:
+        """The mode of whatever is at the card's path, read through ``directory`` without following a link; None when nothing is."""
+
+        try:
+            return os.stat(self.path.name, dir_fd=directory, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return None
+
     def _load(self, directory: int) -> tuple[dict[str, Any], str]:
         """The card as read through ``directory``, or the blank card when there is none.
 
-        The card is opened relative to the verified ``.ticket/`` descriptor
-        without following a link and must be a regular file; a link or any
-        other kind of file at its path is refused ``card_not_regular`` before
-        a byte is read. ``O_NONBLOCK`` keeps a FIFO there from holding the
-        open until a writer appears; a regular file reads the same with it.
+        Every step goes through the verified ``.ticket/`` descriptor, never
+        through a path. A node at the card's path that is not a regular file
+        (a link, a FIFO, a directory, a socket) is refused ``card_not_regular``
+        before it is opened; the open itself follows no link, and what it
+        opened is checked once more (``fstat``), the race check for a node
+        swapped in between the two. An open that fails on such a node is
+        refused the same way; any other error (a permission error on a
+        regular file) propagates as it is. ``O_NONBLOCK`` keeps a FIFO there
+        from holding the open until a writer appears; a regular file reads
+        the same with it.
         """
 
+        mode = self._card_mode(directory)
+        if mode is None:
+            return _blank_card(self.key, self.title), NO_TOKEN
+        if not stat.S_ISREG(mode):
+            raise _card_not_regular(self.ref)
         try:
             fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         except FileNotFoundError:
             return _blank_card(self.key, self.title), NO_TOKEN
         except OSError as exc:
-            if exc.errno != errno.ELOOP:
-                raise
-            raise _card_not_regular(self.ref) from exc
+            mode = self._card_mode(directory)
+            if exc.errno == errno.ELOOP or (mode is not None and not stat.S_ISREG(mode)):
+                raise _card_not_regular(self.ref) from exc
+            raise
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise _card_not_regular(self.ref)
@@ -1205,15 +1225,26 @@ class MarkdownStore:
         _check_card_shape(card, self.key, self.ref)
         return card, _token(card)
 
-    def _save(self, card: Mapping[str, Any]) -> None:
-        fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
+    def _save(self, card: Mapping[str, Any], directory: int) -> None:
+        """Write the card through ``directory``, never through a path.
+
+        The temporary file is created relative to the verified descriptor
+        (exclusive, mode 0600, no link followed, a random name in the
+        ``.<key>.md.<random>.tmp`` shape), written, and renamed over the card
+        relative to the same descriptor; on failure it is removed the same
+        way. A ``.ticket`` swapped for a link after the directory was opened
+        therefore cannot send the card outside the repository.
+        """
+
+        temporary = f".{self.path.name}.{secrets.token_hex(8)}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(_render_card(card))
-            os.replace(temporary, self.path)
+            os.replace(temporary, self.path.name, src_dir_fd=directory, dst_dir_fd=directory)
         except BaseException:
             with contextlib.suppress(OSError):
-                os.unlink(temporary)
+                os.unlink(temporary, dir_fd=directory)
             raise
 
     # The four calls.
@@ -1262,7 +1293,7 @@ class MarkdownStore:
             _check_pass(self.key, card["pass"], mine, self._ended)
             card = _fold(card, events)
             if not joining:
-                self._save(card)
+                self._save(card, directory)
             if binding is not None:
                 self._pass_id, self._ended = binding[1], None
         return token if joining else _token(card)
@@ -1281,7 +1312,7 @@ class MarkdownStore:
             card, _ = self._load(directory)
             if card["pass"] is not None and card["pass"]["id"] == mine:
                 card["pass"] = None
-                self._save(card)
+                self._save(card, directory)
 
     def clear_pass(self, pass_id: str) -> None:
         """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim."""
@@ -1297,7 +1328,7 @@ class MarkdownStore:
                     code="held" if live else "pass_ended",
                 )
             card["pass"] = None
-            self._save(card)
+            self._save(card, directory)
 
 
 def _inline(value: Any) -> str:
