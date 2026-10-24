@@ -675,7 +675,7 @@ def _put_back_the_card(repo, body):
     node.write_bytes(body)
 
 
-@pytest.mark.parametrize("name", ["ENOTSUP", "ENXIO"])
+@pytest.mark.parametrize("name", ["ENOTSUP", "ENXIO", "EOPNOTSUPP", "ELOOP"])
 def test_G29_an_open_that_fails_as_on_a_socket_is_refused_from_the_error_alone(repo, monkeypatch, name):
     # A socket swapped in after the pre-open check makes the open fail with one
     # of these errors; here the node is gone again before any second look, so
