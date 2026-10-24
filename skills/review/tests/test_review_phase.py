@@ -307,10 +307,12 @@ def test_claude_adapter_parses_the_reviewer_agent_documented_format():
         ("path/to/file.js", 42),
         ("path/to/other.js", 17),
     ]
-    # The documented shape carries no timing claim, so it never needs a
-    # caller's timing record to pass the phase.
+    # The documented shape ends with its INTERVAL record, so the block as
+    # written passes the phase.
+    assert block.group(1).splitlines()[-1] == "INTERVAL: none"
     result = review_phase.run_phase(_envelope("claude-fresh", block.group(1)))
-    assert result["status"] == "success"
+    assert result["status"] == "success", result["reason"]
+    assert result["intervals"] == []
 
 
 def test_claude_adapter_parses_the_review_skill_bullets():
@@ -394,6 +396,21 @@ def test_claude_adapter_parses_the_skill_mds_own_worked_example():
     assert len(findings) == 1
     assert findings[0]["file"] == "skills/example/tool.py"
     assert findings[0]["line"] == 41
+
+
+def test_skill_md_asks_for_the_interval_record_its_parser_requires():
+    # The skill's own output format must end a review with the line the phase
+    # refuses a review without; the worked example plus that line passes.
+    skill_md = (SKILL_DIR / "SKILL.md").read_text()
+    assert "End the review with an `INTERVAL:` line" in skill_md
+    assert "`INTERVAL: none`" in skill_md
+    match = re.search(r"e\.g\.\s*`- (\[BUG\][^`]*)`", skill_md, re.DOTALL)
+    example = re.sub(r"\s+", " ", match.group(1)).strip()
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", f"- {example}\n\nINTERVAL: none\n")
+    )
+    assert result["status"] == "success", result["reason"]
+    assert result["intervals"] == []
 
 
 def test_claude_adapter_parses_the_headless_verdict_label_shape():
@@ -486,7 +503,8 @@ def test_run_phase_refuses_non_sentinel_prose_in_issues():
     text = (
         "## Verdict: REQUEST CHANGES\n\n"
         "### Issues\n"
-        "This paragraph is not a bullet or a numbered item at all.\n"
+        "This paragraph is not a bullet or a numbered item at all.\n\n"
+        "INTERVAL: none\n"
     )
     result = review_phase.run_phase(_envelope("claude-fresh", text))
     assert result["status"] == "failure", result
@@ -502,7 +520,15 @@ def test_run_phase_returns_a_v1_result_with_both_artifacts():
     before = copy.deepcopy(envelope)
     result = review_phase.run_phase(envelope)
     assert envelope == before
-    assert set(result) == {"phase_result", "status", "artifacts", "reason", "resume_token"}
+    assert set(result) == {
+        "phase_result",
+        "status",
+        "artifacts",
+        "reason",
+        "resume_token",
+        "intervals",
+    }
+    assert result["intervals"] == []
     assert result["phase_result"] == "v1"
     assert result["status"] == "success"
     assert result["resume_token"] is None
@@ -656,13 +682,41 @@ def test_standalone_and_caller_paths_validate_against_the_same_schema(tmp_path: 
         assert result["artifacts"]["findings.json"]["schema"] == "review-findings/v1"
 
 
-# --- measured-interval records ----------------------------------------------
+# --- the INTERVAL record -----------------------------------------------------
+#
+# The last non-blank line of every return is its INTERVAL record:
+# `INTERVAL: none`, or one measured line per interval the verdict relies on.
+# Nothing else in a return is read for time, so the cases below put durations,
+# commit shas and quoted INTERVAL lines everywhere else and expect them to
+# change nothing.
 
 DURATION_WITHOUT_INTERVAL = (FIXTURES / "duration-without-interval.md").read_text()
 DURATION_WITH_INTERVAL = (FIXTURES / "duration-with-interval.md").read_text()
+MEASURED = (
+    "INTERVAL: from request start, events.tsv:14 to result write, "
+    "result.md mtime = 41m"
+)
+MEASURED_RECORD = {
+    "start_event": "request start",
+    "start_source": "events.tsv:14",
+    "end_event": "result write",
+    "end_source": "result.md mtime",
+    "duration": "41m",
+}
+SECOND_MEASURED = (
+    "INTERVAL: from first retry, worker.log:88 to last retry, worker.log:131 = 2.5h"
+)
+SECOND_RECORD = {
+    "start_event": "first retry",
+    "start_source": "worker.log:88",
+    "end_event": "last retry",
+    "end_source": "worker.log:131",
+    "duration": "2.5h",
+}
 
 
-def _timed_grok(interval_line: str | None) -> str:
+def _timed_grok(*record_lines: str) -> str:
+    """A cleared grok return; its record lines start on line 7."""
     lines = [
         "## FINDINGS",
         "- none",
@@ -670,14 +724,56 @@ def _timed_grok(interval_line: str | None) -> str:
         "## VERDICT",
         "cleared — the caller waited for 41 minutes.",
         "",
+        *record_lines,
+        "",
     ]
-    if interval_line is not None:
-        lines.append(interval_line)
-        lines.append("")
     return "\n".join(lines)
 
 
-def test_clean_review_with_no_timing_claim_is_byte_for_byte_unchanged():
+def _reviewer_block(
+    *tail: str,
+    summary: str = "Checked the change.",
+    issues: str = "- none",
+    evidence: str = "- Ran: checks passed",
+) -> str:
+    """The reviewer agent's block. With one-line parts, Evidence is line 9
+    and the tail starts on line 11."""
+    return "\n".join(
+        [
+            "## Verdict: APPROVE",
+            "",
+            summary,
+            "",
+            "### Issues",
+            issues,
+            "",
+            "### Evidence",
+            evidence,
+            "",
+            *tail,
+            "",
+        ]
+    )
+
+
+def _accepted(text: str, backend: str = "claude-fresh") -> dict:
+    result = review_phase.run_phase(_envelope(backend, text))
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["review.md"] == text
+    return result
+
+
+def _refused(text: str, backend: str = "claude-fresh") -> str:
+    result = review_phase.run_phase(_envelope(backend, text))
+    assert result["status"] == "failure", result
+    assert result["artifacts"]["review.md"] == text
+    assert result["artifacts"]["findings.json"] is None
+    assert result["resume_token"] is None
+    assert "intervals" not in result
+    return result["reason"]
+
+
+def test_clean_review_with_interval_none_carries_an_empty_interval_list():
     result = review_phase.run_phase(_envelope("grok-notools", GROK_CLEARED))
     expected = review_phase._result(
         "success",
@@ -690,8 +786,8 @@ def test_clean_review_with_no_timing_claim_is_byte_for_byte_unchanged():
             "findings": [],
         },
     )
+    expected["intervals"] = []
     assert result == expected
-    assert "intervals" not in result
 
     skill = review_phase.run_phase(_envelope("claude-fresh", REVIEW_SKILL_CLEAN))
     skill_expected = review_phase._result(
@@ -705,133 +801,155 @@ def test_clean_review_with_no_timing_claim_is_byte_for_byte_unchanged():
             "findings": [],
         },
     )
+    skill_expected["intervals"] = []
     assert skill == skill_expected
-    assert "intervals" not in skill
 
 
-def test_code_timeout_mentions_are_not_duration_claims():
-    result = review_phase.run_phase(_envelope("grok-notools", GROK_FLAGGED))
-    assert result["status"] == "success"
-    assert "intervals" not in result
-    assert result["artifacts"]["review.md"] == GROK_FLAGGED
-
-
-def test_from_text_parses_a_120_second_timeout_finding(tmp_path: Path):
-    text = _claude_approve_with(
-        "The change sizes the weekly chain timeout.",
-        issues=(
-            "- `skills/sample-monitor/sample-monitor-run.sh:212` — "
-            "the 120 second timeout never fires."
-        ),
+def test_missing_record_is_refused_naming_the_last_non_blank_line():
+    reason = _refused(DURATION_WITHOUT_INTERVAL, backend="grok-notools")
+    assert reason == (
+        "grok-notools: review_interval_missing: line 5: "
+        "cleared — the caller waited for 41 minutes."
     )
-    review = tmp_path / "return.md"
-    review.write_text(text, encoding="utf-8")
-    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
-    result = json.loads(proc.stdout)
-    assert result["status"] == "success", result["reason"]
-    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
-    assert "intervals" not in result
-    assert result["artifacts"]["findings.json"] is not None
 
 
 @pytest.mark.parametrize(
-    "issues",
+    ("text", "named"),
     [
-        pytest.param("- the 120 second timeout never fires.", id="spaced-timeout"),
-        pytest.param("- the 120 second bound never fires.", id="spaced-bound"),
-        pytest.param("- the 120 second limit never fires.", id="spaced-limit"),
-        pytest.param("- the 120 second cap never fires.", id="spaced-cap"),
-        pytest.param("- the 120 second deadline never fires.", id="spaced-deadline"),
-        pytest.param("- the 120-second timeout never fires.", id="hyphenated-timeout"),
-        pytest.param("- the 120-second bound never fires.", id="hyphenated-bound"),
-        pytest.param("- the 120-second limit never fires.", id="hyphenated-limit"),
-        pytest.param("- the 120-second cap never fires.", id="hyphenated-cap"),
-        pytest.param("- the 120-second deadline never fires.", id="hyphenated-deadline"),
-        pytest.param("- the `120 second timeout` never fires.", id="backticked-timeout"),
-        pytest.param("- the `120 second bound` never fires.", id="backticked-bound"),
-        pytest.param("- the `120 second limit` never fires.", id="backticked-limit"),
-        pytest.param("- the `120 second cap` never fires.", id="backticked-cap"),
-        pytest.param("- the `120 second deadline` never fires.", id="backticked-deadline"),
-        pytest.param("- the 120 SECOND TIMEOUT never fires.", id="spaced-timeout-caps"),
-        pytest.param("- the `120 second` timeout never fires.", id="backticked-unit-then-timeout"),
-    ],
-)
-def test_configured_bound_is_not_a_duration_claim(issues):
-    text = _claude_approve_with(
-        "The change sizes the weekly chain timeout.",
-        issues=issues,
-    )
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "success", result["reason"]
-    assert "intervals" not in result
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param("The job ran for 120 seconds.", id="ran-for-120-seconds"),
-        pytest.param("The caller took 41 seconds.", id="took-41-seconds"),
+        pytest.param(_reviewer_block(), "line 9: - Ran: checks passed", id="absent"),
         pytest.param(
-            "The caller took 120 seconds before the timeout.",
-            id="took-120-seconds-before-the-timeout",
+            _reviewer_block("INTERVAL: none", "Happy to look again."),
+            "line 12: Happy to look again.",
+            id="present-but-not-last",
+        ),
+        pytest.param(
+            _reviewer_block(evidence="- Probe:\n```text\nINTERVAL: none\n```"),
+            "line 12: ```",
+            id="last-line-is-a-fence-closer",
+        ),
+        pytest.param(
+            _reviewer_block("- INTERVAL: none"),
+            "line 11: - INTERVAL: none",
+            id="bulleted",
+        ),
+        pytest.param(
+            _reviewer_block("**INTERVAL: none**"),
+            "line 11: **INTERVAL: none**",
+            id="emphasised",
         ),
     ],
 )
-def test_measured_duration_still_requires_interval_endpoints(body):
-    text = _claude_approve_with(body)
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
+def test_review_without_a_trailing_record_is_refused(text, named):
+    reason = _refused(text)
+    assert reason == f"claude-fresh: review_interval_missing: {named}"
 
 
-def test_bound_noun_on_next_line_does_not_exempt_a_duration_claim():
-    text = _claude_approve_with("The caller took 120 seconds\nlimit hit")
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
+def test_missing_record_refusal_cuts_the_named_line_at_200_characters():
+    body = "The caller waited for 41 minutes. " + ("x" * 220)
+    reason = _refused(_reviewer_block(evidence=body))
+    _, _, named = reason.partition("review_interval_missing: line 9: ")
+    assert len(named) == 200
+    assert named == body[:200]
+
+
+def test_blank_return_text_names_line_zero_when_called_directly():
+    with pytest.raises(review_phase.ParseError) as exc:
+        review_phase._require_intervals("\n  \n")
+    assert str(exc.value) == "review_interval_missing: line 0: "
+
+
+def test_interval_none_is_accepted_whatever_the_rest_of_the_review_says():
+    text = _reviewer_block(
+        "INTERVAL: none",
+        summary=(
+            "The job ran for 41 minutes at 919960d; the old INTERVAL: from a, b "
+            "to c, d = 3h line was a probe input."
+        ),
+        issues="- `a.py:3` — the retry waits `2h` and then 3 days before giving up.",
+        evidence=(
+            "- Ran: `pytest` took 12 seconds; 1df4a5c is the base.\n"
+            "```text\n"
+            "INTERVAL: from start, a.log:1 to end, a.log:9 = 41m\n"
+            "INTERVAL: none\n"
+            "it took 2h\n"
+            "```\n"
+            "- Quoted: `INTERVAL: from x, y to z, w = 5m`"
+        ),
+    )
+    result = _accepted(text)
+    assert result["intervals"] == []
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "approved"
+    assert [f["line"] for f in findings["findings"]] == [3]
+
+
+# The classes the prose duration scan used to get wrong. Each now ends in
+# `INTERVAL: none`, and none of them asks for anything more.
+NO_LONGER_READ = {
+    "short-sha": _reviewer_block(
+        "INTERVAL: none", summary="Checked 919960d against the base commit."
+    ),
+    "duration-in-a-code-span": _reviewer_block(
+        "INTERVAL: none", summary="The probe `it took 2h` is quoted from the brief."
+    ),
+    "duration-in-a-fence": _reviewer_block(
+        "INTERVAL: none",
+        summary="The probes quoted from the brief:\n```\nit took 2h\nwaits 3d\n```",
+    ),
+    "sentinel-looking-fence-info-string": _reviewer_block(
+        "INTERVAL: none",
+        issues="- none",
+        evidence=(
+            "- Probe:\n"
+            "```No bugs or security issues found.\n"
+            "it took 2h\n"
+            "```"
+        ),
+    ),
+    "duration-in-prose": _reviewer_block(
+        "INTERVAL: none", summary="The job ran for 41 minutes before the timeout."
+    ),
+}
+
+
+@pytest.mark.parametrize("text", list(NO_LONGER_READ.values()), ids=list(NO_LONGER_READ))
+def test_text_outside_the_record_never_demands_an_interval(text):
+    result = _accepted(text)
+    assert result["intervals"] == []
 
 
 @pytest.mark.parametrize(
-    "body",
+    "name",
     [
-        pytest.param("The caller took 120 seconds limit", id="space-before-limit"),
-        pytest.param("The caller took 120 seconds\tlimit", id="tab-before-limit"),
+        "pr-35-claude-empirical-r2.output.md",
+        "pr-36-claude-empirical-r1.attempt1.output.md",
+        "pr-36-claude-empirical-r1.output.md",
     ],
 )
-def test_same_line_bound_noun_still_exempts(body):
-    text = _claude_approve_with(body)
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "success", result["reason"]
-    assert "intervals" not in result
-
-
-def test_duration_without_interval_is_refused():
-    result = review_phase.run_phase(
-        _envelope("grok-notools", DURATION_WITHOUT_INTERVAL)
+def test_copied_approve_review_quoting_durations_parses_with_interval_none(name):
+    result = _accepted((FIXTURES / name).read_text(encoding="utf-8"))
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "approved"
+    assert result["intervals"] == []
+    assert not any(
+        f["severity"] == "error" or f["rule"] == "issue" for f in findings["findings"]
     )
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "line 5:" in result["reason"]
-    assert "the caller waited for 41 minutes." in result["reason"]
-    assert result["artifacts"]["review.md"] == DURATION_WITHOUT_INTERVAL
-    assert result["artifacts"]["findings.json"] is None
-    assert result["resume_token"] is None
+
+
+def test_copied_request_changes_review_quoting_durations_parses_with_interval_none():
+    text = (FIXTURES / "pr-36-claude-empirical-r1.attempt2.output.md").read_text(
+        encoding="utf-8"
+    )
+    result = _accepted(text)
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "changes_requested"
+    assert result["intervals"] == []
+    assert any(f["rule"] == "issue" for f in findings["findings"])
 
 
 def test_duration_with_complete_interval_is_parsed_onto_the_phase_result():
-    result = review_phase.run_phase(
-        _envelope("grok-notools", DURATION_WITH_INTERVAL)
-    )
-    assert result["status"] == "success", result["reason"]
-    assert result["intervals"] == [
-        {
-            "start_event": "request start",
-            "start_source": "events.tsv:14",
-            "end_event": "result write",
-            "end_source": "result.md mtime",
-            "duration": "41m",
-        }
-    ]
+    result = _accepted(DURATION_WITH_INTERVAL, backend="grok-notools")
+    assert result["intervals"] == [MEASURED_RECORD]
     findings = result["artifacts"]["findings.json"]
     assert findings["verdict"] == "approved"
     assert findings["findings"] == []
@@ -839,234 +957,391 @@ def test_duration_with_complete_interval_is_parsed_onto_the_phase_result():
     assert review_phase.validate_findings(findings) == []
 
 
-def test_interval_missing_start_event_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from , events.tsv:14 to result write, "
-        "result.md mtime = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "line 7:" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
+def test_two_distinct_records_are_parsed_in_order():
+    result = _accepted(_timed_grok(MEASURED, SECOND_MEASURED), backend="grok-notools")
+    assert result["intervals"] == [MEASURED_RECORD, SECOND_RECORD]
 
 
-def test_interval_missing_start_source_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from request start, to result write, "
-        "result.md mtime = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "line 7:" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-
-
-def test_interval_missing_end_event_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from request start, events.tsv:14 to , "
-        "result.md mtime = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "line 7:" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-
-
-def test_interval_missing_end_source_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from request start, events.tsv:14 to result write,  = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "line 7:" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-
-
-def test_interval_missing_duration_is_refused():
-    text = _timed_grok(
+def test_end_source_holding_an_equals_sign_splits_on_the_last_one():
+    line = (
         "INTERVAL: from request start, events.tsv:14 to result write, "
-        "result.md mtime = "
+        "worker log line status=done = 41m"
     )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
+    result = _accepted(_timed_grok(line), backend="grok-notools")
+    assert result["intervals"] == [
+        dict(MEASURED_RECORD, end_source="worker log line status=done")
+    ]
+
+
+def test_blank_line_ends_the_record_block():
+    # Only the run of INTERVAL lines that ends at the last non-blank line is
+    # the record; the line above the blank is never read.
+    result = _accepted(
+        _timed_grok("INTERVAL: none", "", "INTERVAL: none"), backend="grok-notools"
+    )
+    assert result["intervals"] == []
+    result = _accepted(_timed_grok(MEASURED, "", SECOND_MEASURED), backend="grok-notools")
+    assert result["intervals"] == [SECOND_RECORD]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "INTERVAL: none",
+        "interval: NONE",
+        "  Interval : None",
+        "\tINTERVAL:\tnone\t",
+    ],
+)
+def test_interval_none_label_and_value_are_case_insensitive(line):
+    result = _accepted(_timed_grok(line), backend="grok-notools")
+    assert result["intervals"] == []
+
+
+@pytest.mark.parametrize(
+    ("line", "detail"),
+    [
+        pytest.param("INTERVAL: maybe", "", id="neither-none-nor-from"),
+        pytest.param("INTERVAL:", "", id="empty"),
+        pytest.param("INTERVAL: none.", "", id="none-with-a-period"),
+        pytest.param("INTERVAL: none, nothing measured", "", id="none-with-more"),
+        pytest.param("INTERVAL: fromage a, b to c, d = 1s", "", id="from-glued-to-a-word"),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = 41 minutes",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="spelled-out-unit",
+        ),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = 41min",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="unknown-unit",
+        ),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = 41 m",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="spaced-unit",
+        ),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = about 41m",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="words-before-the-number",
+        ),
+    ],
+)
+def test_malformed_record_is_refused(line, detail):
+    reason = _refused(_timed_grok(line), backend="grok-notools")
+    assert reason == f"grok-notools: review_interval_malformed: line 7: {line}{detail}"
+
+
+@pytest.mark.parametrize(
+    "duration", ["41m", "500ms", "2.5h", "3d", "90s", "0.25s"]
+)
+def test_every_documented_duration_unit_is_accepted(duration):
+    line = f"INTERVAL: from a, b to c, d = {duration}"
+    result = _accepted(_timed_grok(line), backend="grok-notools")
+    assert result["intervals"][0]["duration"] == duration
+
+
+@pytest.mark.parametrize(
+    ("line", "missing"),
+    [
+        pytest.param(
+            "INTERVAL: from , events.tsv:14 to result write, result.md mtime = 41m",
+            "start_event",
+            id="start-event",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, to result write, result.md mtime = 41m",
+            "start_source",
+            id="start-source",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, events.tsv:14 to , result.md mtime = 41m",
+            "end_event",
+            id="end-event",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, events.tsv:14 to result write,  = 41m",
+            "end_source",
+            id="end-source",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, events.tsv:14 to result write, result.md mtime =",
+            "duration",
+            id="duration",
+        ),
+        pytest.param(
+            "INTERVAL: from request start to result write = 41m",
+            "start_event, start_source, end_event, end_source, duration",
+            id="no-separators",
+        ),
+    ],
+)
+def test_record_with_an_empty_part_is_refused_naming_the_part(line, missing):
+    reason = _refused(_timed_grok(line), backend="grok-notools")
+    assert reason == (
+        f"grok-notools: review_interval_endpoints_missing: line 7: {line} (missing {missing})"
+    )
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param(("INTERVAL: none", MEASURED), id="none-then-measured"),
+        pytest.param((MEASURED, "INTERVAL: none"), id="measured-then-none"),
+        pytest.param(("INTERVAL: none", "interval: None"), id="none-twice"),
+    ],
+)
+def test_contradictory_record_is_refused_at_its_second_line(lines):
+    reason = _refused(_timed_grok(*lines), backend="grok-notools")
+    assert reason == (
+        f"grok-notools: review_interval_contradictory: line 8: {lines[1]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        pytest.param(MEASURED, id="identical"),
+        pytest.param("  " + MEASURED + "\t", id="identical-after-trimming"),
+    ],
+)
+def test_duplicate_measured_line_is_refused(second):
+    reason = _refused(_timed_grok(MEASURED, SECOND_MEASURED, second), backend="grok-notools")
+    assert reason == f"grok-notools: review_interval_duplicate: line 9: {second}"
+
+
+def test_first_failing_line_wins_in_text_order():
+    reason = _refused(
+        _timed_grok(MEASURED, "INTERVAL: maybe", "INTERVAL: none"), backend="grok-notools"
+    )
+    assert reason == "grok-notools: review_interval_malformed: line 8: INTERVAL: maybe"
+
+
+def test_the_adapters_never_see_the_trailing_record():
+    # Each of these ends on a findings section, so a record line read by the
+    # adapter would be foreign prose in it.
+    for name, backend in [
+        ("claude-fresh-numbered.md", "claude-fresh"),
+        ("clean-approve.md", "claude-fresh"),
+        ("claude-fresh-headless.md", "claude-fresh"),
+    ]:
+        text = (FIXTURES / name).read_text(encoding="utf-8")
+        assert text.rstrip().endswith("INTERVAL: none"), name
+        assert _accepted(text, backend=backend)["intervals"] == [], name
+
+
+def test_an_interval_line_above_the_record_is_read_like_any_other_line():
+    text = _reviewer_block(
+        "INTERVAL: none", issues="INTERVAL: none\n- `a.py:1` — the loop never exits"
+    )
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+    reason = _refused(text)
+    assert "ISSUES" in reason
+
+
+def test_grok_record_after_the_verdict_value_parses_and_before_it_refuses():
+    after = "## FINDINGS\n- none\n\n## VERDICT\ncleared — fine\nINTERVAL: none\n"
+    assert _accepted(after, backend="grok-notools")["intervals"] == []
+    before = "## FINDINGS\n- none\n\n## VERDICT\nINTERVAL: none\ncleared — fine\n"
+    reason = _refused(before, backend="grok-notools")
+    assert reason == "grok-notools: review_interval_missing: line 6: cleared — fine"
+
+
+def test_from_text_cli_refuses_a_missing_record_with_exit_1(tmp_path: Path):
+    review = tmp_path / "return.md"
+    review.write_text("No bugs or security issues found.\n", encoding="utf-8")
+    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["reason"] == (
+        "claude-fresh: review_interval_missing: line 1: No bugs or security issues found."
+    )
+
+
+class _ApprovingJev:
+    calls = 0
+
+    def decide(self, text: str) -> tuple[str, float]:
+        type(self).calls += 1
+        return review_phase.APPROVED, 0.95
+
+
+def _jev_fallback_run(monkeypatch, text: str, backend: str = "claude-fresh") -> dict:
+    monkeypatch.setattr(_ApprovingJev, "calls", 0)
+    monkeypatch.setattr(review_phase, "JevClient", _ApprovingJev)
+    envelope = _envelope(backend, text)
+    envelope["adapters"] = {"jev_fallback": True}
+    return review_phase.run_phase(envelope)
+
+
+def test_jev_fallback_refuses_a_missing_record_before_jev_is_asked(monkeypatch):
+    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n")
+    assert _ApprovingJev.calls == 0
     assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "line 7:" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
+    assert result["reason"] == (
+        "claude-fresh: review_interval_missing: line 1: The diff looks reasonable."
+    )
+    assert "intervals" not in result
 
 
-# --- section/file references are not duration claims; prose clean markers ----
+def test_jev_fallback_accepts_interval_none(monkeypatch):
+    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n\nINTERVAL: none\n")
+    assert _ApprovingJev.calls == 1
+    assert result["status"] == "success", result["reason"]
+    assert result["verdict_source"] == "jev"
+    assert result["intervals"] == []
+
+
+def test_jev_fallback_success_carries_the_measured_record(monkeypatch):
+    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n\n" + MEASURED + "\n")
+    assert _ApprovingJev.calls == 1
+    assert result["status"] == "success", result["reason"]
+    assert result["verdict_source"] == "jev"
+    assert result["intervals"] == [MEASURED_RECORD]
+
+
+def test_jev_fallback_other_adapter_path_still_requires_the_record(monkeypatch):
+    text = "## Verdict: APPROVE\n\n### Issues\n- none\n"
+    result = _jev_fallback_run(monkeypatch, text, backend="grok-notools")
+    assert _ApprovingJev.calls == 0
+    assert result["status"] == "failure"
+    assert result["reason"] == "grok-notools: review_interval_missing: line 4: - none"
+    accepted = _jev_fallback_run(monkeypatch, text + "INTERVAL: none\n", backend="grok-notools")
+    assert accepted["status"] == "success", accepted["reason"]
+    assert accepted["verdict_source"] == "regex"
+    assert accepted["intervals"] == []
+
+
+def test_jev_shadow_runs_only_after_the_record_passes(monkeypatch):
+    monkeypatch.setenv("REVIEW_PHASE_JEV_SHADOW", "1")
+    monkeypatch.setattr(_ApprovingJev, "calls", 0)
+    monkeypatch.setattr(review_phase, "JevClient", _ApprovingJev)
+    refused = review_phase.run_phase(_envelope("grok-notools", DURATION_WITHOUT_INTERVAL))
+    assert refused["status"] == "failure"
+    assert "review_interval_missing" in refused["reason"]
+    assert "jev_verdict" not in refused
+    assert _ApprovingJev.calls == 0
+    accepted = review_phase.run_phase(_envelope("grok-notools", DURATION_WITH_INTERVAL))
+    assert accepted["status"] == "success", accepted["reason"]
+    assert accepted["intervals"] == [MEASURED_RECORD]
+    assert accepted["jev_verdict"] == "approved"
+    assert _ApprovingJev.calls == 1
+
+
+# Each shape ends on a findings section, so a last line that is not a record
+# would be foreign prose in that section if an adapter read it first. `{tail}`
+# starts on the line given.
+_SECTION_LAST_SHAPES = [
+    pytest.param(
+        "claude-fresh",
+        "## Verdict: APPROVE\n\nChecked the change.\n\n### Issues\n- none\n{tail}\n",
+        7,
+        id="claude-issues",
+    ),
+    pytest.param(
+        "claude-fresh",
+        "## Verdict: APPROVE\n\nChecked the change.\n\n### Issues\n- none\n\n"
+        "### Minor notes\n- `a.py:3` — the helper name is vague\n{tail}\n",
+        10,
+        id="claude-minor-notes",
+    ),
+    pytest.param(
+        "claude-fresh",
+        "VERDICT: APPROVE\n\nFINDINGS:\n- none\n{tail}\n",
+        5,
+        id="claude-headless-findings",
+    ),
+    pytest.param(
+        "grok-notools",
+        "## VERDICT\ncleared — fine\n\n## FINDINGS\n- none\n{tail}\n",
+        6,
+        id="grok-findings",
+    ),
+    pytest.param(
+        "grok-notools",
+        "VERDICT: cleared — fine\n\nFINDINGS:\n- none\n{tail}\n",
+        5,
+        id="grok-headless-findings",
+    ),
+]
+
+
+@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
+@pytest.mark.parametrize("last", ["**INTERVAL: none**", "Happy to look again."])
+@pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
+def test_section_ending_in_a_non_record_line_is_refused_as_missing(
+    monkeypatch, backend, shape, tail_line, last, jev_fallback
+):
+    text = shape.format(tail=last)
+    if jev_fallback:
+        result = _jev_fallback_run(monkeypatch, text, backend=backend)
+        assert _ApprovingJev.calls == 0
+        assert result["status"] == "failure"
+        reason = result["reason"]
+    else:
+        reason = _refused(text, backend=backend)
+    assert reason == f"{backend}: review_interval_missing: line {tail_line}: {last}"
+
+
+@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
+@pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
+def test_malformed_record_under_an_unparsed_section_is_refused_by_its_own_name(
+    monkeypatch, backend, shape, tail_line, jev_fallback
+):
+    text = shape.format(tail="Happy to look again.\nINTERVAL: maybe")
+    if jev_fallback:
+        result = _jev_fallback_run(monkeypatch, text, backend=backend)
+        assert _ApprovingJev.calls == 0
+        assert result["status"] == "failure"
+        reason = result["reason"]
+    else:
+        reason = _refused(text, backend=backend)
+    assert reason == (
+        f"{backend}: review_interval_malformed: line {tail_line + 1}: INTERVAL: maybe"
+    )
+
+
+RECORD_LIMIT_SECONDS = 1.0
+
+
+def test_record_check_finishes_long_inputs_within_a_second():
+    many_records = "\n".join(
+        f"INTERVAL: from start {n}, a.log:{n} to end {n}, b.log:{n} = {n}s"
+        for n in range(40_000)
+    )
+    long_line = "INTERVAL: from a, b to c, " + "k=v " * 50_000 + "= 1s"
+    repeated_separators = "INTERVAL: from a, b " + "to x, " * 40_000 + "= 1s"
+    many_blank_lines = "No bugs or security issues found.\n" + " \n" * 100_000
+    shapes = {
+        "40000-records": (many_records, 40_000),
+        "200kb-end-source-of-equals-signs": (long_line, 1),
+        "240kb-repeated-separators": (repeated_separators, 1),
+        "100000-trailing-blank-lines": (many_blank_lines, None),
+    }
+    for name, (text, count) in shapes.items():
+        start = time.perf_counter()
+        try:
+            records = review_phase._require_intervals(text)
+        except review_phase.ParseError:
+            records = None
+        elapsed = time.perf_counter() - start
+        assert elapsed <= RECORD_LIMIT_SECONDS, (
+            f"the record check took {elapsed:.2f}s on {name}"
+        )
+        assert (records is None) if count is None else (len(records) == count), name
+
+
+# --- prose clean markers ----------------------------------------------------
 
 
 def _claude_approve_with(body: str, issues: str = "- none") -> str:
     return (
         "## Verdict: APPROVE\n\n"
         f"### Summary\n{body}\n\n"
-        f"### Issues\n{issues}\n"
-    )
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "Checked the rule in §3d against the diff.",
-        "Checked § 3d against the diff.",
-        "See section 3d for the rule.",
-        "See Section 3d for the rule.",
-        "See SECTION 12h for the rule.",
-        "The call site at foo.py:12d is unchanged.",
-        "The call site at src/pkg/foo.py:7m is unchanged.",
-        "See [the rule](docs/3d/run.md) for the details.",
-        "Only touches docs/3d/notes.md and nothing else.",
-        "Only touches docs/3d/x.md and nothing else.",
-        "Only touches src/days/run.py and nothing else.",
-        "Only touches `docs/2h/notes.md` and nothing else.",
-        "See section 3.2 for the rule.",
-        "See § 3.2 for the rule.",
-    ],
-)
-def test_section_and_file_references_are_not_duration_claims(body):
-    text = _claude_approve_with(body)
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "success", result["reason"]
-    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
-    assert "intervals" not in result
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "The caller waits 3d for the lock.",
-        "The job ran 3 days before failing.",
-        "It returned in 2h.",
-        "Throughput is 3d/day at peak.",
-        "It took 3 days/run.",
-        "It took 3 hours/day/week.",
-        'The caller waits "3d/foo.py" before retrying.',
-        "The caller waits `3d/foo.py` before retrying.",
-        "The caller waits _3d/foo.py_ before retrying.",
-        "The caller waits *3d/foo.py* before retrying.",
-        "The caller waits __3d/foo.py__ before retrying.",
-        "The caller waits (3 days/foo.txt) before retrying.",
-        "The caller waits '2h/x.md' before retrying.",
-        "See [took 3 days](docs/run.md) for the details.",
-        "See [3h](https://example.com/x/y) for the details.",
-        "The caller waits 3d/foo.py before retrying.",
-        "It took 3 days/foo.txt to finish.",
-        "It ran 3 days/run/x.",
-        "See docs/3d/notes for the rule.",
-        "Compare a/3d/b with the other copy.",
-        "It took section 5 minutes.",
-        "The caller waited in section 3 hours.",
-        "It took § 5 minutes.",
-        "Each used 4 hours/session.",
-        "See §3d, but the caller also waits 3d.",
-    ],
-)
-def test_real_duration_claims_still_require_an_interval(body):
-    text = _claude_approve_with(body)
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-
-
-# --- file:line references and delimiter-glued paths never hide a claim --------
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("it waited 3d/foo.py:12 before failing", id="plain"),
-        pytest.param("it waited _3d/foo.py:12_ before failing", id="underscore-wrapped"),
-        pytest.param("it waited `3d/foo.py:12` before failing", id="backtick-wrapped"),
-    ],
-)
-def test_file_line_reference_with_a_duration_first_component_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
-        "a file:line reference whose first path component is a duration must "
-        "stay visible to the scan"
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("see foo.py:12 for the bound", id="plain-reference"),
-        pytest.param("see docs/3d/x.md:12 for the bound", id="later-component-duration"),
-        pytest.param("see src/days/run.py:7 for the bound", id="later-component-unit-word"),
-        pytest.param("The call site at foo.py:12d is unchanged.", id="line-suffix"),
-    ],
-)
-def test_file_line_reference_without_a_duration_first_component_is_not_a_claim(text):
-    assert review_phase._has_duration_claim(text) is False, (
-        "a file:line reference whose first path component is not a duration "
-        "must stay a non-claim"
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("waited 41m:/x/y.md", id="colon"),
-        pytest.param("3h;src/a.py", id="semicolon"),
-        pytest.param("41m,docs/x.md", id="comma"),
-        pytest.param("waited _3h;src/a.py_ now", id="wrapped-semicolon"),
-        pytest.param("see docs/x.md,3d/y.md", id="later-list-entry"),
-        pytest.param("see docs/x.md,3d", id="trailing-list-duration"),
-    ],
-)
-def test_delimiter_glued_duration_before_or_after_a_path_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
-        "a duration glued to a path by a colon, semicolon or comma must stay "
-        "visible to the scan"
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("docs/x.md,docs/y.md", id="comma-list"),
-        pytest.param("src/a.py;docs/b.md", id="semicolon-list"),
-        pytest.param("src/a.py:12, docs/b.md:7", id="reference-list"),
-        pytest.param("see docs/3d/x.md,docs/2h/y.md", id="later-components-durations"),
-        pytest.param("see https://example.com/x/y and more", id="url-scheme"),
-    ],
-)
-def test_delimited_path_lists_without_a_duration_are_not_claims(text):
-    assert review_phase._has_duration_claim(text) is False, (
-        "delimited paths with no duration first component must stay non-claims"
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("ran x.y:3 days", id="bare-file"),
-        pytest.param("ran src/x.py:3 days", id="path-file"),
-        pytest.param("ran x.y:3 hours before failing", id="longer-sentence"),
-    ],
-)
-def test_file_line_reference_followed_by_a_spaced_duration_unit_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
-        "a file:line reference followed by a spaced duration unit word is a "
-        "claim, the same as a section id followed by one"
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("see x.y:3 for the bound", id="bare-file"),
-        pytest.param("see src/x.py:3 for the bound", id="path-file"),
-        pytest.param("see x.y:3, then continue", id="comma-after"),
-    ],
-)
-def test_file_line_reference_followed_by_other_words_is_not_a_claim(text):
-    assert review_phase._has_duration_claim(text) is False, (
-        "a file:line reference followed by ordinary words must stay a non-claim"
+        f"### Issues\n{issues}\n\n"
+        "INTERVAL: none\n"
     )
 
 
@@ -1114,508 +1389,6 @@ def test_other_prose_under_issues_still_refuses(prose):
     text = _claude_approve_with("Looks fine.", issues=prose)
     with pytest.raises(review_phase.ParseError, match="ISSUES"):
         review_phase.parse_claude_fresh(text)
-
-
-# --- URLs, wrapped paths and trailing punctuation are references -------------
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("See https://example.com/3d/rule for the details.", id="bare-url"),
-        pytest.param("See <https://example.com/3d/rule> for the details.", id="autolink"),
-        pytest.param("Only touches **docs/3d/x.md** and nothing else.", id="strong-path"),
-        pytest.param("Only touches docs/3d/x.md?", id="path-question"),
-        pytest.param("Only touches docs/3d/x.md!", id="path-exclamation"),
-    ],
-)
-def test_url_wrapped_and_punctuated_references_are_not_claims(text):
-    assert review_phase._has_duration_claim(text) is False, (
-        "a URL, an autolink, an emphasised path, or a path before sentence "
-        "punctuation is a reference, not a timing claim"
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("See 3d/https://example.com/rule for the details.", id="bare-url"),
-        pytest.param("See <3d/https://example.com/rule> for the details.", id="autolink"),
-        pytest.param("Only touches **3d/x.md** and nothing else.", id="strong-path"),
-        pytest.param("Only touches 3d/x.md?", id="path-question"),
-        pytest.param("Only touches 3d/x.md!", id="path-exclamation"),
-    ],
-)
-def test_same_reference_forms_with_a_duration_first_component_are_claims(text):
-    assert review_phase._has_duration_claim(text) is True, (
-        "a duration-shaped first component keeps the token visible to the "
-        "scan however the reference is wrapped or punctuated"
-    )
-
-
-def test_run_phase_accepts_an_autolink_and_refuses_its_duration_first_variant():
-    accepted = review_phase.run_phase(
-        _envelope(
-            "claude-fresh",
-            _claude_approve_with("See <https://example.com/3d/rule> for the details."),
-        )
-    )
-    assert accepted["status"] == "success", accepted["reason"]
-    assert accepted["reason"] == "claude-fresh: approved, 0 finding(s)"
-    refused = review_phase.run_phase(
-        _envelope(
-            "claude-fresh",
-            _claude_approve_with("See <3d/https://example.com/rule> for the details."),
-        )
-    )
-    assert refused["status"] == "failure"
-    assert "review_interval_endpoints_missing" in refused["reason"]
-
-
-# --- a duration first component wrapped on both sides stays a claim ----------
-#
-# Every text here is prose (the Summary section, never a quoted Evidence or
-# Minor notes span), so the reference scan decides it, not the quoted-input
-# blanking that runs before it.
-
-WRAPPED_FIRST_COMPONENT_CLAIMS = [
-    pytest.param("The caller waits **3h**/a.py before retrying.", id="bold"),
-    pytest.param("The caller waits `41m`/x.md before retrying.", id="backtick"),
-    pytest.param('The caller waits "3h"/a.py before retrying.', id="double-quote"),
-    pytest.param("The caller waits '3h'/a.py before retrying.", id="single-quote"),
-    pytest.param("The caller waits *3h*/a.py before retrying.", id="star"),
-    pytest.param("The caller waits _3h_/a.py before retrying.", id="underscore"),
-    pytest.param("The caller waits [3h]/a.py before retrying.", id="square-bracket"),
-    pytest.param("The caller waits (3h)/a.py before retrying.", id="paren"),
-    pytest.param("The caller waits {3h}/a.py before retrying.", id="brace"),
-    pytest.param("The caller waits <3h>/a.py before retrying.", id="angle"),
-    pytest.param("The caller waits 3h**/a.py before retrying.", id="bold-right-only"),
-    pytest.param("The caller waits **3h/a.py before retrying.", id="bold-left-only"),
-    pytest.param("The caller waits 3h_/a.py before retrying.", id="underscore-right-only"),
-    pytest.param("The caller waits **3h**?q/a.py before retrying.", id="bold-query"),
-    pytest.param("The caller waits _3h_?q/a.py before retrying.", id="underscore-query"),
-    pytest.param("The caller waits _3h_/a.py:12 before retrying.", id="underscore-file-line"),
-    # A later piece of a delimited token can carry an opening bracket after
-    # its first component; a closing one ends the token before any `/`.
-    pytest.param("It waited docs/x.md,3h(/a.py before retrying.", id="paren-right-in-list"),
-    pytest.param("It waited docs/x.md,3h[/a.py before retrying.", id="bracket-right-in-list"),
-    pytest.param("It took 3 **days**/run.", id="bold-unit-word"),
-    pytest.param("The caller waits _3d/foo.py_ before retrying.", id="whole-token-underscore"),
-    pytest.param("The caller waits 3d/foo.py before retrying.", id="bare"),
-]
-WRAPPED_FIRST_COMPONENT_REFERENCES = [
-    pytest.param("Only touches docs/3d/x.md and nothing else.", id="later-component"),
-    pytest.param("Only touches **docs**/3d/x.md and nothing else.", id="bold-name"),
-    pytest.param("Only touches `docs`/3d/x.md and nothing else.", id="backtick-name"),
-    pytest.param('Only touches "docs"/3d/x.md and nothing else.', id="quoted-name"),
-    pytest.param("Only touches **/a.py and nothing else.", id="wrapper-only"),
-]
-
-
-def _assert_not_quoted_input(text: str) -> None:
-    lines = text.splitlines()
-    assert review_phase._blank_quoted_inputs(lines) == lines, (
-        "the text must reach the reference scan as written, outside any quoted span"
-    )
-
-
-@pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_CLAIMS)
-def test_wrapped_duration_first_component_is_a_claim(text):
-    _assert_not_quoted_input(text)
-    assert review_phase._has_duration_claim(text) is True, (
-        "a duration-shaped first path component is a claim whatever formatting "
-        "wraps it, on either side or both"
-    )
-
-
-@pytest.mark.parametrize("text", WRAPPED_FIRST_COMPONENT_REFERENCES)
-def test_wrapped_non_duration_first_component_is_still_a_reference(text):
-    _assert_not_quoted_input(text)
-    assert review_phase._has_duration_claim(text) is False, (
-        "a path whose first component is not a duration stays a reference "
-        "however that component is wrapped"
-    )
-
-
-def _assert_summary_claim_refused(body: str) -> None:
-    text = _claude_approve_with(body)
-    _assert_not_quoted_input(text)
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure", result["reason"]
-    assert "review_interval_endpoints_missing" in result["reason"]
-
-
-def test_run_phase_refuses_a_bold_wrapped_duration_first_component():
-    _assert_summary_claim_refused("The caller waits **3h**/a.py before retrying.")
-
-
-def test_run_phase_refuses_a_backtick_wrapped_duration_first_component():
-    _assert_summary_claim_refused("The caller waits `41m`/x.md before retrying.")
-
-
-# Composed wrappers: any mix or nesting of the formatting wrappers around a
-# duration first component. The path-token pass splits a token at brackets, so
-# `(_3h_)/a.py` never reached the first-component test as one token. These run
-# the whole gate (`review_phase.py --from-text`) on a review that carries the
-# token in Summary prose and has no INTERVAL record.
-COMPOSED_WRAPPER_CLAIMS = [
-    pytest.param("(_3h_)/a.py", id="underscore-in-paren"),
-    pytest.param("[_3h_]/a.py", id="underscore-in-bracket"),
-    pytest.param("_(3h)_/a.py", id="paren-in-underscore"),
-    pytest.param("(**3h**)/a.py", id="bold-in-paren"),
-    pytest.param("_[3h]_/a.py", id="bracket-in-underscore"),
-    pytest.param("_[_3h_]_/a.py", id="underscore-bracket-underscore"),
-    pytest.param("([_3h_])/a.py", id="paren-bracket-underscore"),
-    pytest.param("(_3h_)?q/a.py", id="underscore-in-paren-query"),
-    pytest.param("[_3h_]/a.py:12", id="underscore-in-bracket-file-line"),
-    pytest.param("docs/x.md,(_3h_)/a.py", id="underscore-in-paren-list-piece"),
-    pytest.param("a.py,(_3h_)/b.py", id="underscore-in-paren-after-a-plain-entry"),
-    pytest.param("~~3h~~/a.py", id="strikethrough"),
-]
-COMPOSED_WRAPPER_REFERENCES = [
-    pytest.param("(_docs_)/3d/x.md", id="underscore-in-paren"),
-    pytest.param("[_docs_]/3d/x.md", id="underscore-in-bracket"),
-    pytest.param("(**docs**)/3d/x.md", id="bold-in-paren"),
-    # Strikethrough inside bold: with a bare closing `~~` right before the
-    # slash, the install check's outside-reference scan reads it as a home path.
-    pytest.param("**~~docs~~**/3d/x.md", id="strikethrough-in-bold"),
-]
-
-
-def _run_from_text(tmp_path: Path, token: str) -> tuple[subprocess.CompletedProcess[str], dict]:
-    text = _claude_approve_with(f"The caller waits {token} before retrying.")
-    _assert_not_quoted_input(text)
-    review = tmp_path / "return.md"
-    review.write_text(text, encoding="utf-8")
-    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
-    return proc, json.loads(proc.stdout)
-
-
-@pytest.mark.parametrize("token", COMPOSED_WRAPPER_CLAIMS)
-def test_from_text_refuses_a_duration_first_component_in_composed_wrappers(
-    tmp_path: Path, token
-):
-    proc, result = _run_from_text(tmp_path, token)
-    assert result["status"] == "failure", (
-        f"a duration first component in composed wrappers must need an INTERVAL "
-        f"record: {result['reason']}"
-    )
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
-
-
-@pytest.mark.parametrize("token", COMPOSED_WRAPPER_REFERENCES)
-def test_from_text_accepts_a_non_duration_first_component_in_composed_wrappers(
-    tmp_path: Path, token
-):
-    proc, result = _run_from_text(tmp_path, token)
-    assert result["status"] == "success", (
-        f"a path whose first component is not a duration stays a reference "
-        f"however that component is wrapped: {result['reason']}"
-    )
-    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
-
-
-# Emphasis underscores around a duration are a boundary, so a timing claim
-# written in italics still needs an INTERVAL record. Underscores that a letter
-# or digit touches belong to an identifier, which stays a non-claim.
-EMPHASISED_DURATION_CLAIMS = [
-    pytest.param("The suite took _3h_", id="italic-at-line-end"),
-    pytest.param("The suite took __3h__", id="strong-underscore"),
-    pytest.param("The suite took _3h_.", id="italic-before-period"),
-    pytest.param("The suite took _3 hours_ in all.", id="italic-spaced-unit"),
-    pytest.param("The suite took ___2.5h___ in all.", id="triple-underscore-decimal"),
-    pytest.param("The suite took *_41m_* in all.", id="italic-inside-star"),
-    pytest.param("The suite took (_3h_) in all.", id="italic-in-paren"),
-    pytest.param("See [_3h_](docs/run.md) for the run.", id="italic-link-label"),
-    pytest.param("The suite took _3h in all.", id="leading-underscore-only"),
-    pytest.param("The suite took 3h_ in all.", id="trailing-underscore-only"),
-    pytest.param("The suite took _3 Hours_ in all.", id="italic-capitalised-unit"),
-]
-EMPHASISED_DURATION_NON_CLAIMS = [
-    pytest.param("Set retry_3h_window to two.", id="identifier-inner"),
-    pytest.param("Call foo_3h now.", id="identifier-suffix"),
-    pytest.param("Call _3h_window now.", id="identifier-leading-underscore"),
-    pytest.param("Call 3h_window now.", id="identifier-duration-first"),
-    pytest.param("Set v1_3h now.", id="identifier-digit-before"),
-]
-
-
-def _run_body_from_text(tmp_path: Path, body: str) -> tuple[subprocess.CompletedProcess[str], dict]:
-    text = _claude_approve_with(body)
-    _assert_not_quoted_input(text)
-    review = tmp_path / "return.md"
-    review.write_text(text, encoding="utf-8")
-    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
-    return proc, json.loads(proc.stdout)
-
-
-@pytest.mark.parametrize("body", EMPHASISED_DURATION_CLAIMS)
-def test_from_text_refuses_an_emphasised_duration_without_an_interval(tmp_path: Path, body):
-    proc, result = _run_body_from_text(tmp_path, body)
-    assert result["status"] == "failure", (
-        f"a duration in emphasis underscores is a timing claim: {result['reason']}"
-    )
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
-
-
-@pytest.mark.parametrize("body", EMPHASISED_DURATION_NON_CLAIMS)
-def test_from_text_accepts_a_duration_shaped_part_of_an_identifier(tmp_path: Path, body):
-    proc, result = _run_body_from_text(tmp_path, body)
-    assert result["status"] == "success", (
-        f"a duration-shaped part of an identifier is not a timing claim: {result['reason']}"
-    )
-    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
-
-
-# Only a path's first component can be a claim. The path-token pass splits a
-# token at brackets, so a bracketed later component (`docs/(3h)/x.md`) used to
-# stay visible on its own; the whole recognised path is now read first and its
-# later components blanked. Text in front of a bracket in the first component
-# stays as before (`took(3h)/run.md`), and a file:line reference keeps working.
-LATER_COMPONENT_REFERENCES = [
-    pytest.param("It reads (docs/_3h_/x.md) first.", id="paren-around-path-italic-later"),
-    pytest.param("It reads [a/3h/b.md] first.", id="bracket-around-path"),
-    pytest.param("It reads docs/(3h)/x.md first.", id="paren-later"),
-    pytest.param("It reads docs/(3h)/x.md.", id="paren-later-before-period"),
-    pytest.param("It uses a (docs/3h/x.md)-style layout.", id="paren-path-glued-to-a-word"),
-    pytest.param("It reads docs/(_3h_)/x.md first.", id="paren-italic-later"),
-    pytest.param("It reads docs/[_3h_]/x.md first.", id="bracket-italic-later"),
-    pytest.param("It reads docs/[3h]/x.md first.", id="bracket-later"),
-    pytest.param("It reads docs/_(3h)_/x.md first.", id="italic-paren-later"),
-    pytest.param("It reads docs/a/(3h)/x.md first.", id="paren-third-component"),
-    pytest.param("It reads docs/(_3h_).md first.", id="paren-italic-file-name"),
-    pytest.param("It reads docs/(3h)/x.md:12 first.", id="paren-later-file-line"),
-    pytest.param("It reads docs/a.md,b.py:12d first.", id="list-entry-file-line"),
-    pytest.param("It reads ./docs/3h:12 first.", id="extensionless-name-then-line"),
-    pytest.param("It reads docs/3h.md,12 first.", id="file-name-then-comma-number"),
-    pytest.param("It reads docs/3h.md:x first.", id="file-name-then-colon-word"),
-]
-LATER_COMPONENT_CLAIMS = [
-    pytest.param("It waits took(3h)/run.md here.", id="paren-in-first-component"),
-    pytest.param("It waits took[3h]/run.md here.", id="bracket-in-first-component"),
-    pytest.param("It waited 3h(docs/x.md) here.", id="duration-before-paren-path"),
-    pytest.param("It waited 3h[docs/x.md] here.", id="duration-before-bracket-path"),
-    pytest.param("It waits docs/x.md,(3h)/y.md here.", id="duration-first-list-entry"),
-    pytest.param("It ran docs/(x)/y.md:3 days", id="file-line-then-unit-word"),
-    pytest.param("It waited )3h/a.py here.", id="stray-close-paren-before-duration"),
-    pytest.param("It waited ]3h/a.py here.", id="stray-close-bracket-before-duration"),
-]
-
-
-@pytest.mark.parametrize("body", LATER_COMPONENT_REFERENCES)
-def test_from_text_accepts_a_duration_later_component_inside_brackets(tmp_path: Path, body):
-    proc, result = _run_body_from_text(tmp_path, body)
-    assert result["status"] == "success", (
-        f"a later path component is never a claim, bracketed or not: {result['reason']}"
-    )
-    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
-
-
-@pytest.mark.parametrize("body", LATER_COMPONENT_CLAIMS)
-def test_from_text_refuses_a_first_component_or_glued_duration_beside_a_bracketed_path(
-    tmp_path: Path, body
-):
-    proc, result = _run_body_from_text(tmp_path, body)
-    assert result["status"] == "failure", (
-        f"a duration before the path's later components is still a claim: {result['reason']}"
-    )
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
-
-
-# The shield for later components blanks only a recognised path's later
-# components, from its first `/` to its end. It never blanks the first
-# component or text in front of it, whatever bracket sits before the `/`; a
-# closer with no opener ends the path, and what follows it is read again; an
-# unpaired opener ends the path before it, so the opener and what follows it
-# stay visible. Every text here refuses: the `3h` is outside any recognised
-# path's later components.
-SHIELD_KEEPS_CLAIMS = [
-    pytest.param("It took note(3h/docs/a/b.md here.", id="unmatched-paren-before-duration"),
-    pytest.param("It waited note[3h/run.md here.", id="unmatched-bracket-before-duration"),
-    pytest.param("It ran x)3h/docs/a/b.md here.", id="preceding-close-paren"),
-    pytest.param("It waited note]3h/run.md here.", id="preceding-close-bracket"),
-    pytest.param("A note[_3h_/docs/x/y.md here.", id="prefix-then-bracket-italic-duration"),
-    pytest.param("A note(**3h**/docs/x/y.md here.", id="prefix-then-paren-bold-duration"),
-    pytest.param("A note({3h}/docs/x/y.md here.", id="prefix-then-paren-brace-duration"),
-    pytest.param("It read docs/a.md)3h/b.md here.", id="duration-after-a-path-and-closer"),
-    pytest.param("It read (docs/a.md)3h/b.md here.", id="duration-after-a-paren-wrapped-path"),
-    pytest.param("It read [docs/a.md]3h/b.md here.", id="duration-after-a-bracket-wrapped-path"),
-    pytest.param("It read docs/(a]3h/b.md here.", id="mismatched-closer-ends-the-path"),
-    pytest.param("It read ./docs/(3h here.", id="unpaired-opener-and-what-follows"),
-    pytest.param("It read ./docs/(3h/(a here.", id="first-of-two-unpaired-openers"),
-    pytest.param("It read docs/(a/[3h]/x.md here.", id="unpaired-opener-around-a-pair"),
-    pytest.param("It read ./a)x/3h here.", id="next-path-read-from-the-closer"),
-    pytest.param(
-        "It read docs/a.md)./x/(a)3h/b here.", id="next-path-text-starts-at-the-closer"
-    ),
-    pytest.param("It read (docs/a.md)3h/b.md) here.", id="duration-between-two-closers"),
-    pytest.param("It read x/3h)y/b.md here.", id="unrecognised-path-before-a-closer"),
-    pytest.param("It read ./docs/([3h)/x) here.", id="crossed-brackets-end-the-path"),
-]
-# A path after a closer is still recognised and shielded, and only the path
-# that runs to the end of the piece keeps its file name for a `:line`.
-SHIELD_BLANKS_LATER_COMPONENTS = [
-    pytest.param("It read docs/a.md)x/(3h)/b.md here.", id="next-path-later-component"),
-    pytest.param("It read ./docs/3h)x/b.md:12 here.", id="file-line-name-only-on-the-last-path"),
-    pytest.param("It reads /docs/(a)3h/x.md first.", id="absolute-path-pair-then-duration"),
-    pytest.param(
-        "It reads docs/a.md,docs/(3h)/x.md first.", id="bracketed-later-component-in-a-list-piece"
-    ),
-]
-
-
-# An opener left unpaired after the `/` ends the shielded path before it, so
-# these tokens reach the path-token pass whole. That pass still reads the first
-# component with every formatting wrapper stripped from both sides, so the
-# duration stays a claim. A `?` in front of a file:line path hides it from the
-# shield's path test in the same way, and the file:line pass reads its first
-# component with the wrappers stripped too.
-SHIELD_KEEPS_CLAIMS += [
-    pytest.param("It waited **3h**/(a.py here.", id="bold-first-component-unpaired-opener"),
-    pytest.param("It waited `3h`/(a.py here.", id="backtick-first-component-unpaired-opener"),
-    pytest.param('It waited "3h"/(a.py here.', id="double-quote-first-component-unpaired-opener"),
-    pytest.param("It waited '3h'/(a.py here.", id="single-quote-first-component-unpaired-opener"),
-    pytest.param("It waited _3h_/(a.py here.", id="underscore-first-component-unpaired-opener"),
-    pytest.param("It waited ~~3h~~/(a.py here.", id="strikethrough-first-component-unpaired-opener"),
-    pytest.param("It waited {3h}/(a.py here.", id="brace-first-component-unpaired-opener"),
-    pytest.param("It waited <3h>/(a.py here.", id="angle-first-component-unpaired-opener"),
-    pytest.param("It waited 3h{/(a.py here.", id="open-brace-after-duration-unpaired-opener"),
-    pytest.param("It waited 3h</(a.py here.", id="open-angle-after-duration-unpaired-opener"),
-    pytest.param("It waited x?3h_/a.py:12 here.", id="query-mark-before-file-line-duration"),
-]
-
-
-@pytest.mark.parametrize("body", SHIELD_KEEPS_CLAIMS)
-def test_from_text_refuses_a_duration_the_shield_cannot_place_in_later_components(
-    tmp_path: Path, body
-):
-    proc, result = _run_body_from_text(tmp_path, body)
-    assert result["status"] == "failure", (
-        f"a duration outside a recognised path's later components is a claim: "
-        f"{result['reason']}"
-    )
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
-
-
-@pytest.mark.parametrize("body", SHIELD_BLANKS_LATER_COMPONENTS)
-def test_from_text_accepts_a_duration_in_a_later_component_after_a_closer(
-    tmp_path: Path, body
-):
-    proc, result = _run_body_from_text(tmp_path, body)
-    assert result["status"] == "success", (
-        f"a later path component is never a claim: {result['reason']}"
-    )
-    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
-
-
-# A closer that does not pair with the open bracket (`(` then `]`) ends the
-# path, and the scan for the next path starts at that closer, not at the
-# opener before it. Text in front of the closer is not part of the next path,
-# so an absolute prefix after the opener (`(/`, `(./`) cannot make it a path
-# and blank a duration that follows the closer.
-#
-# Level one: the shield itself, as `(piece, line_number, shield)`. Each piece
-# keeps its trailing `3h` visible; reading the next path from the opener
-# instead would blank it.
-SHIELD_KEEPS_A_DURATION_AFTER_A_MISMATCHED_CLOSER = [
-    pytest.param("/(/]/3h", False, " (/]/3h", id="rooted-paren-bracket"),
-    pytest.param("3h/(/]/3h", False, "3h/(/]/3h", id="duration-first-paren-bracket"),
-    pytest.param("/[/)/3h", False, " [/)/3h", id="rooted-bracket-paren"),
-    pytest.param("/3h(/]/3h", False, "   (/]/3h", id="rooted-duration-then-paren-bracket"),
-    pytest.param("docs/(./x]a/3h", False, "docs/(./x]a/3h", id="dot-slash-after-the-opener"),
-    pytest.param("docs/(./x]a/x/3h", False, "docs/(./x]a/x/3h", id="duration-two-components-on"),
-    pytest.param("/(/]/3h", True, " (/]/3h", id="rooted-paren-bracket-before-a-line-number"),
-    pytest.param(
-        "docs/(./x]a/3h", True, "docs/(./x]a/3h", id="dot-slash-after-the-opener-before-a-line"
-    ),
-]
-
-
-@pytest.mark.parametrize(
-    ("piece", "line_number", "shield"), SHIELD_KEEPS_A_DURATION_AFTER_A_MISMATCHED_CLOSER
-)
-def test_shield_reads_the_next_path_from_a_mismatched_closer_not_the_opener(
-    piece: str, line_number: bool, shield: str
-):
-    assert review_phase._shield_later_components(piece, line_number) == shield
-
-
-# Level two, through the review text: each pair is a mismatched-closer piece
-# with a trailing duration that refuses, and the same text without the
-# duration, which approves. The duration follows the first component of the
-# path that starts at the closer (`a/3h`), so it is a claim; the text in front
-# of the closer starts like a path (`(./`, `(/`, `(~/`), which is the only
-# thing that could hide it.
-MISMATCHED_CLOSER_DURATION_PAIRS = [
-    pytest.param(
-        "It read docs/(./x]a/3h here.", "It read docs/(./x]a here.", id="dot-slash-paren-bracket"
-    ),
-    pytest.param(
-        "It read docs/(/x]a/3h here.", "It read docs/(/x]a here.", id="slash-paren-bracket"
-    ),
-    pytest.param(
-        "It read docs/(~/x]a/3h here.", "It read docs/(~/x]a here.", id="tilde-paren-bracket"
-    ),
-    pytest.param(
-        "It read docs/(https://x]a/3h here.",
-        "It read docs/(https://x]a here.",
-        id="uri-paren-bracket",
-    ),
-    pytest.param(
-        "It read docs/[./x)a/3h here.", "It read docs/[./x)a here.", id="dot-slash-bracket-paren"
-    ),
-    pytest.param(
-        "It read x/(/a]a/3h here.", "It read x/(/a]a here.", id="rooted-after-a-component"
-    ),
-    pytest.param(
-        "It read docs/(./x]a/3h:12 here.",
-        "It read docs/(./x]a:12 here.",
-        id="before-a-line-number",
-    ),
-]
-
-
-@pytest.mark.parametrize(("with_duration", "without_duration"), MISMATCHED_CLOSER_DURATION_PAIRS)
-def test_from_text_refuses_a_duration_after_a_mismatched_closer_and_approves_without_it(
-    tmp_path: Path, with_duration: str, without_duration: str
-):
-    proc, result = _run_body_from_text(tmp_path, with_duration)
-    assert result["status"] == "failure", (
-        f"a duration after a closer that pairs with no opener is a claim: {result['reason']}"
-    )
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
-    proc, result = _run_body_from_text(tmp_path, without_duration)
-    assert result["status"] == "success", (
-        f"the same text without the duration approves: {result['reason']}"
-    )
-    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
-
-
-# The closer can also be followed by `/` at once (`]/3h/run.md`). That text is
-# itself a rooted path whose later components are `3h` and `run.md`, so the
-# duration is a later component of a recognised path and approves, with or
-# without the opener's text in front of it.
-SHIELD_BLANKS_A_ROOTED_PATH_AFTER_A_MISMATCHED_CLOSER = [
-    pytest.param("see docs/(a]/3h/run.md", id="rooted-path-after-the-closer"),
-    pytest.param("It reads docs/(x]/3h/b.md first.", id="token-glued-rooted-path-after-the-closer"),
-]
-
-
-@pytest.mark.parametrize("body", SHIELD_BLANKS_A_ROOTED_PATH_AFTER_A_MISMATCHED_CLOSER)
-def test_from_text_accepts_a_duration_in_a_rooted_path_after_a_mismatched_closer(
-    tmp_path: Path, body: str
-):
-    proc, result = _run_body_from_text(tmp_path, body)
-    assert result["status"] == "success", (
-        f"a later component of the path that starts at the closer is not a claim: "
-        f"{result['reason']}"
-    )
-    assert proc.returncode == review_phase.EXIT_SUCCESS, proc.stderr
 
 
 # --- prose after a bulleted clean marker refuses ----------------------------
@@ -1703,86 +1476,6 @@ def test_prose_before_a_bulleted_clean_marker_refuses():
         review_phase.parse_claude_fresh(text)
 
 
-# --- (a) one normalised reference form: wrappers x reference kinds x suffixes -
-
-# Opening and closing text around a reference.
-REFERENCE_WRAPPINGS = {
-    "plain": ("", ""),
-    "star": ("*", "*"),
-    "strong": ("**", "**"),
-    "underscore": ("_", "_"),
-    "backtick": ("`", "`"),
-    "angle": ("<", ">"),
-}
-# Each kind holds a duration-shaped LATER component, so only reading it as a
-# reference keeps it from being a claim.
-REFERENCE_KINDS = {
-    "dot-slash": "./docs/3d/notes",
-    "dot-dot-slash": "../docs/3d/notes",
-    "slash": "/docs/3d/notes",
-    "tilde-slash": "~/3d",
-    "uri-scheme": "https://example.com/3d/rule",
-    "relative-extension": "docs/3d/x.md",
-}
-# The same kinds led by a duration-shaped FIRST component, plus a duration
-# glued to a query or fragment (`41m?x/y.md`).
-DURATION_FIRST_KINDS = {
-    "dot-slash": "3d/./docs/notes",
-    "dot-dot-slash": "3d/../docs/notes",
-    "slash": "3d//docs/notes",
-    "tilde-slash": "3d/~/notes",
-    "uri-scheme": "3d/https://example.com/rule",
-    "relative-extension": "3d/docs/x.md",
-    "query-first-component": "41m?x/y.md",
-    "fragment-first-component": "41m#x/y.md",
-}
-# (id, text inside the wrapper, text after the wrapper).
-REFERENCE_SUFFIXES = [("none", "", "")]
-for _suffix_id, _suffix in (
-    ("query", "?q=1"),
-    ("fragment", "#frag"),
-    ("period", "."),
-    ("comma", ","),
-    ("question", "?"),
-    ("exclamation", "!"),
-    ("paren", ")"),
-):
-    REFERENCE_SUFFIXES.append((f"{_suffix_id}-inside", _suffix, ""))
-    REFERENCE_SUFFIXES.append((f"{_suffix_id}-outside", "", _suffix))
-
-
-def _reference_table(kinds: dict) -> list:
-    return [
-        pytest.param(
-            f"{opening}{reference}{inside}{closing}{outside}",
-            id=f"{wrapping}-{kind}-{suffix}",
-        )
-        for wrapping, (opening, closing) in REFERENCE_WRAPPINGS.items()
-        for kind, reference in kinds.items()
-        for suffix, inside, outside in REFERENCE_SUFFIXES
-    ]
-
-
-@pytest.mark.parametrize("reference", _reference_table(REFERENCE_KINDS))
-def test_wrapped_and_suffixed_reference_is_not_a_claim(reference):
-    text = f"Only touches {reference} and nothing else."
-    assert review_phase._has_duration_claim(text) is False, (
-        "an explicit path, a URI or a relative path with an extension is a "
-        "reference however it is wrapped, suffixed or punctuated"
-    )
-
-
-@pytest.mark.parametrize("reference", _reference_table(DURATION_FIRST_KINDS))
-def test_wrapped_and_suffixed_reference_with_a_duration_first_component_is_a_claim(
-    reference,
-):
-    text = f"The caller waits {reference} before retrying."
-    assert review_phase._has_duration_claim(text) is True, (
-        "a duration-shaped first component stays a claim however the token is "
-        "wrapped, suffixed or punctuated"
-    )
-
-
 # --- (b) prose under a findings section -------------------------------------
 
 FINDING = "- `a.py:1` — first issue"
@@ -1857,21 +1550,11 @@ def _sol_probe_return(body: str, issues: str = "- none") -> str:
         "### Issues\n"
         f"{issues}\n\n"
         "### Evidence\n"
-        "- Ran: checks passed\n"
+        "- Ran: checks passed\n\n"
+        "INTERVAL: none\n"
     )
 
 
-SOL_REFERENCE_PROBES = {
-    "bare-url": "See https://example.com/3d/rule for the details.",
-    "autolink": "See <https://example.com/3d/rule> for the details.",
-    "strong-extension-path": "Only touches **docs/3d/x.md** and nothing else.",
-    "question-path": "Only touches docs/3d/x.md?",
-    "exclamation-path": "Only touches docs/3d/x.md!",
-    "strong-explicit-relative-no-extension": "Only touches **./docs/3d/notes** and nothing else.",
-    "strong-explicit-absolute-no-extension": "Only touches **/docs/3d/notes** and nothing else.",
-    "relative-fragment": "Only touches docs/3d/x.md#anchor.",
-    "relative-query": "Only touches docs/3d/x.md?view=all.",
-}
 SOL_ISSUES_PROBES_REFUSED = {
     "clean-then-foreign": "- none\nA real issue is described in prose.",
     "real-then-foreign": "- `a.py:1` — first issue\nA second issue is described in prose.",
@@ -1880,15 +1563,6 @@ SOL_ISSUES_PROBES_REFUSED = {
 SOL_ISSUES_PROBES_ACCEPTED = {
     "clean-then-indented": "- None blocking.\n  Checked every call site.",
 }
-
-
-@pytest.mark.parametrize(
-    "body", list(SOL_REFERENCE_PROBES.values()), ids=list(SOL_REFERENCE_PROBES)
-)
-def test_run_phase_accepts_the_second_family_reference_probes(body):
-    result = review_phase.run_phase(_envelope("claude-fresh", _sol_probe_return(body)))
-    assert result["status"] == "success", result["reason"]
-    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
 
 
 @pytest.mark.parametrize(
@@ -1940,82 +1614,17 @@ def test_run_phase_accepts_bullets_continuations_and_exact_clean_markers(issues,
     assert [f["description"] for f in findings] == descriptions
 
 
-def test_run_phase_accepts_a_wrapped_query_reference_and_refuses_its_duration_first_form():
-    accepted = review_phase.run_phase(
-        _envelope(
-            "claude-fresh",
-            _claude_approve_with("Only touches **./docs/3d/notes?q=1** and nothing else."),
-        )
-    )
-    assert accepted["status"] == "success", accepted["reason"]
-    refused = review_phase.run_phase(
-        _envelope(
-            "claude-fresh",
-            _claude_approve_with("The caller waits **41m?x/y.md** before retrying."),
-        )
-    )
-    assert refused["status"] == "failure"
-    assert "review_interval_endpoints_missing" in refused["reason"]
-
-
-# --- (d) the reference scan is linear in the length of a long token ----------
-
-REDOS_LIMIT_SECONDS = 1.0
-
-
-def _base64_like(length: int) -> str:
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    return "".join(alphabet[(index * 7 + index // 64) % 64] for index in range(length))
-
-
-def _minified_js_like(length: int) -> str:
-    chunk = "function a(b,c){return b.c+d.e(f,g);}var h=i.j.k(l);if(m){n.o=p/q}"
-    return (chunk * (length // len(chunk) + 1))[:length]
-
-
-LONG_TOKENS = {
-    "dotless": lambda length: "x" * length,
-    "dotless-then-slashes": lambda length: "x" * length + "/" * 50,
-    "base64-like": _base64_like,
-    "minified-js-like": _minified_js_like,
-    "unclosed-link-targets": lambda length: "](" * (length // 2),
-    "dotted-run": lambda length: "a." * (length // 2),
-    "closer-separated-paths": lambda length: ("a/b.md)" * length)[:length],
-    "unpaired-openers": lambda length: ("a/(" * length)[:length],
-}
-REFERENCE_SCANS = {
-    "has-duration-claim": lambda text: review_phase._has_duration_claim(text),
-    "blank-references": lambda text: review_phase._blank_references(text),
-}
-
-
-def _one_call_seconds(scan, text: str) -> float:
-    start = time.perf_counter()
-    scan(text)
-    return time.perf_counter() - start
-
-
-@pytest.mark.parametrize("scan", list(REFERENCE_SCANS))
-@pytest.mark.parametrize("token", list(LONG_TOKENS))
-def test_reference_scan_finishes_a_4000_character_token_within_a_second(scan, token):
-    text = LONG_TOKENS[token](4000)
-    elapsed = _one_call_seconds(REFERENCE_SCANS[scan], text)
-    assert elapsed <= REDOS_LIMIT_SECONDS, (
-        f"{scan} took {elapsed:.2f}s on a {len(text)}-character {token} token"
-    )
-
-
-# The growth tests time spans of several milliseconds (a 4000-character token
-# takes well under one, where runner noise alone can triple a timing). The
-# reference scan gets there with long inputs. A pattern that was once
-# quadratic cannot be fed an input that long to prove the old form, so the
-# pattern tests keep their inputs short and repeat the call until one timed
-# span lasts GROWTH_WINDOW_SECONDS. Each size is timed several times and the
-# fastest per-call time is kept, since noise only ever adds time. The longer
-# input is four times the shorter, so a linear scan grows about four times and
-# a quadratic one about sixteen; the bound of eight sits between them.
-GROWTH_SHORT_LENGTH = 40_000
-GROWTH_LONG_LENGTH = 4 * GROWTH_SHORT_LENGTH
+# --- the growth tests share one timing helper --------------------------------
+#
+# The growth tests below time spans of a few milliseconds or less, where runner
+# noise alone can triple a timing. A pattern that was once quadratic or cubic
+# cannot be fed an input long enough to take 5 ms in one call (the old heading
+# form took seconds on 2,000 spaces), so the tests keep their inputs short and
+# repeat the call until one timed span lasts GROWTH_WINDOW_SECONDS. Each size is
+# timed several times and the fastest per-call time is kept, since noise only
+# ever adds time. The longer input is four times the shorter, so a linear scan
+# grows about four times and a quadratic one about sixteen; the bound of eight
+# sits between them.
 GROWTH_REPETITIONS = 9
 GROWTH_RATIO_BOUND = 8
 GROWTH_WINDOW_SECONDS = 0.005
@@ -2034,15 +1643,15 @@ def _fastest_call_seconds(scan, text: str, clock=time.perf_counter) -> float:
     A span repeats the call until it lasts GROWTH_WINDOW_SECONDS (a single call
     when one already does). The spans that find that call count are discarded,
     since they are shorter than the window and so the noisiest samples. A first
-    call over the limit ends it, so a pattern that is far too slow is not timed
-    again. `clock` is a seam for the helper's own test.
+    call over HEADING_LIMIT_SECONDS ends it, so a pattern that is far too slow
+    is not timed again. `clock` is a seam for the helper's own test.
     """
     calls = 1
     span = _span_seconds(scan, text, calls, clock)
     while span < GROWTH_WINDOW_SECONDS:
         calls *= 2
         span = _span_seconds(scan, text, calls, clock)
-    if calls == 1 and span > REDOS_LIMIT_SECONDS:
+    if calls == 1 and span > HEADING_LIMIT_SECONDS:
         return span
     best = span / calls
     for _ in range(GROWTH_REPETITIONS - 1):
@@ -2079,95 +1688,9 @@ def test_fastest_call_ignores_the_spans_shorter_than_the_window():
 
 
 def test_fastest_call_returns_a_first_call_over_the_limit_without_timing_again():
-    clock = _VirtualClock(lambda index: 2 * REDOS_LIMIT_SECONDS)
-    assert _fastest_call_seconds(clock.scan, "", clock) == 2 * REDOS_LIMIT_SECONDS
+    clock = _VirtualClock(lambda index: 2 * HEADING_LIMIT_SECONDS)
+    assert _fastest_call_seconds(clock.scan, "", clock) == 2 * HEADING_LIMIT_SECONDS
     assert clock.calls == 1
-
-
-@pytest.mark.parametrize("scan", list(REFERENCE_SCANS))
-@pytest.mark.parametrize("token", list(LONG_TOKENS))
-def test_reference_scan_time_grows_linearly_with_token_length(scan, token):
-    shorter = _fastest_call_seconds(
-        REFERENCE_SCANS[scan], LONG_TOKENS[token](GROWTH_SHORT_LENGTH)
-    )
-    assert shorter <= REDOS_LIMIT_SECONDS, (
-        f"{scan} took {shorter:.2f}s on a {GROWTH_SHORT_LENGTH}-character {token} token"
-    )
-    longer = _fastest_call_seconds(
-        REFERENCE_SCANS[scan], LONG_TOKENS[token](GROWTH_LONG_LENGTH)
-    )
-    assert longer <= GROWTH_RATIO_BOUND * shorter, (
-        f"{scan} on a {token} token: quadrupling {GROWTH_SHORT_LENGTH} to "
-        f"{GROWTH_LONG_LENGTH} characters took {shorter * 1e3:.3f}ms to "
-        f"{longer * 1e3:.3f}ms, more than {GROWTH_RATIO_BOUND} times"
-    )
-
-
-def test_run_phase_accepts_a_review_holding_a_long_hash_quickly():
-    body = "Checked the artifact " + "x" * 4000 + "/" * 50 + " against its digest."
-    start = time.perf_counter()
-    result = review_phase.run_phase(_envelope("claude-fresh", _claude_approve_with(body)))
-    elapsed = time.perf_counter() - start
-    assert result["status"] == "success", result["reason"]
-    assert elapsed <= REDOS_LIMIT_SECONDS, f"run_phase took {elapsed:.2f}s"
-
-
-def test_bound_exemption_finishes_a_100kb_line_within_a_second():
-    chunk = "120 second timeout "
-    line = chunk * (100_000 // len(chunk) + 1)
-    assert len(line) >= 100_000
-    start = time.perf_counter()
-    claimed = review_phase._has_duration_claim(line)
-    elapsed = time.perf_counter() - start
-    assert claimed is False, "a 100 KB line of configured bounds is not a claim"
-    assert elapsed <= REDOS_LIMIT_SECONDS, (
-        f"_has_duration_claim took {elapsed:.2f}s on a {len(line)}-character bound line"
-    )
-    mixed = line[:100_000] + " took 120 seconds before the timeout"
-    start = time.perf_counter()
-    claimed = review_phase._has_duration_claim(mixed)
-    elapsed = time.perf_counter() - start
-    assert claimed is True, "a measured interval after 100 KB of bounds is still a claim"
-    assert elapsed <= REDOS_LIMIT_SECONDS, (
-        f"_has_duration_claim took {elapsed:.2f}s on a 100KB near-miss line"
-    )
-
-
-# --- (e) a Markdown link target is a reference; its label is not --------------
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("See [label](docs/x.md) for the rule.", id="docs-target"),
-        pytest.param("See [x](#3d) for the rule.", id="hash-target"),
-        pytest.param("See [label](docs/3d) for the rule.", id="extensionless-target"),
-        pytest.param("See [label](3d/x.md) for the rule.", id="duration-first-target"),
-        pytest.param("See [label](docs/x.md) and §3d for the rule.", id="docs-target-beside-section"),
-        pytest.param("See [x](#3d) and docs/3d/x.md for the rule.", id="hash-target-beside-path"),
-    ],
-)
-def test_link_target_as_a_pure_reference_is_not_a_claim(text):
-    assert review_phase._has_duration_claim(text) is False, (
-        "a Markdown link target is a reference, never a timing claim"
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        pytest.param("See [label](docs/x.md); the caller waits 3d.", id="docs-target"),
-        pytest.param("See [x](#3d); the caller waits 3d.", id="hash-target"),
-        pytest.param("See [label](docs/3d); it took 2h.", id="extensionless-target"),
-        pytest.param("See [took 3d](#x) for the rule.", id="claim-in-the-label"),
-        pytest.param("See [x](#3d for the rule.", id="unclosed-target-stays-visible"),
-    ],
-)
-def test_link_target_beside_a_real_claim_is_a_claim(text):
-    assert review_phase._has_duration_claim(text) is True, (
-        "a real claim beside a link target, in its label, or after an "
-        "unclosed target stays a claim"
-    )
 
 
 # --- the heading pattern stays linear and keeps its grammar ------------------
@@ -2392,440 +1915,26 @@ def test_verdict_forms_keep_main_words(name, line, word):
     assert (None if matched is None else matched.group(1)) == word
 
 
-# --- quoted duration inputs in Evidence and Minor notes ----------------------
-#
-# A review of the duration scanner has to quote its probe inputs. A
-# duration-shaped token inside a backtick code span (inline or fenced) in a
-# `### Evidence` or `### Minor notes` section is a quoted input, not the
-# reviewer's own timing claim, so it needs no INTERVAL record. Prose stays in
-# scope everywhere, and so do Issues, every heading line, any other heading
-# form, and any markup that does not close where it opens.
-
-
-def _quoted_approve(evidence: str, issues: str = "- none", minor: str | None = None) -> str:
-    parts = [
-        "## Verdict: APPROVE",
-        "",
-        "Checked the duration scanner.",
-        "",
-        "### Issues",
-        issues,
-        "",
-    ]
-    if minor is not None:
-        parts += ["### Minor notes", minor, ""]
-    parts += ["### Evidence", evidence, ""]
-    return "\n".join(parts)
-
-
-def _assert_quoted_parses(text: str, backend: str = "claude-fresh") -> None:
-    result = review_phase.run_phase(_envelope(backend, text))
-    assert result["status"] == "success", result["reason"]
-    assert "intervals" not in result
-
-
-def _assert_claim_refused(text: str, backend: str = "claude-fresh") -> None:
-    result = review_phase.run_phase(_envelope(backend, text))
-    assert result["status"] == "failure", "a timing claim parsed without an INTERVAL record"
-    assert "review_interval_endpoints_missing" in result["reason"], result["reason"]
-
-
-QUOTED_DURATION_INPUTS = {
-    "evidence-inline": _quoted_approve("- Probe: `waits 3d/foo.py` is refused as a claim"),
-    "evidence-inline-spaced-unit": _quoted_approve("- Probe: `ran for 120 seconds` is refused"),
-    "evidence-double-backtick-span": _quoted_approve("- Probe: ``a ` then 41m`` is refused"),
-    "evidence-backtick-fence": _quoted_approve(
-        "- Probes:\n```\nwaits 3d/foo.py\nit took 2h\n```"
-    ),
-    "evidence-tilde-fence": _quoted_approve("- Probes:\n~~~text\nit took 2h\n~~~"),
-    "evidence-longer-closing-fence": _quoted_approve("```\nit took 2h\n`````"),
-    "minor-notes-inline": _quoted_approve(
-        "- Ran: checks passed", minor="- the probe `41m?x/y.md` reads as a claim"
-    ),
-    "minor-notes-indented-fence": _quoted_approve(
-        "- Ran: checks passed", minor="- the probes:\n  ```\n  it took 2h\n  ```"
-    ),
-    "bold-evidence-heading": _quoted_approve("- Probe: `it took 2h`").replace(
-        "### Evidence", "### **Evidence**"
-    ),
-    "indented-evidence-heading": _quoted_approve("- Probe: `it took 2h`").replace(
-        "### Evidence", "   ###  Evidence"
-    ),
-    "closed-evidence-heading": _quoted_approve("- Probe: `it took 2h`").replace(
-        "### Evidence", "### Evidence ###"
-    ),
-}
-
-
-@pytest.mark.parametrize(
-    "text", list(QUOTED_DURATION_INPUTS.values()), ids=list(QUOTED_DURATION_INPUTS)
-)
-def test_quoted_duration_input_in_evidence_or_minor_notes_parses_without_an_interval(text):
-    _assert_quoted_parses(text)
-
-
-def test_same_token_unquoted_in_evidence_still_refuses():
-    _assert_claim_refused(_quoted_approve("- Probe: waits 3d/foo.py is refused as a claim"))
-
-
-def test_quoted_duration_in_issues_still_refuses():
-    _assert_claim_refused(
-        "## Verdict: REQUEST CHANGES\n\n"
-        "### Issues\n- `a.py:3` — the probe `waits 3d` is accepted\n\n"
-        "### Evidence\n- Ran: checks passed\n"
-    )
-
-
-@pytest.mark.parametrize(
-    "evidence",
-    [
-        pytest.param("- Ran: the suite finished in 3 minutes", id="prose"),
-        pytest.param(
-            "- Probe `waits 3d` passed; the suite finished in 3 minutes", id="beside-a-span"
-        ),
-        pytest.param("- Probe `waits 3d` passed; the caller waits 3d", id="same-token-both-sides"),
-    ],
-)
-def test_unquoted_timing_claim_in_evidence_still_refuses(evidence):
-    _assert_claim_refused(_quoted_approve(evidence))
-
-
-QUOTED_VERDICT_LINES = {
-    "grok-verdict-line": (
-        "grok-notools",
-        "## FINDINGS\n- none\n\n## VERDICT\ncleared — the probe `waits 3d` passed\n",
-    ),
-    "headless-label-after-evidence": (
-        "claude-fresh",
-        "### Evidence\n- Ran: `checks`\nVERDICT: APPROVE — the probe `waits 3d` passed\n",
-    ),
-    "claude-heading": (
-        "claude-fresh",
-        "## Verdict: APPROVE `3d`\n\n### Evidence\n- Ran: checks passed\n",
-    ),
-}
-
-
-@pytest.mark.parametrize(
-    ("backend", "text"), list(QUOTED_VERDICT_LINES.values()), ids=list(QUOTED_VERDICT_LINES)
-)
-def test_quoted_duration_on_a_verdict_line_still_refuses(backend, text):
-    _assert_claim_refused(text, backend)
-
-
-MALFORMED_QUOTES_IN_EVIDENCE = {
-    "unclosed-fence": "- Probes:\n```\nit took 2h\n",
-    "unclosed-fence-then-inline-span": "```\n- probe `it took 2h`",
-    "unclosed-fence-before-heading": "```\nit took 2h\n### Notes\n- ok",
-    "unmatched-backtick": "- Probe: `it took 2h and more",
-    "mismatched-run-lengths": "- Probe: ``it took 2h`",
-    "unmatched-run-beside-a-span": "- Probe: `` then `it took 2h`",
-    "span-across-lines": "- Probe: `it took\n  2h` passed",
-    "escaped-backtick": "- Probe: \\`it took 2h\\` passed",
-    "backtick-in-backtick-fence-info": "```x`\nit took 2h\n```",
-    "fence-info-string": "~~~ `2h`\nok\n~~~",
-    "fence-opener-number-joins-first-line": "```text 3\nhours of retries\n```",
-    "comment-heading-inside-fence": "```\n# probe\nit took 2h\n```",
-    "tagged-bullet-in-evidence": "- [BUG] `a.py:3` — the probe `it took 2h` passes",
-    "after-tagged-bullet": "- [BUG] `a.py:3` — wrong\n- probe `it took 2h`",
-}
-
-
-@pytest.mark.parametrize(
-    "evidence",
-    list(MALFORMED_QUOTES_IN_EVIDENCE.values()),
-    ids=list(MALFORMED_QUOTES_IN_EVIDENCE),
-)
-def test_malformed_or_finding_markup_in_evidence_stays_in_scope(evidence):
-    _assert_claim_refused(_quoted_approve(evidence))
-
-
-@pytest.mark.parametrize(
-    "title",
-    ["Minor issues", "Evidence (extra)", "Evidence and timing", "Summary", "Notes"],
-)
-def test_quoted_duration_under_any_other_section_title_still_refuses(title):
-    text = _quoted_approve("- Ran: checks passed", minor="- the probe `it took 2h`").replace(
-        "### Minor notes", f"### {title}"
-    )
-    _assert_claim_refused(text)
-
-
-# Each heading line replaces `### Evidence` or `### Minor notes`, and the
-# section under it quotes a duration-shaped input in a backtick span. Only the
-# level-three hash heading with a space after the hashes is exempt.
-OTHER_HEADING_FORMS = {
-    "level-one-evidence": ("evidence", "# Evidence"),
-    "level-two-evidence": ("evidence", "## Evidence"),
-    "level-four-evidence": ("evidence", "#### Evidence"),
-    "level-six-evidence": ("evidence", "###### Evidence"),
-    "no-separator-evidence": ("evidence", "###Evidence"),
-    "tab-separator-evidence": ("evidence", "###\tEvidence"),
-    "four-space-indented-evidence": ("evidence", "    ### Evidence"),
-    "glued-closing-hash-evidence": ("evidence", "### Evidence#"),
-    "glued-closing-hashes-bold-evidence": ("evidence", "### **Evidence**##"),
-    "level-two-minor-notes": ("minor", "## Minor notes"),
-    "level-four-minor-notes": ("minor", "#### Minor notes"),
-    "no-separator-minor-notes": ("minor", "###Minor notes"),
-    "glued-closing-hash-minor-notes": ("minor", "### Minor notes#"),
-    "bare-minor-notes-label": ("minor", "MINOR NOTES:"),
-    "bold-bare-minor-notes-label": ("minor", "**MINOR NOTES**:"),
-}
-
-
-@pytest.mark.parametrize(
-    ("section", "heading"), list(OTHER_HEADING_FORMS.values()), ids=list(OTHER_HEADING_FORMS)
-)
-def test_quoted_duration_under_another_heading_form_still_refuses(section, heading):
-    if section == "evidence":
-        text = _quoted_approve("- Probe: `it took 2h`").replace("### Evidence", heading)
-    else:
-        text = _quoted_approve("- Ran: checks passed", minor="- the probe `it took 2h`")
-        text = text.replace("### Minor notes", heading)
-    _assert_claim_refused(text)
-
-
-def test_quoted_duration_under_a_bare_evidence_label_still_refuses():
-    # `Evidence:` is not a heading at all, so the line and what follows it stay
-    # in the section above, here the verdict's.
-    _assert_claim_refused(
-        "## Verdict: APPROVE\n\nEvidence:\n- Probe: `it took 2h`\n\n### Issues\n- none\n"
-    )
-
-
-GROK_WITH_EVIDENCE = (
-    "## FINDINGS\n- none\n\n## VERDICT\ncleared — no blocking issues.\n\n### Evidence\n{}\n"
-)
-
-
-def test_grok_return_quoting_a_duration_input_in_evidence_parses_without_an_interval():
-    _assert_quoted_parses(
-        GROK_WITH_EVIDENCE.format("- Probe: `waits 3d/foo.py` is refused as a claim"),
-        "grok-notools",
-    )
-
-
-def test_grok_return_with_the_same_token_unquoted_in_evidence_still_refuses():
-    _assert_claim_refused(
-        GROK_WITH_EVIDENCE.format("- Probe: waits 3d/foo.py is refused as a claim"),
-        "grok-notools",
-    )
-
-
-# Neither adapter finds a verdict here, so the forced Jev fallback decides it.
-JEV_FALLBACK_WITH_EVIDENCE = "Checked the duration scanner.\n\n### Evidence\n{}\n"
-
-
-class _ApprovingJev:
-    calls = 0
-
-    def decide(self, text: str) -> tuple[str, float]:
-        type(self).calls += 1
-        return review_phase.APPROVED, 0.95
-
-
-def _forced_jev_fallback(monkeypatch, evidence: str) -> dict:
-    monkeypatch.setattr(_ApprovingJev, "calls", 0)
-    monkeypatch.setattr(review_phase, "JevClient", _ApprovingJev)
-    envelope = _envelope("claude-fresh", JEV_FALLBACK_WITH_EVIDENCE.format(evidence))
-    envelope["adapters"] = {"jev_fallback": True}
-    result = review_phase.run_phase(envelope)
-    assert _ApprovingJev.calls == 1, "the review did not reach the Jev fallback"
-    return result
-
-
-def test_jev_fallback_quoting_a_duration_input_in_evidence_parses_without_an_interval(
-    monkeypatch,
-):
-    result = _forced_jev_fallback(
-        monkeypatch, "- Probe: `waits 3d/foo.py` is refused as a claim"
-    )
-    assert result["status"] == "success", result["reason"]
-    assert result["verdict_source"] == "jev"
-    assert "intervals" not in result
-
-
-def test_jev_fallback_with_the_same_token_unquoted_in_evidence_still_refuses(monkeypatch):
-    result = _forced_jev_fallback(monkeypatch, "- Probe: waits 3d/foo.py is refused as a claim")
-    assert result["status"] == "failure", "a timing claim parsed without an INTERVAL record"
-    assert "review_interval_endpoints_missing" in result["reason"], result["reason"]
-
-
-QUOTED_INPUT_SCAN_SHAPES = {
-    "many-spans": lambda n: "### Evidence\n- " + "`a` " * n,
-    "many-run-widths": lambda n: "### Evidence\n- "
-    + " ".join("`" * width for width in range(1, int((2 * n) ** 0.5)))
-    + " x",
-    "many-fences": lambda n: "### Evidence\n" + "```\nit took 2h\n```\n" * (n // 4),
-    "unclosed-fences": lambda n: "### Evidence\n" + "```x\n" * (n // 4),
-}
-
-
-QUOTED_SHORT_UNITS = 8000
-QUOTED_LONG_UNITS = 4 * QUOTED_SHORT_UNITS
-
-
-@pytest.mark.parametrize("shape", list(QUOTED_INPUT_SCAN_SHAPES))
-def test_quoted_input_scan_time_grows_linearly(shape):
-    scan = review_phase._has_duration_claim
-    shorter = _fastest_call_seconds(scan, QUOTED_INPUT_SCAN_SHAPES[shape](QUOTED_SHORT_UNITS))
-    assert shorter <= REDOS_LIMIT_SECONDS, (
-        f"the duration scan took {shorter:.2f}s on the {QUOTED_SHORT_UNITS}-unit {shape} review"
-    )
-    longer = _fastest_call_seconds(scan, QUOTED_INPUT_SCAN_SHAPES[shape](QUOTED_LONG_UNITS))
-    assert longer <= REDOS_LIMIT_SECONDS, (
-        f"the duration scan took {longer:.2f}s on the {QUOTED_LONG_UNITS}-unit {shape} review"
-    )
-    assert longer <= GROWTH_RATIO_BOUND * shorter, (
-        f"the duration scan on {shape}: quadrupling {QUOTED_SHORT_UNITS} to "
-        f"{QUOTED_LONG_UNITS} units took {shorter * 1e3:.3f}ms to "
-        f"{longer * 1e3:.3f}ms, more than {GROWTH_RATIO_BOUND} times"
-    )
-
-
-# --- EOR47: quoted duration examples are not claims; refusals name the line --
-
-
-def _eor47_fixture(name: str) -> str:
-    return (FIXTURES / name).read_text(encoding="utf-8")
-
-
-EOR47_APPROVE_FIXTURES = [
-    "pr-35-claude-empirical-r2.output.md",
-    "pr-36-claude-empirical-r1.attempt1.output.md",
-    "pr-36-claude-empirical-r1.output.md",
-]
-
-
-@pytest.mark.parametrize("name", EOR47_APPROVE_FIXTURES)
-def test_copied_approve_review_quoting_duration_examples_parses(name):
-    result = review_phase.run_phase(_envelope("claude-fresh", _eor47_fixture(name)))
-    assert result["status"] == "success", result["reason"]
-    findings = result["artifacts"]["findings.json"]
-    assert findings["verdict"] == "approved"
-    assert "intervals" not in result
-    assert not any(
-        f["severity"] == "error" or f["rule"] == "issue" for f in findings["findings"]
-    )
-
-
-def test_copied_request_changes_review_quoting_duration_examples_parses():
-    result = review_phase.run_phase(
-        _envelope(
-            "claude-fresh",
-            _eor47_fixture("pr-36-claude-empirical-r1.attempt2.output.md"),
-        )
-    )
-    assert result["status"] == "success", result["reason"]
-    findings = result["artifacts"]["findings.json"]
-    assert findings["verdict"] == "changes_requested"
-    assert "intervals" not in result
-    assert any(f["rule"] == "issue" for f in findings["findings"])
-
-
-def test_unquoted_took_41_seconds_is_refused():
-    text = _claude_approve_with("I ran it and it took 41 seconds")
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing: line 4:" in result["reason"]
-    assert "I ran it and it took 41 seconds" in result["reason"]
-
-
-def test_took_quoted_bare_duration_is_still_a_claim():
-    text = _claude_approve_with('The probe took "41 seconds" before returning')
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing: line 4:" in result["reason"]
-    assert 'took "41 seconds"' in result["reason"]
-
-
-def test_quoted_example_phrase_in_summary_parses_without_an_interval():
-    text = _claude_approve_with(
-        'Measured durations such as "ran for 120 seconds" still count as claims.'
-    )
-    _assert_quoted_parses(text)
-
-
-def test_quoted_example_phrase_in_issues_parses_without_an_interval():
-    text = (
-        "## Verdict: REQUEST CHANGES\n\n"
-        '### Issues\n- Probe: "took 41 seconds before the timeout" still claims\n\n'
-        "### Evidence\n- Ran: checks passed\n"
-    )
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "success", result["reason"]
-    assert "intervals" not in result
-
-
-def test_interval_refusal_truncates_the_named_line_to_200_characters():
-    body = "I ran it and it took 41 seconds. " + ("x" * 220)
-    result = review_phase.run_phase(_envelope("claude-fresh", _claude_approve_with(body)))
-    assert result["status"] == "failure"
-    _, _, named = result["reason"].partition("line 4: ")
-    assert len(named) == 200
-    assert named == body[:200]
-
-
-def test_quoted_example_scan_finishes_a_100kb_line_within_a_second():
-    line = ('x "ran for 120 seconds" y ' * 4000)[:100_000]
-    text = _claude_approve_with(line)
-    start = time.perf_counter()
-    claimed = review_phase._has_duration_claim(text)
-    elapsed = time.perf_counter() - start
-    assert claimed is False
-    assert elapsed <= REDOS_LIMIT_SECONDS, f"quoted-example scan took {elapsed:.2f}s"
-
-
-def test_quoted_example_scan_finishes_a_100kb_unmatched_quote_within_a_second():
-    line = '"' + ("x" * 99_999)
-    text = _claude_approve_with(line)
-    start = time.perf_counter()
-    review_phase._has_duration_claim(text)
-    elapsed = time.perf_counter() - start
-    assert elapsed <= REDOS_LIMIT_SECONDS, f"unmatched-quote scan took {elapsed:.2f}s"
-
-
-def test_overlong_quoted_span_does_not_stop_a_later_quoted_example():
-    overlong = "x" * 201
-    text = _claude_approve_with(
-        f'Preamble "{overlong}" then a quoted example "ran for 120 seconds".'
-    )
-    _assert_quoted_parses(text)
-
-
-def test_overlong_quoted_span_containing_a_duration_still_refuses():
-    interior = ("x" * 201) + " took 41 seconds"
-    text = _claude_approve_with(f'"{interior}"')
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-
-
-def test_unmatched_opening_quote_with_a_duration_still_refuses():
-    text = _claude_approve_with('"then it took 41 seconds')
-    result = review_phase.run_phase(_envelope("claude-fresh", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-
-
 # --- INTERVAL line and body patterns stay linear and keep their grammar ------
 #
-# `_INTERVAL_LINE` runs on every line of every successfully parsed review.
-# `_INTERVAL_PARTS` runs on each body it accepted. A body of `from a,` plus n
-# spaces plus `b` used to backtrack about cubically; a line of `INTERVAL: a`,
-# n spaces and `b` was quadratic. The cases below are every fixture INTERVAL
-# line plus the edge forms, each with the match/groups the earlier patterns
-# gave.
+# `_INTERVAL_LINE` runs on the trailing lines of every successfully parsed
+# review. `_INTERVAL_PARTS` runs on each measured body, always one line. A
+# body of `from a,` plus n spaces plus `b` used to backtrack about cubically;
+# a line of `INTERVAL: a`, n spaces and `b` was quadratic. The cases below are
+# every fixture INTERVAL line plus the edge forms, each checked against the
+# backtracking patterns that define the grammar. The body grammar is the lazy
+# one throughout except that the end source runs to the last `=`, so an end
+# source may itself hold `=`.
 
 OLD_INTERVAL_LINE = re.compile(
     r"^[ \t]*INTERVAL[ \t]*:[ \t]*(.*?)[ \t]*$",
-    re.IGNORECASE | re.MULTILINE,
+    re.IGNORECASE,
 )
-OLD_INTERVAL_PARTS = re.compile(
+LAST_EQUALS_INTERVAL_PARTS = re.compile(
     r"^from\s+(?P<start_event>.*?),\s*"
     r"(?P<start_source>.*?)\s*to\s+"
     r"(?P<end_event>.*?),\s*"
-    r"(?P<end_source>.*?)\s*=\s*"
+    r"(?P<end_source>.*?)\s*=(?!.*=)\s*"
     r"(?P<duration>.*)$",
     re.IGNORECASE,
 )
@@ -2844,9 +1953,7 @@ TEN_THOUSAND_SPACE_LINE = "INTERVAL: a" + " " * 10_000 + "b"
 TEN_THOUSAND_INTERNAL_WS_PARTS = (
     "from a, foo" + " " * 10_000 + "x to end, bar" + " " * 10_000 + "y = 1s"
 )
-SOL_INTERVAL_NEWLINE_BODY = "from event,ignored,\nsource to end, result = 1s"
-SOL_INTERVAL_NEWLINE_GROUPS = ("event,ignored", "source", "end", "result", "1s")
-_INTERVAL_FUZZ_ALPHABET = ("a", ",", " ", "\n", "t", "o", "=", "F")
+_INTERVAL_FUZZ_ALPHABET = ("a", ",", " ", "t", "o", "=", "F")
 _INTERVAL_S_TRAILING = re.compile(r"\s+$")
 
 
@@ -2930,8 +2037,6 @@ def _interval_parts_cases() -> list[str]:
         "from a, b to c, d",
         "froma, b to c, d = e",
         " from a, b to c, d = e",
-        "from a, b to c, d = e\n",
-        "from a, b to c, d = e\n\n",
         "from a, photo to album, x = 1s",
         "from a , b to c, d = e",
         "from a, b to c , d = e",
@@ -2944,11 +2049,16 @@ def _interval_parts_cases() -> list[str]:
         "",
         "from",
         "from ",
-        "from event,ignored,\nsource to end, result = 1s",
-        "from a, b to foo\n to end, x = 1s",
-        "from a, b to c, d = e \n = 1s",
-        "from a,\nb to c, d = e",
-        "from\na, b to c, d = e",
+        "from event,ignored, source to end, result = 1s",
+        "from a, b to foo to end, x = 1s",
+        "from a, b to c, d = e = 1s",
+        "from a, b to c, worker log status=done = 41m",
+        "from a, k=v to c, d = 1s",
+        "from a=b, c to d, e = 1s",
+        "from a, b to c, d = = 1s",
+        "from a, b to c, d ==",
+        "from a, b to c, =",
+        "from a, b to c, == 1s",
     ]
 
 
@@ -2964,19 +2074,15 @@ def _parts_groups(matched):
     return tuple(matched.group(name) for name in review_phase._INTERVAL_FIELDS)
 
 
-def test_interval_patterns_accept_exactly_the_old_grammar():
+def test_interval_patterns_accept_the_line_grammar_and_split_on_the_last_equals():
     mismatches = []
     for text in _interval_line_cases():
         old = _line_groups(OLD_INTERVAL_LINE.match(text))
         new = _line_groups(review_phase._INTERVAL_LINE.match(text))
         if old != new:
             mismatches.append(("line", text, old, new))
-        old_iter = [m.groups() for m in OLD_INTERVAL_LINE.finditer(text)]
-        new_iter = [m.groups() for m in review_phase._INTERVAL_LINE.finditer(text)]
-        if old_iter != new_iter:
-            mismatches.append(("line-finditer", text, old_iter, new_iter))
     for text in _interval_parts_cases():
-        old = _parts_groups(OLD_INTERVAL_PARTS.match(text))
+        old = _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(text))
         new = _parts_groups(review_phase._INTERVAL_PARTS.match(text))
         if old != new:
             mismatches.append(("parts", text, old, new))
@@ -3029,15 +2135,8 @@ def test_interval_line_match_finishes_10000_spaces_well_under_a_second():
     )
 
 
-def test_interval_parts_match_skips_comma_when_newline_blocks_source():
-    old = _parts_groups(OLD_INTERVAL_PARTS.match(SOL_INTERVAL_NEWLINE_BODY))
-    new = _parts_groups(review_phase._INTERVAL_PARTS.match(SOL_INTERVAL_NEWLINE_BODY))
-    assert old == SOL_INTERVAL_NEWLINE_GROUPS
-    assert new == old
-
-
 def _interval_parts_fuzz_bodies() -> list[str]:
-    bodies = [SOL_INTERVAL_NEWLINE_BODY]
+    bodies = []
     for n in range(0, 5):
         for prod in itertools.product(_INTERVAL_FUZZ_ALPHABET, repeat=n):
             tail = "".join(prod)
@@ -3052,10 +2151,10 @@ def _interval_parts_fuzz_bodies() -> list[str]:
     return bodies
 
 
-def test_interval_parts_match_old_grammar_on_newline_fuzz():
+def test_interval_parts_match_the_last_equals_grammar_on_fuzz():
     mismatches = []
     for text in _interval_parts_fuzz_bodies():
-        old = _parts_groups(OLD_INTERVAL_PARTS.match(text))
+        old = _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(text))
         new = _parts_groups(review_phase._INTERVAL_PARTS.match(text))
         if old != new:
             mismatches.append((text, old, new))
@@ -3073,7 +2172,7 @@ def test_interval_parts_rstrip_strips_every_s_whitespace_code_point():
     for ch in chars:
         assert ("keep" + ch).rstrip() == "keep"
         body = "from a, src" + ch + " to end, dst" + ch + " = 1s"
-        old = _parts_groups(OLD_INTERVAL_PARTS.match(body))
+        old = _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(body))
         new = _parts_groups(review_phase._INTERVAL_PARTS.match(body))
         assert new == old
         assert new == ("a", "src", "end", "dst", "1s")
@@ -3154,7 +2253,7 @@ def _interval_parts_timed_match(body: str) -> tuple[str, float]:
 def test_interval_parts_match_finishes_repeated_to_x_well_under_bound():
     small = "from a, " + "to x, " * 3 + "y"
     assert _parts_groups(review_phase._INTERVAL_PARTS.match(small)) == (
-        _parts_groups(OLD_INTERVAL_PARTS.match(small))
+        _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(small))
     )
     assert "\n" not in REPEATED_TO_OUTER_PARTS
     status, elapsed = _interval_parts_timed_match(REPEATED_TO_OUTER_PARTS)

@@ -13,3 +13,5 @@ PR #36 at head 2ad3139 stops a number-and-unit that names a configured bound ("1
 - Sinks checked: the `_DURATION_CLAIM` regex is the only change, and the endpoint-missing refusal is the only caller path. The tests cover both `run_phase` and `--from-text`.
 - Trust boundary: review text is untrusted. It is checked by `_has_duration_claim` before success, and a 100 KB input stays within the time limit, so there is no ReDoS regression (the lookahead is bounded: at most three backticks, one word).
 - Earlier findings: n/a (round 1).
+
+INTERVAL: none

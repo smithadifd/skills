@@ -8,3 +8,5 @@
 
 ## VERDICT
 flagged — worker sandbox non-writes are not gated, the live meter parser misclassifies, and CI only exercises the injectable doubles.
+
+INTERVAL: none
