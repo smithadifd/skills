@@ -139,8 +139,8 @@ class Rig:
     """A fake ledger, a config naming it, and a clean HOME."""
 
     def __init__(self, tmp_path, monkeypatch):
-        self.home = tmp_path / "home"
-        self.home.mkdir()
+        self.home_dir = tmp_path / "home"
+        self.home_dir.mkdir()
         self.topics = tmp_path / "topics"
         self.state = tmp_path / "fake-state.json"
         self.state.write_text(json.dumps({"items": {}, "calls": []}), encoding="utf-8")
@@ -160,7 +160,7 @@ class Rig:
             for key, value in os.environ.items()
             if not key.startswith("LEDGER_")
         }
-        self.env["HOME"] = str(self.home)
+        self.env["HOME"] = str(self.home_dir)
         self.env["LEDGER_DB"] = str(tmp_path / "ledger.db")
         self.env["LEDGER_HARNESS"] = "test"
 
@@ -362,7 +362,7 @@ def test_argv_sent_to_the_cli_matches_the_real_verbs_and_flags(rig):
 
 
 def test_the_per_skill_override_file_turns_the_route_on(rig):
-    override = rig.home / ".claude" / "skill-config" / "topic.json"
+    override = rig.home_dir / ".claude" / "skill-config" / "topic.json"
     override.parent.mkdir(parents=True)
     override.write_text(
         json.dumps({"topics_dir": str(rig.topics), "ledger_cli": str(rig.fake)}),
