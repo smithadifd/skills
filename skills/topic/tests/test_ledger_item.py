@@ -13,10 +13,11 @@ the next id from one event counter, and `note` honours `--expect-revision` as th
 real one does: it appends only when the item's newest event id equals the value,
 and otherwise exits 5 with `stale_revision` and writes nothing.
 
-Two state keys let a test stage what a real store does under failure and
+Three state keys let a test stage what a real store does under failure and
 concurrency, at the CLI boundary: `fail_notes` (1-based `note` call numbers
-that exit 1 without writing) and `inject_on_new` (an item another process
-creates just before this process's `new` is evaluated).
+that exit 1 without writing), `stale_notes` (1-based `note` call numbers
+refused as `stale_revision` without writing) and `inject_on_new` (an item
+another process creates just before this process's `new` is evaluated).
 """
 
 import importlib.util
@@ -186,6 +187,8 @@ if verb == "note":
     state["note_calls"] = state.get("note_calls", 0) + 1
     if state["note_calls"] in state.get("fail_notes", []):
         finish(1, False, error_code="store_busy", message="database is locked")
+    if state["note_calls"] in state.get("stale_notes", []):
+        finish(5, False, error_code="stale_revision", message="stale revision for item " + item_id)
     expect = values.get("--expect-revision")
     if expect is not None:
         if expect != "none" and not (expect.isdigit() and int(expect) >= 1):
@@ -546,6 +549,34 @@ def test_a_create_that_dies_after_new_is_completed_by_the_next_call_exactly_once
     assert third.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
     assert [c[0] for c in rig.snapshot()["calls"][calls_before:]] == ["query", "export-item"]
     assert rig.card_notes() == notes, "a further retry adds nothing"
+
+
+def test_successful_appends_after_stale_refusals_do_not_count_toward_the_retry_limit(rig):
+    # Six stale refusals leave two attempts of the eight; the two appends that
+    # then succeed complete the item, so the open ends in success, not a raise.
+    rig.write_config(ledger_cli=str(rig.fake))
+    rig.stage(stale_notes=[1, 2, 3, 4, 5, 6])
+
+    proc = rig.run()
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == f"topic-demo\tcreated\t{rig.fake}\n"
+    notes = rig.card_notes()
+    assert notes == ["Ask: " + ASK, RAILS], "exactly one Ask note and one rails note"
+    assert [c[0] for c in rig.snapshot()["calls"]].count("note") == 8
+
+
+def test_stale_refusals_up_to_the_retry_limit_in_a_row_still_fail_closed(rig):
+    rig.write_config(ledger_cli=str(rig.fake))
+    rig.stage(stale_notes=list(range(1, 9)))
+
+    proc = rig.run()
+
+    assert proc.returncode == 1
+    assert len(proc.stderr.splitlines()) == 1
+    assert "kept being refused as stale" in proc.stderr
+    assert rig.card_notes() == [], "nothing was written"
+    assert [c[0] for c in rig.snapshot()["calls"]].count("note") == 8
 
 
 def _racer(notes):

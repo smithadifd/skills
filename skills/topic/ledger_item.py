@@ -302,9 +302,12 @@ def _complete(
 
     Every append is guarded by the revision it was decided against. When the
     guard refuses, someone else wrote to the item in between, so the item is
-    read again and the decision is made again from what is there now.
+    read again and the decision is made again from what is there now. Only
+    those stale refusals count toward the limit; a successful append never
+    does, and the item is judged complete again right after each one.
     """
-    for _ in range(MAX_ATTEMPTS):
+    stale = 0
+    while True:
         if revision is None or texts is None:
             revision, texts = _read_item(cli, item_id)
         pending = _missing_note(texts, ask)
@@ -313,13 +316,15 @@ def _complete(
         try:
             revision = _note(cli, item_id, pending, revision)
         except LedgerStale:
+            stale += 1
+            if stale >= MAX_ATTEMPTS:
+                raise LedgerError(
+                    f"ledger CLI {cli} note kept being refused as stale for {item_id}; "
+                    "the item is changing faster than it can be completed"
+                )
             revision, texts = None, None
             continue
         texts = [*texts, pending]
-    raise LedgerError(
-        f"ledger CLI {cli} note kept being refused as stale for {item_id}; "
-        "the item is changing faster than it can be completed"
-    )
 
 
 def _reconcile(cli: str, item_id: str, ask: str) -> None:
