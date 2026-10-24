@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import html.entities
 import json
 import math
 import os
@@ -585,7 +586,16 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
 _OMP_REVIEW_RECORD_FIELDS = {"verdict", "bugs", "nits", "reviewed_head"}
 _OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
 _OMP_HTML_TAG = re.compile(r"<[^>]*>")
-_OMP_HTML_REFERENCE = re.compile(r"&[#A-Za-z0-9]+;")
+# Every character reference an HTML5 decoder consumes: any `&...;`, a numeric
+# or hex reference with or without its semicolon (`&#101`, `&#x65`), and the
+# legacy named references HTML5 decodes without one (`&shy`, `&amp`).
+_OMP_HTML_REFERENCE = re.compile(
+    r"&(?:[#A-Za-z0-9]+;|#[0-9]|#[xX][0-9A-Fa-f]|"
+    + "|".join(
+        sorted(name for name in html.entities.html5 if not name.endswith(";"))
+    )
+    + ")"
+)
 _OMP_PROSE_QUALIFIER = re.compile(r"^\s*\([^()\n]*\)\s*")
 _OMP_UNSAFE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Zl", "Zp", "Co", "Cn", "Cs"})
 _OMP_UNSAFE_FILLERS = frozenset({"\u115f", "\u1160", "\u2800", "\u3164", "\uffa0"})
@@ -605,10 +615,19 @@ _OMP_WORD = re.compile(r"[\w'-]+")
 _OMP_VERDICT_KEY = re.compile(
     r"[\W\d_]*".join("verdict") + r"s?(?![^\W\d_])"
 )
+# A key candidate: the key's grammar with each letter widened to that ASCII
+# letter or any non-ASCII letter, read at every start on the casefolded line.
+# Its letters may stand apart (`V/Ε/R/D/I/C/T`), so the mixed-word rule reads
+# it as one word.
+_OMP_VERDICT_KEY_CANDIDATE = re.compile(
+    "(?=("
+    + r"[\W\d_]*".join(rf"(?:{letter}|[^\W\d_A-Za-z])" for letter in "verdict")
+    + r")s?(?![^\W\d_]))"
+)
 # The value anchor: a whole-word uppercase verdict value on the folded line
-# before casefold.
+# before casefold, its words separated as value normalization separates them.
 _OMP_VALUE_ANCHOR = re.compile(
-    r"(?<![^\W\d_])(?:APPROVE|REQUEST\s+CHANGES)(?![^\W\d_])"
+    r"(?<![^\W\d_])(?:APPROVE|REQUEST[\s_-]+CHANGES)(?![^\W\d_])"
 )
 _OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
@@ -694,12 +713,16 @@ def _refuse_mixed_words(canonical: list[tuple[str, str] | None]) -> None:
     """Refuse a word holding both ASCII and non-ASCII letters, reply-wide.
 
     The ASCII letters around a lookalike are the tell, so a homoglyph key is
-    refused here rather than matched or missed.
+    refused here rather than matched or missed. A key candidate counts as one
+    word, however its letters are separated.
     """
     for item in canonical:
         if item is None:
             continue
-        for word in _OMP_WORD.findall(item[0]):
+        words = _OMP_WORD.findall(item[0]) + [
+            match.group(1) for match in _OMP_VERDICT_KEY_CANDIDATE.finditer(item[1])
+        ]
+        for word in words:
             letters = [character for character in word if character.isalpha()]
             if any(character.isascii() for character in letters) and not all(
                 character.isascii() for character in letters
@@ -884,6 +907,12 @@ def _omp_review_record(text: str) -> tuple[dict, list[str | None]]:
         if any(not isinstance(value, str) or not value.strip() for value in values):
             raise ReviewRecordSchema(
                 f"ReviewRecordSchema: {field} entries must be non-empty strings"
+            )
+        # A JSON-escaped lone surrogate survives json.loads but cannot be
+        # written as UTF-8, so the phase result could never be emitted.
+        if any("\ud800" <= character <= "\udfff" for value in values for character in value):
+            raise ReviewRecordSchema(
+                f"ReviewRecordSchema: {field} entries must not contain surrogate code points"
             )
     if verdict == "APPROVE" and record["bugs"]:
         raise ReviewRecordSchema(

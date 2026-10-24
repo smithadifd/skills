@@ -11,8 +11,10 @@ one order they name, since a key-only line reads forward.
 
 from __future__ import annotations
 
+import html
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -97,6 +99,7 @@ DISAGREES_WITH_APPROVE = (
 )
 MIXED = ("failure", "ReviewProseUnsafe: mixed-script word")
 ANCHOR = ("failure", "ReviewProseUnsafe: verdict value without a verdict key")
+HTML_REFERENCE = ("failure", "ReviewProseUnsafe: HTML character reference")
 UNRECOGNIZED = ("failure", "VerdictConflict: unrecognized prose verdict value")
 
 
@@ -168,6 +171,18 @@ RECORD_CASES = [
     ("A19a", _reply(RA.replace("```", "~~~")), APPROVED),
     ("A19b", _reply(RA.replace("```", "````")), APPROVED),
     ("A20", _reply(RA.replace("review-result\n", "review-result \n")), APPROVED),
+    # A JSON-escaped lone surrogate parses, but no phase result holding it can
+    # be written as UTF-8.
+    (
+        "A21a",
+        _reply(_fence('{"verdict": "APPROVE", "bugs": [], "nits": ["README.md:3 \\ud800"], ' + f'"reviewed_head": "{APPROVE_HEAD}"}}')),
+        _refused("ReviewRecordSchema: nits entries must not contain surrogate code points"),
+    ),
+    (
+        "A21b",
+        _reply(_fence('{"verdict": "REQUEST CHANGES", "bugs": ["src/a.py:1 \\udfff"], "nits": [], ' + f'"reviewed_head": "{CHANGES_HEAD}"}}')),
+        _refused("ReviewRecordSchema: bugs entries must not contain surrogate code points"),
+    ),
 ]
 
 
@@ -210,6 +225,14 @@ PROSE_CASES = [
     ("B12", "Le résumé est correct.", RA, _refused("ReviewProseUnsafe: U+0301 category Mn")),
     ("B13", "Le résumé est correct.", RA, APPROVED),
     ("B14", "Verdict:​\nREQUEST CHANGES", RA, _refused("ReviewProseUnsafe: U+200B category Cf")),
+    # HTML5 decodes numeric and hex references without their semicolon, and
+    # the legacy named ones too.
+    ("B15a", "v&#101rdict: request changes", RA, HTML_REFERENCE),
+    ("B15b", "v&#x65rdict: request changes", RA, HTML_REFERENCE),
+    ("B15c", "v&#X65rdict: request changes", RA, HTML_REFERENCE),
+    ("B15d", "Ver&shydict: request changes", RA, HTML_REFERENCE),
+    # A bare ampersand that starts no reference is prose.
+    ("B15e", "AT&T and R&D signed off; Q&A is done.", RA, APPROVED),
     # C. folding (I4) and the mixed-word rule (I5).
     ("C1", "Vеrdict: REQUEST CHANGES", RA, MIXED),
     ("C2", "VΕRDICT: REQUEST CHANGES", RA, MIXED),
@@ -247,6 +270,10 @@ PROSE_CASES = [
     ("C19", "Le cœur du changement est correct.", RA, MIXED),
     ("C20a", "<b>Vеrdict</b>: REQUEST CHANGES", RA, MIXED),
     ("C20b", "V<b>е</b>rdict: REQUEST CHANGES", RA, MIXED),
+    # The key's letters may stand apart, so the mixed-word rule reads the
+    # separator-tolerant key candidate as one word.
+    ("C21a", "V/\u0395/R/D/I/C/T: request changes", RA, MIXED),
+    ("C21b", "V \u0395 R D I C T: request changes", RA, MIXED),
     # D. the key's bounds (I6).
     ("D1", "FinalVerdict: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),
     ("D2", "ReviewVerdict: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),
@@ -307,6 +334,9 @@ PROSE_CASES = [
     # Small capitals fold to lowercase, so this is outside the anchor
     # (declared bound).
     ("F8", "ᴀᴘᴘʀᴏᴠᴇ it.", RC, CHANGES),
+    # The anchor separates the value's words as value normalization does.
+    ("F10a", "Decision: REQUEST-CHANGES", RA, ANCHOR),
+    ("F10b", ALL_CYRILLIC_KEY + ": REQUEST_CHANGES", RA, ANCHOR),
 ]
 
 
@@ -363,6 +393,40 @@ ORDERED_CASES = [
 )
 def test_ordered_case(text, expected):
     _check(review_phase.run_phase(_envelope(text)), expected)
+
+
+@pytest.mark.parametrize("case", ["B15a", "B15b", "B15c", "B15d"])
+def test_B15_inputs_are_references_an_html5_decoder_consumes(case):
+    prose = next(prose for name, prose, _, _ in PROSE_CASES if name == case)
+    assert html.unescape(prose).replace("\u00ad", "").startswith(("verdict", "Verdict"))
+
+
+def test_A21_a_lone_surrogate_record_is_refused_and_the_result_still_emits(tmp_path):
+    reply = tmp_path / "reply.md"
+    text = next(text for name, text, _ in RECORD_CASES if name == "A21a")
+    reply.write_text(text, encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SKILL_DIR / "review_phase.py"),
+            "--from-text",
+            str(reply),
+            "--backend",
+            "omp",
+            "--model",
+            "example-model",
+            "--thinking",
+            "medium",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        stdin=subprocess.DEVNULL,
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 1, result.stderr
+    reason = json.loads(result.stdout)["reason"]
+    assert "ReviewRecordSchema: nits entries must not contain surrogate code points" in reason
 
 
 def test_G6_a_record_with_no_prose_approves_with_no_findings():
