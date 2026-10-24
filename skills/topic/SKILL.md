@@ -1,7 +1,7 @@
 ---
 name: topic
 kind: portable
-version: 1.2.1
+version: 1.3.0
 description: >
   Open, resume, or close a session note for a one-off, attended piece of work
   that will outlive the sitting. Resolves the thread's note file (project repo
@@ -11,7 +11,8 @@ description: >
   the template is absent, opens EVERY touch with a reconcile pass against the
   note's external references and stamps "Last synced", maintains a Staged drafts
   rail for async continuation, and at close runs the promote-or-park ledger and
-  names the close tier (LITE vs FULL). Use when the user says "/topic <slug>",
+  names the close tier (LITE vs FULL). With `ledger_cli` set, the thread is a
+  ledger item and no note file is written. Use when the user says "/topic <slug>",
   "open a topic for this", "resume the <x> topic", "track this investigation",
   "stage this for later", or when an attended session starts with an ad-hoc ask
   that will outlive the sitting. NOT for a handoff note to a fresh session (that
@@ -41,7 +42,36 @@ Do not invent a second directory when the resolved path is absent.
   built-in skeleton below when the template is absent). Never a roadmap, memory,
   a deploy, or any other file. Promotion targets get edited by the session itself
   as ordinary work — this skill just enforces that the ledger names a disposition.
+  With `ledger_cli` set, the ledger item replaces the note file (Ledger route,
+  below).
 - Not a session journal — one file per *thread*, not per sitting.
+
+## Ledger route
+
+`ledger_cli` names the `ledger` executable. It is a key in `config.json`, read
+the same way as `topics_dir` (explicit `--config`, then
+`~/.claude/skill-config/topic.json`, then the shipped file). Unset, null or empty
+means off, and everything else in this file applies as written. A value that is
+not a string is an error. When it is set,
+a thread is a ledger item of type `topic` with the id `topic-<slug>`, this skill
+writes no markdown note, and File resolution, the template and the built-in
+skeleton below are not used.
+
+- **Open or resume:** `python3 ${CLAUDE_SKILL_DIR}/ledger_item.py --open <slug> --ask <words>`.
+  It prints the item id, `created` or `resumed`, and the executable. It creates
+  the item only when none exists. A missing or failing executable is one stderr
+  line and a nonzero exit: report it and stop. Never fall back to a note file.
+- **On resume:** read the item with `<ledger_cli> card <item>`, reconcile as under
+  On open, and record the pass as `<ledger_cli> note <item> --text "Synced: <what was reconciled>"`.
+- **Staged drafts:** each one is `<ledger_cli> note <item> --text "Staged: <draft, or where it lives>"`.
+  A long-form write-up is a markdown document the session writes where the
+  project keeps its documents, linked with
+  `<ledger_cli> link <item> --rel url --target <path>`.
+- **Promote-or-park:** at close, each emitted work item gets exactly one note,
+  `Promote-or-park: <item> — PROMOTED to <tracked surface>` or
+  `Promote-or-park: <item> — PARKED <date>: <reason>`. The rules under At close
+  apply unchanged. Name the tier with `Close tier: LITE` or `Close tier: FULL`.
+  A closed thread gets `<ledger_cli> state <item> --status closed`.
 
 ## File resolution
 
