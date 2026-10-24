@@ -62,8 +62,9 @@ def query(state, item):
         raise Refusal("empty", "no matching rows", 1)
     states = [event["payload"] for event in events if event["kind"] == "item.state"]
     latest = states[-1] if states else {}
+    kind = {"type": created[0]["payload"]["type"]} if "type" in created[0]["payload"] else {}
     row = {
-        "item_id": item, "type": created[0]["payload"]["type"], "title": created[0]["payload"]["title"],
+        "item_id": item, **kind, "title": created[0]["payload"]["title"],
         "status": status_of(events), "owner": latest.get("owner"), "claim": latest.get("claim"),
         "revision": events[-1]["id"],
     }

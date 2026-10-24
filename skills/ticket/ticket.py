@@ -1665,6 +1665,13 @@ class LedgerStore:
                 card, token, item = _blank_card(self.key, self.title), NO_TOKEN, {}
             else:
                 row = next(row for row in self._data(answer, "read")["items"] if row["item_id"] == self.key)
+                if row.get("type") != "ticket":
+                    found = repr(row["type"]) if "type" in row else "none"
+                    raise StoreUnavailable(
+                        f"ledger item {self.key} is not a ticket (its type is {found}), so the pass will not claim or "
+                        "write to it. Nothing was written; a person resolves the key.",
+                        code="ledger_refused",
+                    )
                 card, blocked = _ledger_card(self._data(self._run("export-item", self.key), "read")["events"], self.key, self.title)
                 token = str(row["revision"])
                 item = {"owner": row.get("owner"), "claim": row.get("claim"), "blocked_by": blocked}

@@ -427,6 +427,22 @@ def test_H23_the_first_claim_creates_the_item(fake, title):
     assert '"type": "ticket"' in rows.stdout
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [{"type": "initiative", "title": "Existing"}, {"title": "Existing"}, {"type": 7, "title": "Existing"}],
+    ids=["initiative", "missing type", "non-string type"],
+)
+def test_a_key_held_by_another_item_type_is_refused(fake, payload):
+    fake.outside("item.created", payload)
+    before = fake.events()
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        open_ledger(fake, Source())
+    assert refusal(excinfo) == "ledger_refused"
+    assert KEY in str(excinfo.value) and "not a ticket" in str(excinfo.value)
+    assert fake.events() == before
+    assert fake.appends() == []
+
+
 @needs_ledger_cli
 def test_H24_every_batch_the_store_builds_passes_the_toolkit_schema(tmp_path):
     validate_payload = _toolkit_validate_payload()

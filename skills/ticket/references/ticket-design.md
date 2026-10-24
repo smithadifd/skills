@@ -648,7 +648,8 @@ refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once
 
 - **`read`**: `ledger --json query --item K` gives the token (`revision`, the id of the newest event
   of any kind, `none` for no events) and the status, owner and claim; `not_found` means no item and
-  reads as the blank card with token `none`; `export-item K` gives the events to fold into the card
+  reads as the blank card with token `none`; a row whose `type` is not exactly `ticket` is refused
+  `ledger_refused` before any fold, claim or append; `export-item K` gives the events to fold into the card
   (6.2.3 for the notes; `session.*` are shown only while the item is open, so `pass` is `None` on a
   closed item; the latest `item.state`'s `blocked_by` is carried into the close). The token is never
   the largest id in `export-item`, which hides ephemeral events and would make a held revision
