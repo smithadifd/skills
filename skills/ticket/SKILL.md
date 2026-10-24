@@ -33,6 +33,7 @@ import sys; sys.path.insert(0, "${CLAUDE_SKILL_DIR}")
 import ticket
 store = ticket.choose_store("<target-repo>", "<KEY>", "<title>")
 session = ticket.TicketPass.open("<KEY>", source, store)              # a new pass
+store = ticket.choose_store("<target-repo>", "<KEY>", "<title>")      # a fresh handle for each open
 session = ticket.TicketPass.open("<KEY>", source, store, pass_id=P)   # the same pass, later
 ```
 
@@ -78,6 +79,11 @@ id, host and start time. Read `session.pass_id`, keep it in the conversation,
 and report it at every stop: each later step, in a new process, continues the
 same pass with `open(..., pass_id=<id>)`. Never take a pass id from the card or
 from a refusal to continue a pass you did not start.
+
+One store handle serves one pass. `open` refuses a handle that is bound to a
+pass, or whose pass has ended, as `handle_used` before it pulls or reads
+anything; call `choose_store` again for every open, a new pass and a resume
+alike.
 
 Another open while a pass is live is refused as `held`, naming the live pass
 and the command that releases it. The pass ends, and releases its claim, at

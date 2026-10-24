@@ -144,6 +144,14 @@ event-equal before and after; no claim; the open raises and the pass is not live
 | E11f | `test_the_held_refusal_command_runs_from_the_target_repository` | pass 1 open; a subprocess is refused `held`; the printed command (plus `--repo <repo>`) is run from a directory that holds no `ticket.py` | `shlex.split` of the printed command equals `["python3", <installed ticket.py>, "release", <key>, <id>]` exactly; it exits 0 and clears the claim | the message names the bare `ticket.py` `(shared with E11a)` |
 | E11g | `test_the_printed_command_quotes_every_argument[command | space | quote | newline]` | a `held` refusal built for a live id of `deadbeef; printf PROBE_INJECTED`, `dead beef`, one holding a quote, one holding a newline | `shlex.split` of the printed command equals the intended argv exactly, the id a single element | the command is built by a plain join, not `shlex.join` |
 | E11h | `test_the_store_refuses_an_unknown_event_or_a_malformed_claim[claim id not hex]` | a `claim` event whose id is `a1; b2` | `TicketError` "the claim's id must be lowercase hex"; nothing written | `_validate_claim` drops the hex check |
+| E11i | `test_a_second_open_on_the_same_handle_is_refused` | pass 1 open on handle H; a new pass opened on H | refusal `handle_used` naming pass 1 and the fix, raised before the source is pulled; nothing written; the card still holds pass 1; pass 1's next write lands | `open` drops the used-handle check |
+| E11j | `test_a_handle_whose_pass_ended_cannot_open_again` | pass 1 open on H, then `end()`; a new pass opened on H | refusal `handle_used` naming pass 1; nothing written; `card.pass` stays `None` | the check reads `pass_id` alone (drops the `ended` half) |
+| E11k | `test_a_handle_whose_pass_ended_cannot_join` | pass 1 on H ended; pass 2 live on a fresh handle; `join(P2)` on H | refusal `handle_used`; nothing written; pass 2's claim intact | the check reads `pass_id` alone `(shared with E11j)` |
+| E11l | `test_a_cleared_pass_does_not_free_its_handle` | pass 1 live on H; a person's `clear_pass(P1)`; a new pass opened on H; then a new pass on a fresh handle; then pass 1 writes | the open on H is refused `handle_used`, nothing written; the fresh handle claims pass 3; pass 1's write is `stale`, its end leaves pass 3's claim, and pass 3 writes | `open` drops the used-handle check `(shared with E11i)` |
+| E11m | `test_a_join_on_a_bound_handle_is_refused` | pass 1 live on H; `join(P1)` on H | refusal `handle_used`; nothing written; pass 1's claim intact and its next write lands | the join path skips the used-handle check |
+| E11n | `test_a_deleted_card_does_not_free_its_handle` | pass 1 live on H; the card file deleted; a new pass opened on H | refusal `handle_used`; no card file is created; pass 1's later write is `stale` and creates none either | `open` drops the used-handle check `(shared with E11i)` |
+| E11o | `test_a_fresh_handle_opens_after_a_pass_ends` | pass 1 on H1 ended; a new pass opened on fresh H2; `join(P2)` on fresh H3 | pass 2 claims and writes; the join writes under pass 2; `card.pass` is pass 2 | the check refuses a fresh handle (`pass_id is None`) |
+| E11p | `test_the_pass_writes_no_private_store_state` | a store double implementing only the declared interface (`__slots__` of `key`, `pass_id`, `ref`; `ended` a read-only property), so any other attribute write raises `AttributeError` | `open`, a write, a join on a second double over the same card, its write, and `end()` all succeed | `open` writes `store._ended` on the join path |
 | E12 | `test_three_more_info_exits[person | research | someone_else]` | a live pass at `plan` | a stamp `waiting on <x>: <q>` with the store phase; the pass ends; `someone_else` returns a drafted ask and requires a role | `more_info` does not end the pass |
 | E13 | `test_open_questions_tried_and_steps_persist_and_resume_rebuilds_the_pass` | a plan with a skipped `research` step, a skipped `plan` step with a one-sentence diff, an open question, a `tried` record | after resume: `session.plan` renders the skips with their reasons, the diff, the question; `tried` on the card | `PlanCard` rebuilt on resume drops `steps` restoration (all `pending`) |
 | E14 | `test_resume_pulls_the_live_ticket_before_reading_the_card` | a source that records the call order with the store | the source is pulled before `read` | `open` reads the card first |
@@ -275,9 +283,9 @@ identity of its `and`/`or`.
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
-- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 29, F 8, G 15,
-  H 32, I 26. Total 186 rows. Eight carry no test of their own: A0.1–4 (impossible by
+- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 37, F 8, G 15,
+  H 32, I 26. Total 194 rows. Eight carry no test of their own: A0.1–4 (impossible by
   construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), and the two
-  evidence probes G9 and H19. The other 178 each have a test and a named mutation.
+  evidence probes G9 and H19. The other 186 each have a test and a named mutation.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so.

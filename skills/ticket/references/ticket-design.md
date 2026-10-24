@@ -342,6 +342,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 |---|---|---|
 | `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | the command names the installed script by its absolute path (the directory of `ticket.py` itself, as `SKILL.md` writes `${CLAUDE_SKILL_DIR}/ticket.py`), so it runs from the target repository. The command is rendered with `shlex.join` over its whole argv (interpreter, script path, subcommand, key, pass id), so no stored value can add a shell word. A pass id is lowercase hex; a card whose live pass id is anything else is `card_unreadable` |
 | `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
+| `handle_used` | the store handle given to `open` was already used for a pass: it is bound to one, or a pass it held has ended; nothing was pulled, read or written | a refusal (`StoreUnavailable`) raised by `open` before `source.pull`, for a new pass and for a join alike; the message names that pass and the fix (open each pass with a fresh store handle). The rule it enforces is section 5's one handle per pass |
 | `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
 | `card_unreadable` | the card does not parse or has the wrong shape, including a plan snapshot that breaks the snapshot rules while its identity is readable (section 2); on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |
 | `close_invalid` | `status` is closed but the close does not validate | a valid card can only reach `closed` through the atomic close (D2), so an invalid close is an edit or an outside status write, and D4 says a corrupt card is refused, not resumed into a writable pass |
@@ -400,6 +401,17 @@ naming the winner. A person's `release <key> <pass-id>` clears the live claim on
 it. Release is the one unconditional write: it clears this handle's own claim whatever has landed
 since, so a pass that gave up never stays held. No claim expires by time.
 
+One live pass per ticket, and **one store handle per pass**. `TicketPass.open`, for a new pass and for a
+join alike, refuses a `store` handle that has already been used for a pass (it is bound to a pass, or a
+pass it held has ended) before it reads or writes anything, as `handle_used`, with a message naming the
+fix (open each pass with a fresh store handle). The check reads only members the store interface
+declares (`pass_id`, and the read-only `ended` beside it), and `TicketPass` never writes a store's
+private state, so a second store conforms from the interface alone. `apply`'s claim check is unchanged:
+`_check_pass` for every event. A fresh handle behaves exactly as before. The rule is what makes the
+unconditional release safe: `release` clears whatever pass the handle holds, and a handle that never
+carries two passes gives no older pass object, still marked live, a way to end and clear a newer pass's
+claim.
+
 ## 6. Both stores behind one interface
 
 ```
@@ -407,6 +419,8 @@ read()                      -> (card, token)
 apply(token, events)        -> token      # all events land, or none; refuses `stale`
 release()                   -> None       # unconditional; clears this handle's claim
 clear_pass(pass_id)         -> None       # a person's release: refuse unless pass_id is the live claim
+pass_id                     -> str | None # the pass this handle writes for: a claim binds it, a join sets it
+ended                       -> str | None # read-only: the last pass this handle held that has ended, or None
 ```
 
 Events: `claim`, `release`, `plan`, `stamp`, `decision`, `review`, `tried`, `closed`. The pass folds

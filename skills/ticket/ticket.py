@@ -960,11 +960,18 @@ def _stale(key: str, detail: str) -> StoreUnavailable:
 
 class Store(Protocol):
     """Four calls. A handle carries the pass it writes for in ``pass_id``: a
-    successful ``claim`` binds it, and a pass that joins sets it."""
+    successful ``claim`` binds it, and a pass that joins sets it. One handle
+    serves one pass: ``TicketPass.open`` refuses a handle that is bound, or
+    whose pass has ``ended``, and reads nothing else of a store."""
 
     key: str
     pass_id: str | None
     ref: str
+
+    @property
+    def ended(self) -> str | None:
+        """The id of the last pass this handle held that has ended, or None."""
+        ...
 
     def read(self) -> tuple[dict[str, Any], str]: ...
 
@@ -1004,6 +1011,12 @@ class MarkdownStore:
         self._ended: str | None = None
         # Threads sharing this handle take turns before the file lock.
         self._threads = threading.RLock()
+
+    @property
+    def ended(self) -> str | None:
+        """The id of the last pass this handle held that has ended, or None."""
+
+        return self._ended
 
     # The lock and the files.
 
@@ -1295,11 +1308,19 @@ class TicketPass:
     def open(cls, key: str, source: TicketSource, store: Store, *, pass_id: str | None = None) -> "TicketPass":
         """Open a pass: a new one claims the ticket; ``pass_id`` continues that live pass.
 
-        The source is pulled first, then the card is read and its state
-        derived. A refused card writes nothing; a stopped or closed ticket is
-        reported and takes no claim.
+        One store handle serves one pass: a handle bound to a pass, or whose
+        pass has ended, is refused (``handle_used``) before anything is
+        pulled, read or written. Then the source is pulled, the card is read
+        and its state derived. A refused card writes nothing; a stopped or
+        closed ticket is reported and takes no claim.
         """
 
+        if store.pass_id is not None or store.ended is not None:
+            raise StoreUnavailable(
+                f"this store handle was already used for pass {store.pass_id or store.ended} on ticket {key}, "
+                "so nothing was read or written; open each pass with a fresh store handle",
+                code="handle_used",
+            )
         ticket = source.pull(key)
         card, token = store.read()
         state, flags, identity = _derive(card, ticket, pass_id, key)
