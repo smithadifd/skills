@@ -3,9 +3,8 @@
 The code is checked against `test-matrix.md`: every behavior here maps to a named test.
 Scope: `skills/ticket/` (the pass, the plan identity, resume, both stores). The ledger CLI it relies on
 is the toolkit's, at the version that has `append --expect-revision` and `append-many`.
-Only the markdown store is built in this release. The ledger store (section 6.2, matrix section H) is
-specified for a later part: a configured `TICKET_LEDGER_CLI` is refused with `ledger_store_unavailable`
-(section 4.5, 6.3).
+Both stores are built: the markdown store (section 6.1) and the ledger store (section 6.2, matrix
+section H). A configured `TICKET_LEDGER_CLI` selects the ledger store (section 6.3).
 
 ## 0. The four decisions behind the resume and plan-identity rules
 
@@ -349,7 +348,6 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `stale` | the card changed since this pass last read or wrote it: a write refused under the held token, a fresh read whose token differs from the held one, or on the ledger a batch key already taken (`conflict`); the message names the newest writer when the store knows it (ledger) or says the card on disk changed (markdown) | the held token detects every change under a live pass at every write and every fresh read, so there is one code and one place that raises it |
 | `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | a permanent refusal is never reported as the retryable `stale` |
 | `ledger_incompatible` | the selected ledger CLI lacks `append-many` or `--expect-revision`, or answers `usage` to a command the store sends | |
-| `ledger_store_unavailable` | `TICKET_LEDGER_CLI` selects the ledger store, which this release does not include; nothing was read or written | raised by store selection and by the `release` command (which exits 2) |
 | `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
@@ -689,7 +687,7 @@ refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once
 
 `choose_store(repo, key, title)`: the ledger store when `TICKET_LEDGER_CLI` names an executable (after
 the capability probe), else the markdown store. An empty value counts as unset. The `release` command
-selects the same way. In this release a non-empty selector is refused with `ledger_store_unavailable`
+selects the same way. A selected CLI that fails the capability probe is refused `ledger_incompatible`
 before anything is read or written, and the `release` command exits 2.
 
 ## 7. Non-goals

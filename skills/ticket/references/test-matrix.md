@@ -310,10 +310,12 @@ identity of its `and`/`or`.
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 41, F 8, G 31,
-  H 33, I 26. Total 215 rows. Nine carry no test of their own in this release: A0.1–4 (impossible by
-  construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), the two
-  evidence probes G9 and H19, and H33 (the ledger store's). The other 206 each have a test and a
-  named mutation.
+  H 33, I 26. Total 215 rows. Nine carry no test with a mutation of their own in this release:
+  A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
+  F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it), and H33
+  (no test in this release). The other 206 each have a test and a named mutation; H24's runs only
+  when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's
   `ended` half (E11j, E11k) and E11q's step-(a) drop (E11q, E11r).

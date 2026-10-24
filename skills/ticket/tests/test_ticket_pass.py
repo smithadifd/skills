@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import ticket
+from ledger_support import FakeLedger, build_ledger, open_ledger
 from ticket_support import (
     A, B, F5, KEY, TITLE, Source, build, build_released, card_bytes, card_path, changes, edit_card,
     go_outward, go_plan, open_pass, passing, present, read_card, refusal, store,
@@ -1122,9 +1123,13 @@ def test_F7_close_validates_its_point_refs_and_next_skills(repo, kwargs):
     assert session.live is True
 
 
-def test_F8_a_closed_card_takes_no_claim_on_the_ledger_and_the_markdown_store(repo):
-    # The ledger half of this row arrives with the ledger store; this is the markdown half.
+def test_F8_a_closed_card_takes_no_claim_on_the_ledger_and_the_markdown_store(repo, tmp_path):
     src = Source()
     build(repo, src, "S6")
     open_pass(repo, src)
     assert read_card(repo)["pass"] is None
+    fake = FakeLedger(tmp_path / "ledger")
+    build_ledger(fake, src, "S6")
+    opened = [event for event in fake.events() if event["kind"] == "session.opened"]
+    assert open_ledger(fake, src).phase == "closed"
+    assert [event for event in fake.events() if event["kind"] == "session.opened"] == opened
