@@ -298,6 +298,8 @@ UNSAFE_PROSE_CASES = [
     pytest.param("Ver\uffa0dict: REQUEST CHANGES", id="hangul-filler-ffa0"),
     pytest.param("Ver&shy;dict: REQUEST CHANGES", id="html-named-reference"),
     pytest.param("&#86;erdict: REQUEST CHANGES", id="html-numeric-reference"),
+    # A lookalike letter inside an ASCII word is refused by name, never matched.
+    pytest.param("V\u0435rdict: REQUEST CHANGES", id="cyrillic-e"),
 ]
 
 
@@ -313,7 +315,6 @@ def test_unsafe_prose_is_refused_in_both_orders(prose, record_first):
 @pytest.mark.parametrize(
     "prose",
     [
-        pytest.param("Vеrdict: REQUEST CHANGES", id="cyrillic-e"),
         pytest.param("VERDİCT: REQUEST CHANGES", id="turkish-dotted-i"),
         pytest.param("Verdicts: REQUEST CHANGES", id="plural"),
         pytest.param("Verdict_: REQUEST CHANGES", id="underscore"),

@@ -51,10 +51,16 @@ Backends (one adapter each, chosen by the envelope's `inputs.backend`):
                    and thinking level; both are required, and the phase
                    result carries them as `attribution` with the lane name
 
-The OMP verdict comes only from that record. A verdict-like prose line may
-confirm it, but a disagreement fails as `VerdictConflict`; missing, multiple,
-unterminated, invalid-JSON, and schema-invalid records have distinct refusals.
-The claude-fresh and grok-notools adapters retain their text contracts.
+The OMP verdict comes only from that record, compared byte-exact; missing,
+multiple, unterminated, invalid-JSON, and schema-invalid records have distinct
+refusals. Prose outside the record never supplies a verdict. It is folded to
+ASCII where Unicode itself says how (NFKC, then a Latin fold read from each
+letter's name), a word mixing ASCII and non-ASCII letters is refused as
+`ReviewProseUnsafe`, and only the ASCII word `verdict` is a key: a prose
+verdict that differs from the record, or that the grammar cannot read, is
+`VerdictConflict`, and an uppercase `APPROVE` or `REQUEST CHANGES` on a line
+with no key is `ReviewProseUnsafe`. The claude-fresh and grok-notools adapters
+retain their text contracts.
 
 The adapters normalise a return that a runner already obtained; dispatching
 the model (credentials, tools, pools) stays runner-owned, so an envelope
@@ -583,22 +589,26 @@ _OMP_HTML_REFERENCE = re.compile(r"&[#A-Za-z0-9]+;")
 _OMP_PROSE_QUALIFIER = re.compile(r"^\s*\([^()\n]*\)\s*")
 _OMP_UNSAFE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Zl", "Zp", "Co", "Cn", "Cs"})
 _OMP_UNSAFE_FILLERS = frozenset({"\u115f", "\u1160", "\u2800", "\u3164", "\uffa0"})
-_OMP_VERDICT_KEY_LETTERS = (
-    "vνѵ",
-    "eе",
-    "rг",
-    "dԁ",
-    "iıιі",
-    "cϲс",
-    "tτт",
+# The Latin fold reads a letter's own Unicode name; there is no lookalike
+# table. A name with one letter after `LETTER` (or `LETTER DOTLESS`), or a
+# small capital, folds to that letter; every other letter stays as it is.
+_OMP_LATIN_LETTER_NAME = re.compile(
+    r"LATIN (SMALL|CAPITAL) LETTER (?:DOTLESS )?([A-Z])(?: WITH [A-Z ]+)?"
 )
-_OMP_VERDICT_SEPARATOR = r"[\W\d_]*"
+_OMP_LATIN_SMALL_CAPITAL_NAME = re.compile(r"LATIN LETTER SMALL CAPITAL ([A-Z])")
+_OMP_LETTER = re.compile(r"[^\W\d_]")
+# A word: a maximal run of letters, digits, `_`, `-` and `'`.
+_OMP_WORD = re.compile(r"[\w'-]+")
+# The key is the ASCII word `verdict` on a folded, casefolded line; any run of
+# non-letters may separate its letters. The leading bound is checked in
+# `_omp_verdict_keys`, since its camel-case rule reads the uncasefolded line.
 _OMP_VERDICT_KEY = re.compile(
-    r"(?<![^\W\d_])"
-    + _OMP_VERDICT_SEPARATOR.join(
-        f"[{re.escape(letters)}]" for letters in _OMP_VERDICT_KEY_LETTERS
-    )
-    + r"s?(?![^\W\d_])"
+    r"[\W\d_]*".join("verdict") + r"s?(?![^\W\d_])"
+)
+# The value anchor: a whole-word uppercase verdict value on the folded line
+# before casefold.
+_OMP_VALUE_ANCHOR = re.compile(
+    r"(?<![^\W\d_])(?:APPROVE|REQUEST\s+CHANGES)(?![^\W\d_])"
 )
 _OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
@@ -620,10 +630,41 @@ def _strip_omp_decoration(text: str) -> str:
     return text[start:end]
 
 
-def _canonicalize_omp_prose(text: str) -> str:
-    """Normalize compatibility forms without changing unrelated Unicode letters."""
-    text = _OMP_HTML_TAG.sub("", text)
-    return unicodedata.normalize("NFKC", text).casefold()
+def _latin_fold(character: str) -> str:
+    """One non-ASCII Latin letter as the ASCII letter Unicode says it is.
+
+    A letter whose name begins `LATIN ` folds when its NFKD decomposition
+    begins with an ASCII letter (é, ü, İ), or when its name is one letter
+    with an optional `DOTLESS` and `WITH ...` (ı, ø) or a small capital (ᴠ,
+    ʀ), keeping the case the name states. Anything else is returned as is.
+    """
+    if character.isascii() or not character.isalpha():
+        return character
+    name = unicodedata.name(character, "")
+    if not name.startswith("LATIN "):
+        return character
+    first = unicodedata.normalize("NFKD", character)[:1]
+    if first.isascii() and first.isalpha():
+        return first
+    named = _OMP_LATIN_LETTER_NAME.fullmatch(name)
+    if named:
+        letter = named.group(2)
+        return letter if named.group(1) == "CAPITAL" else letter.lower()
+    small_capital = _OMP_LATIN_SMALL_CAPITAL_NAME.fullmatch(name)
+    if small_capital:
+        return small_capital.group(1).lower()
+    return character
+
+
+def _canonicalize_omp_prose(text: str) -> tuple[str, str]:
+    """Tags stripped, NFKC, then the Latin fold: `(cased, cased.casefold())`.
+
+    The cased copy keeps letter case for the camel-case key bound and the
+    uppercase value anchor; the casefolded copy is what the key matches.
+    """
+    text = unicodedata.normalize("NFKC", _OMP_HTML_TAG.sub("", text))
+    cased = "".join(_latin_fold(character) for character in text)
+    return cased, cased.casefold()
 
 
 def _validate_omp_prose(lines: list[str | None]) -> None:
@@ -646,6 +687,25 @@ def _validate_omp_prose(lines: list[str | None]) -> None:
                 raise ReviewProseUnsafe(
                     "ReviewProseUnsafe: "
                     f"filler U+{ord(character):04X} outside review record"
+                )
+
+
+def _refuse_mixed_words(canonical: list[tuple[str, str] | None]) -> None:
+    """Refuse a word holding both ASCII and non-ASCII letters, reply-wide.
+
+    The ASCII letters around a lookalike are the tell, so a homoglyph key is
+    refused here rather than matched or missed.
+    """
+    for item in canonical:
+        if item is None:
+            continue
+        for word in _OMP_WORD.findall(item[0]):
+            letters = [character for character in word if character.isalpha()]
+            if any(character.isascii() for character in letters) and not all(
+                character.isascii() for character in letters
+            ):
+                raise ReviewProseUnsafe(
+                    f"ReviewProseUnsafe: mixed-script word {word!r}"
                 )
 
 
@@ -693,6 +753,27 @@ def _omp_prose_value(text: str) -> str:
     return _strip_omp_decoration(text)
 
 
+def _omp_verdict_keys(cased: str, folded: str) -> list[re.Match[str]]:
+    """Every `verdict` key on a line, with its leading bound applied.
+
+    A key starts the line, follows a non-letter, or follows an ASCII
+    lowercase letter as an uppercase `V` (`FinalVerdict`); a key after any
+    other letter is part of a longer word (`never dictate`, `SERVER_DICT`).
+    """
+    origin = [
+        index for index, character in enumerate(cased) for _ in character.casefold()
+    ]
+    keys = []
+    for match in _OMP_VERDICT_KEY.finditer(folded):
+        start = match.start()
+        if start and _OMP_LETTER.match(folded[start - 1]):
+            at = origin[start]
+            if not (cased[at] == "V" and at and "a" <= cased[at - 1] <= "z"):
+                continue
+        keys.append(match)
+    return keys
+
+
 def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
     """Return every prose verdict, refusing unsafe or unclassifiable prose."""
     _validate_omp_prose(lines)
@@ -700,33 +781,46 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
         None if line is None else _canonicalize_omp_prose(line)
         for line in lines
     ]
+    _refuse_mixed_words(canonical)
     verdicts = []
-    for index, line in enumerate(canonical):
-        if line is None:
+    consumed: set[int] = set()
+    for index, item in enumerate(canonical):
+        if item is None:
             continue
-        matches = list(_OMP_VERDICT_KEY.finditer(line))
-        if not matches:
+        cased, folded = item
+        keys = _omp_verdict_keys(cased, folded)
+        if not keys:
+            if index not in consumed and _OMP_VALUE_ANCHOR.search(cased):
+                raise ReviewProseUnsafe(
+                    "ReviewProseUnsafe: verdict value without a verdict key"
+                )
             continue
-        if len(matches) != 1:
+        if len(keys) != 1:
             raise VerdictConflict(
                 "VerdictConflict: prose line contains multiple verdict keys"
             )
-        value = _omp_prose_value(line[matches[0].end():])
-        record_is_value = False
+        value = _omp_prose_value(folded[keys[0].end():])
         if not value:
-            for candidate in canonical[index + 1:]:
-                if candidate is None:
-                    record_is_value = True
-                    break
-                if candidate.strip():
-                    value = _omp_prose_value(candidate)
-                    break
-        if record_is_value:
-            continue
-        normalized = re.sub(r"[\s_-]+", " ", value).upper()
-        if normalized == "APPROVE":
+            # A key-only line looks forward only: its value is the next
+            # non-blank item, and when that item is the record it confirms
+            # the record by construction.
+            following = next(
+                (
+                    later
+                    for later in range(index + 1, len(canonical))
+                    if canonical[later] is None or canonical[later][1].strip()
+                ),
+                None,
+            )
+            if following is not None:
+                if canonical[following] is None:
+                    continue
+                consumed.add(following)
+                value = _omp_prose_value(canonical[following][1])
+        normalized = re.sub(r"[\s_-]+", " ", value)
+        if normalized == "approve":
             verdicts.append(APPROVED)
-        elif normalized == "REQUEST CHANGES":
+        elif normalized == "request changes":
             verdicts.append(CHANGES_REQUESTED)
         else:
             raise VerdictConflict(
@@ -806,9 +900,19 @@ def _omp_review_record(text: str) -> tuple[dict, list[str | None]]:
     return record, prose
 
 
+def _without_interval_record(text: str) -> str:
+    """`text` without its trailing INTERVAL record, line endings kept."""
+    raw_lines = text.splitlines(keepends=True)
+    start, end = _record_block(text.splitlines())
+    return "".join(raw_lines[:start] + raw_lines[end:])
+
+
 def parse_omp(text: str) -> tuple[str, list[dict]]:
-    """Parse one closed OMP review record; prose can only confirm or veto it."""
-    record, prose = _omp_review_record(text)
+    """Parse one closed OMP review record; prose can only confirm or veto it.
+
+    The trailing INTERVAL record is run_phase's, so it is not read as prose.
+    """
+    record, prose = _omp_review_record(_without_interval_record(text))
     verdict = (
         APPROVED if record["verdict"] == "APPROVE" else CHANGES_REQUESTED
     )
