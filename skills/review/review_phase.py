@@ -589,13 +589,15 @@ _OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
 # A CommonMark raw HTML tag: an open tag (a tag name directly after `<`, its
 # attributes, an optional `/`) or a closing tag (a tag name directly after
 # `</`). Its attribute whitespace may hold a line break, so it is searched on
-# a whole paragraph. Prose holding one is refused, never stripped. Any other
-# `<` is text a reader sees (`n < 0`, `Map<K, V>`, `a <- b`).
+# a whole paragraph. That whitespace is the renderer's: space, tab, line feed,
+# vertical tab, form feed and carriage return. Prose holding one is refused,
+# never stripped. Any other `<` is text a reader sees (`n < 0`, `Map<K, V>`,
+# `a <- b`).
 _OMP_HTML_TAG = re.compile(
     r"<(?:[A-Za-z][A-Za-z0-9-]*"
-    r"(?:[ \t\r\n]+[A-Za-z_:][A-Za-z0-9_.:-]*"
-    r"(?:[ \t\r\n]*=[ \t\r\n]*(?:[^ \t\r\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
-    r"[ \t\r\n]*/?|/[A-Za-z][A-Za-z0-9-]*[ \t\r\n]*)>"
+    r"(?:[ \t\n\v\f\r]+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:[ \t\n\v\f\r]*=[ \t\n\v\f\r]*(?:[^ \t\n\v\f\r\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t\n\v\f\r]*/?|/[A-Za-z][A-Za-z0-9-]*[ \t\n\v\f\r]*)>"
 )
 # Raw HTML whose letters a reader does not see: a tag, or a `<!` or `<?`
 # start (a comment, declaration, CDATA section or processing instruction).
@@ -661,6 +663,10 @@ _OMP_VALUE_TOKEN = re.compile(
 # does not see.
 _OMP_LINK = re.compile(r"\]\(|\]\[|!\[")
 _OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+# A CommonMark line with its ending, which is `\n`, `\r\n` or `\r` and nothing
+# else. `str.splitlines` also breaks at `\v`, `\f`, `\x1c`-`\x1e`, `\x85`,
+# U+2028 and U+2029, which the renderer keeps inside a line.
+_OMP_COMMONMARK_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
 
 
 def _latin_fold(character: str) -> str:
@@ -724,16 +730,42 @@ def _validate_omp_prose(lines: list[str | None]) -> None:
                 )
 
 
-def _omp_prose_segments(canonical: list[tuple[str, str] | None]) -> list[list[int]]:
+def _omp_commonmark_lines(lines: list[str | None]) -> list[str | None]:
+    """The prose split where the renderer splits lines; a record stays `None`.
+
+    The prose arrives split by `str.splitlines` with its line endings kept, so
+    each run between records is joined back as written and split again.
+    """
+    split: list[str | None] = []
+    run: list[str] = []
+    for line in lines + [None]:
+        if line is not None:
+            run.append(line)
+            continue
+        split.extend(_OMP_COMMONMARK_LINE.findall("".join(run)))
+        split.append(None)
+        run = []
+    return split[:-1]
+
+
+def _omp_blank(line: str) -> bool:
+    """A CommonMark blank line: only spaces and tabs before its line ending."""
+    return not line.rstrip("\r\n").strip(" \t")
+
+
+def _omp_prose_segments(
+    lines: list[str | None], canonical: list[tuple[str, str] | None]
+) -> list[list[int]]:
     """The prose paragraphs, as runs of line indexes.
 
     A record, a blank line or a fence line ends a paragraph, which is where
-    the renderer ends one too.
+    the renderer ends one too. A line is blank as written, never after NFKC,
+    since NFKC turns a no-break or ideographic space into a space.
     """
     segments: list[list[int]] = []
     current: list[int] = []
     for index, item in enumerate(canonical):
-        if item is None or not item[1].strip() or _OMP_FENCE_LINE.match(item[0]):
+        if item is None or _omp_blank(lines[index]) or _OMP_FENCE_LINE.match(item[0]):
             if current:
                 segments.append(current)
                 current = []
@@ -858,12 +890,13 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
     must hold a value token, unless it is key-only and the next non-blank item
     is the record or a line that holds one; it never looks back.
     """
+    lines = _omp_commonmark_lines(lines)
     _validate_omp_prose(lines)
     canonical = [
         None if line is None else _canonicalize_omp_prose(line)
         for line in lines
     ]
-    segments = _omp_prose_segments(canonical)
+    segments = _omp_prose_segments(lines, canonical)
     _refuse_omp_markup(canonical, segments)
     _refuse_mixed_words(canonical)
     values: dict[int, list[str]] = {

@@ -4,8 +4,9 @@ Each case id is its row in the prose grammar's test matrix. A the record,
 B unsafe characters, C raw HTML refused, D links and images refused, E the
 fold and mixed-script words, F the key, G the value token, H key lines and
 bare keys, I prose placement and fences, J terminal errors, K the prompt
-contract. A prose row runs in both orders, prose before the record and the
-record before the prose, unless it names one; a "parse" row goes through
+contract, L whitespace the renderer reads differently from `str`. A prose
+row runs in both orders, prose before the record and the record before the
+prose, unless it names one; a "parse" row goes through
 `parse_omp`, a "run_phase" row through `run_phase` with `backend: omp`.
 """
 
@@ -466,3 +467,58 @@ def test_K2_the_paragraph_after_the_contract_states_the_rules():
     assert "A key-only line takes the next non-blank line, or the record after it, as its value." in flat
     assert "on a line with no key" not in flat
     assert "raw HTML" in flat and "link" in flat
+
+
+# --- L. whitespace as the renderer reads it, through run_phase ---------------
+#
+# Each row sits beside an APPROVE record and must be refused or conflict, never
+# approved. L1-L6: a form feed or vertical tab is whitespace inside a tag, so
+# the tag is raw HTML. L7-L9: a line of only a no-break, ideographic or em
+# space is not blank, so the paragraph and its token run on. L10-L12: `\x1c`,
+# `\x85` and `\f` end no line, so no blank or fence line splits the token. The
+# controls: a form feed ends an unquoted attribute value, so `<b id=y\f.>` is
+# text (L6b); G18 still conflicts (L13); a clean APPROVE paragraph succeeds;
+# and a line of spaces and tabs, `\r\n\r\n` or `\r\r` is still a paragraph
+# break.
+
+WHITESPACE_ROWS = [
+    ("L1", "REQUEST CHAN<b\f>GES", BOTH, HTML),
+    ("L2", "REQUEST CHAN<b\fid=x>GES", BOTH, HTML),
+    ("L3", "REQUEST CHAN<b\v>GES", BOTH, HTML),
+    ("L4", "REQUEST CHAN<b\vid=x>GES", BOTH, HTML),
+    ("L5", "REQUEST CHAN</b\f>GES", BOTH, HTML),
+    ("L6", "REQUEST CHAN<b id=x\fy=z>GES", BOTH, HTML),
+    ("L6b", "x <b id=y\f.> z", BOTH, OK_A),
+    ("L7", "REQUEST\n\u00a0\nCHANGES", BOTH, DISAGREES_A),
+    ("L8", "REQUEST\n\u3000\nCHANGES", BOTH, DISAGREES_A),
+    ("L9", "REQUEST\n\u2003\nCHANGES", BOTH, DISAGREES_A),
+    ("L10", "REQUEST\x1c\x1cCHANGES", BOTH, DISAGREES_A),
+    ("L11", "REQUEST\x85\x85CHANGES", BOTH, DISAGREES_A),
+    # Prose first, the plain fence `splitlines` sees would swallow the record.
+    ("L12", "REQUEST\f```\nCHANGES", RECORD_FIRST, DISAGREES_A),
+    ("L13", "Decision: REQUEST\nCHANGES", BOTH, DISAGREES_A),
+    ("L14", "The change is correct and tested.\nVerdict: APPROVE", BOTH, OK_A),
+    ("L15", "Decision: REQUEST\n \t\nCHANGES", BOTH, OK_A),
+    ("L16", "Decision: REQUEST\r\n\r\nCHANGES", BOTH, OK_A),
+    ("L17", "Decision: REQUEST\r\rCHANGES", BOTH, OK_A),
+]
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        pytest.param(_ordered(prose, RA, order), expected, id=f"{case}.{order}")
+        for case, prose, orders, expected in WHITESPACE_ROWS
+        for order in orders
+    ],
+)
+def test_whitespace_row(text, expected):
+    result = review_phase.run_phase(_envelope(text + "INTERVAL: none\n"))
+    kind, detail = expected
+    if kind == "ok":
+        assert result["status"] == "success", result["reason"]
+        assert result["artifacts"]["findings.json"]["verdict"] == detail
+        return
+    findings = (result.get("artifacts") or {}).get("findings.json") or {}
+    assert result["status"] == "failure", f"{result['status']} {findings.get('verdict')}"
+    assert detail in result["reason"], result["reason"]
