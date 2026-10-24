@@ -1113,7 +1113,12 @@ class MarkdownStore:
             card, current = self._load()
             if current != token:
                 raise _stale(self.key, "the card on disk changed")
-            _check_pass(self.key, card["pass"], self.pass_id, self._ended)
+            if any(kind == "claim" for kind, _ in events):
+                # A new pass claims only a card with no live pass, whatever this handle held before.
+                if card["pass"] is not None:
+                    raise TicketHeld(self.key, card["pass"])
+            else:
+                _check_pass(self.key, card["pass"], self.pass_id, self._ended)
             card = _fold(card, events)
             self._save(card)
         for kind, value in events:
@@ -1315,7 +1320,7 @@ class TicketPass:
             session._claim()
         else:
             _check_pass(key, card["pass"], pass_id, None)
-            store.pass_id = pass_id
+            store.pass_id, store._ended = pass_id, None
             session._pass_id = pass_id
         session._live = True
         return session

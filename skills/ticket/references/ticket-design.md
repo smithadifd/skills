@@ -427,8 +427,9 @@ value (`TicketError`, nothing written). The `token` passed to `apply` is always 
   creating the lock file through the directory retries up to five attempts on `ENOENT`, because two
   first writers creating it at the same moment can see that error);
   load; compute the token; refuse `stale` if it differs from the expected (held) one; check the claim
-  (`_check_pass`: a bound handle writes only while its pass is live, an unbound handle only while none
-  is); fold the events; write a temporary file beside the card and rename it into place; return the
+  (a `claim` lands only while no pass is live, else `held`, whatever pass the handle held before; any
+  other write goes through `_check_pass`: a bound handle writes only while its pass is live, an unbound
+  handle only while none is); fold the events; write a temporary file beside the card and rename it into place; return the
   new token. The operating system drops the lock if the holder dies. A hand edit of the card between
   two steps changes the digest, so the next write refuses `stale` and the pass ends.
 - **`release`**: under the lock, load, clear `pass` only if its id is this handle's, save. No token.
