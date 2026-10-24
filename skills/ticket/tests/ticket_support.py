@@ -139,6 +139,23 @@ def store(repo):
     return ticket.MarkdownStore(repo, KEY, TITLE)
 
 
+CLEARED_PASS = "0000000000000000"
+
+
+def bound_to_a_cleared_pass(repo):
+    """A handle bound to a pass of its own that a person has since cleared: it holds an id that is not live.
+
+    The handle binds the only way a handle can, through its own ``apply``: a
+    ``claim`` on the blank card. ``clear_pass`` then clears that claim as a
+    person would, so the card is blank again apart from having been written.
+    """
+
+    handle = store(repo)
+    handle.apply(ticket.NO_TOKEN, [("claim", {"id": CLEARED_PASS, "host": "elsewhere", "started_at": UPDATED})])
+    handle.clear_pass(CLEARED_PASS)
+    return handle
+
+
 def card_path(repo):
     return Path(repo) / ".ticket" / f"{KEY}.md"
 

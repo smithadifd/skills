@@ -17,7 +17,8 @@ import pytest
 
 import ticket
 from ticket_support import (
-    A, B, KEY, TITLE, Source, build, card_bytes, card_path, open_pass, read_card, refusal, store,
+    A, B, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass, read_card,
+    refusal, store,
 )
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -69,7 +70,14 @@ class SlowSave(ticket.MarkdownStore):
         super()._save(card)
 
 handle = SlowSave(sys.argv[1], "EK-14", "Add guarded ticket pass")
-handle.pass_id = sys.argv[2]
+while True:  # the join binds the handle to the live pass; a stale read is retried
+    card, token = handle.read()
+    try:
+        handle.apply(token, [("join", {"id": sys.argv[2]})])
+        break
+    except ticket.StoreUnavailable as exc:
+        if exc.code != "stale":
+            raise
 for number in range(int(sys.argv[4])):
     while True:
         card, token = handle.read()
@@ -104,7 +112,8 @@ def test_G3_two_threads_on_one_store_handle_lose_no_write(repo):
             super()._save(card)
 
     handle = PausingSave(repo, KEY, TITLE)
-    handle.pass_id = session.pass_id
+    _, token = handle.read()
+    handle.apply(token, [("join", {"id": session.pass_id})])
     errors = []
 
     def append(what):
@@ -214,11 +223,12 @@ def test_G7_an_unreadable_card_is_refused(repo, case):
 
 
 def test_G8_release_clears_only_this_handles_claim_and_needs_no_token(repo):
+    # The stranger binds the only way a handle can: it claims a pass of its own
+    # on the blank card, and a person clears that pass before pass 1 opens.
+    stranger = bound_to_a_cleared_pass(repo)
     src = Source()
     session = build(repo, src, "S2", 0)
     open_pass(repo, src, pass_id=session.pass_id).record_tried("An outside note.")
-    stranger = store(repo)
-    stranger.pass_id = "0000000000000000"
     stranger.release()
     assert read_card(repo)["pass"]["id"] == session.pass_id
     session.end()
@@ -444,9 +454,9 @@ def test_G18_a_claim_binds_the_handle_before_the_lock_is_released(repo):
     class RecordingLock(ticket.MarkdownStore):
         @contextlib.contextmanager
         def _locked(self):
-            with super()._locked():
+            with super()._locked() as directory:
                 try:
-                    yield
+                    yield directory
                 finally:
                     seen.append((self.pass_id, self.ended))
 
@@ -515,3 +525,64 @@ def test_G23_an_unopenable_lock_is_refused_with_a_code(repo):
     assert os.strerror(errno.EISDIR) in str(excinfo.value)
     assert _lock_path(repo).is_dir()
     assert card_bytes(repo) is None
+
+
+# --- G24-G26: a read-only bound pass; the card read without following a link
+
+
+def _temporary_files(repo):
+    return [p.name for p in card_path(repo).parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_G24_pass_id_is_read_only_and_a_handle_that_cannot_bind_clears_no_claim(repo):
+    session = open_pass(repo, Source())
+    other = store(repo)
+    with pytest.raises(AttributeError, match="no setter"):
+        other.pass_id = session.pass_id
+    assert (other.pass_id, other.ended) == (None, None)
+    _, token = other.read()
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        other.apply(token, [("claim", CLAIM)])
+    assert refusal(excinfo) == "held"
+    assert (other.pass_id, other.ended) == (None, None)
+    before = card_bytes(repo)
+    other.release()
+    assert card_bytes(repo) == before
+    assert read_card(repo)["pass"]["id"] == session.pass_id
+    assert session.live is True
+
+
+def test_G25_a_card_that_is_a_link_outside_the_repository_is_refused_unread(repo, tmp_path):
+    marker = "Title-only-the-outside-file-carries"
+    outside_card = ticket._blank_card(KEY, marker)
+    outside_card["tried"] = [{"what": marker, "phase": "build"}]
+    outside = tmp_path / "outside.md"
+    outside.write_text(ticket._render_card(outside_card), encoding="utf-8")
+    before = outside.read_bytes()
+    card_path(repo).parent.mkdir()
+    os.symlink(outside, card_path(repo))
+    for attempt in (lambda: store(repo).read(), lambda: open_pass(repo, Source()),
+                    lambda: store(repo).apply("none", [_tried()])):
+        with pytest.raises(ticket.StoreUnavailable) as excinfo:
+            attempt()
+        assert refusal(excinfo) == "card_not_regular"
+        assert marker not in str(excinfo.value)
+    assert os.path.islink(card_path(repo))
+    assert outside.read_bytes() == before
+    assert _temporary_files(repo) == []
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_G26_a_card_that_is_not_a_regular_file_is_refused_unread(repo, kind):
+    card_path(repo).parent.mkdir()
+    if kind == "fifo":
+        os.mkfifo(card_path(repo))
+    else:
+        card_path(repo).mkdir()
+    for attempt in (lambda: store(repo).read(), lambda: store(repo).apply("none", [_tried()])):
+        with pytest.raises(ticket.StoreUnavailable) as excinfo:
+            attempt()
+        assert refusal(excinfo) == "card_not_regular"
+    mode = os.lstat(card_path(repo)).st_mode
+    assert stat.S_ISFIFO(mode) if kind == "fifo" else stat.S_ISDIR(mode)
+    assert _temporary_files(repo) == []

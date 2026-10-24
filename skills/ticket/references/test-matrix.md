@@ -193,13 +193,13 @@ bind (design section 5).
 | ID | Test name | Setup | Expected | Mutation |
 |---|---|---|---|---|
 | G1 | `test_markdown_write_waits_for_the_lock_file_and_lands_after_release` | the test holds `flock` on `.ticket/<key>.lock`; a subprocess writer starts | the card is unchanged while held; after release the write lands | remove `fcntl.flock` from `apply` |
-| G2 | `test_markdown_writers_in_parallel_lose_no_write` | N processes append `tried` records through fresh handles under one pass | all N records on the card | `apply` saves without the lock (same as G1; name separately: `apply` loads before taking the lock) |
-| G3 | `test_two_threads_on_one_store_handle_lose_no_write` | two threads, one handle, a save that pauses inside the first write | both records on the card | remove the handle's `threading.RLock` |
+| G2 | `test_markdown_writers_in_parallel_lose_no_write` | N processes append `tried` records through fresh handles, each joined to the one live pass through `apply` (a stale read retried) | all N records on the card | `apply` saves without the lock (same as G1; name separately: `apply` loads before taking the lock) |
+| G3 | `test_two_threads_on_one_store_handle_lose_no_write` | two threads, one handle joined to the live pass through `apply`, a save that pauses inside the first write | both records on the card | remove the handle's `threading.RLock` |
 | G4 | `test_markdown_store_refuses_a_lock_path_that_is_a_symlink` | `.ticket/<key>.lock` is a symlink | `StoreUnavailable`; the link target untouched; nothing written | drop the `S_ISREG` check (and `O_NOFOLLOW`) |
 | G5 | `test_markdown_refuses_an_unignored_card_without_editing_the_ignore_file` | a repo where `.ticket/` is not ignored | `StoreUnavailable` naming `.ticket/`; no file under `.ticket/` and no ignore file changed | `_check_ignored` not called before the save |
 | G6 | `test_a_hand_edit_between_steps_is_stale[same length | reorder | whitespace in a point]` | S2[0] live; the card's JSON rewritten with the edit (file size and mtime preserved) | the next write raises `stale`; nothing written; pass ends | the token is the file's `(size, mtime)` instead of the digest |
 | G7 | `test_an_unreadable_card_is_refused[no block | truncated block | bad json | stamps not a list | status unknown | pass id not hex]` | the card file edited so | `card_unreadable`; nothing written; no claim | the reader `setdefault`s missing or wrong-typed fields to blanks / separately: the reader accepts a pass id that is not lowercase hex |
-| G8 | `test_release_clears_only_this_handles_claim_and_needs_no_token` | pass 1 live; a second handle writes `tried` (token moves); pass 1 `end()` | the claim cleared; the `tried` stays; a handle whose pass is not the live one leaves the claim | `release` goes through `apply` with the handle's token |
+| G8 | `test_release_clears_only_this_handles_claim_and_needs_no_token` | a stranger handle claims a pass of its own on the blank card and a person clears it (`clear_pass`); pass 1 live; a second handle writes `tried` (token moves); the stranger's `release()`; pass 1 `end()` | the claim cleared; the `tried` stays; a handle whose pass is not the live one leaves the claim | `release` goes through `apply` with the handle's token |
 | G9 | `test_a_lock_held_by_a_dead_writer_is_released_by_the_system` | a subprocess takes the lock and is killed | the next write lands | not a code mutation: a probe row; mark `evidence only` |
 | G10 | `test_recorded_comment_markers_round_trip_and_leave_one_block` | a point containing `-->`, `<!--`, `&`, `<b>` | exactly one `<!-- ticket-card:v2` block; the text reads back equal; the rendered summary escapes them | the escape of `>` dropped in the machine block |
 | G11 | `test_a_failed_save_leaves_the_old_card_and_no_temporary_file` | `os.replace` made to raise | the old card intact; no `.tmp` left; the error raises; the pass ends | the save writes the card in place (`open(path, "w")`) |
@@ -215,6 +215,9 @@ bind (design section 5).
 | G21 | `test_an_unignored_card_is_refused_with_a_code` | G5's setup (`.ticket/` not ignored); `apply` | `code == "not_ignored"`; no file under `.ticket/`; no ignore file changed | the `code=` dropped at `_check_ignored` |
 | G22 | `test_a_lock_that_is_not_a_regular_file_is_refused_with_a_code` | a FIFO at `.ticket/<key>.lock` (it opens; G4's link is refused by the no-follow open itself and lands on G23's code); `apply` | `code == "lock_not_regular"`; the FIFO untouched; nothing written | the `code=` dropped at the `S_ISREG` refusal |
 | G23 | `test_an_unopenable_lock_is_refused_with_a_code` | `.ticket/<key>.lock` is a directory; `apply` | `code == "lock_unopenable"`; the message carries the operating system's error; nothing written | the `code=` dropped at `_open_lock` |
+| G24 | `test_pass_id_is_read_only_and_a_handle_that_cannot_bind_clears_no_claim` | pass 1 live through H1; fresh H2; `H2.pass_id = P1`; `H2.apply(token, [claim])`; `H2.release()` | the assignment raises `AttributeError` and H2 stays `(None, None)`; the claim is `held`; the release changes no byte and P1 stays the card's live pass | a setter on `MarkdownStore.pass_id` that writes the private field |
+| G25 | `test_a_card_that_is_a_link_outside_the_repository_is_refused_unread` | a card-shaped file outside the repository with a marker in its title and a record; `.ticket/<key>.md` a symlink to it; `read`, `open` and `apply` | each is `card_not_regular`; the marker reaches no result and no message; the link and the outside file are unchanged; no temporary file | the card opened through `self.path` (the link followed) instead of through the directory descriptor |
+| G26 | `test_a_card_that_is_not_a_regular_file_is_refused_unread[fifo \| directory]` | a FIFO / a directory at `.ticket/<key>.md`; `read` and `apply` | `card_not_regular` both ways; the FIFO or directory untouched; no temporary file | the `S_ISREG` check on the card dropped (the FIFO reads as empty and is `card_unreadable`; the directory raises `IsADirectoryError`) |
 
 ## H. The ledger store (concurrent writers)
 
@@ -280,7 +283,7 @@ identity of its `and`/`or`.
 | I8 | `test_tried_validation_refuses_each_fault[empty what | phase | outcome non-text | evidence not a ref]` | `_validate_tried` | per fault | each alone |
 | I9 | `test_the_card_reader_refuses_a_block_without_its_markers[no start | no end]` | 760 (2 operands) | `card_unreadable` | each operand alone `(shared with G7)` |
 | I10 | `test_a_lock_that_is_not_a_regular_file_is_refused` | 713 | as G4 | `(shared with G4)` |
-| I11 | `test_check_pass_refuses_each_case[unbound with live | bound other live | bound none live | ended]` | 134 (`live is not None`) and the other branches | `held` / `pass_ended` per case; nothing written | each branch alone `(E11a, E11b, E11e share)` |
+| I11 | `test_check_pass_refuses_each_case[unbound with live | bound other live | bound none live | ended]` | 134 (`live is not None`) and the other branches; a bound handle is bound through `apply` (a claim of its own, then cleared by a person, or a join then released) | `held` / `pass_ended` per case; nothing written | each branch alone `(E11a, E11b, E11e share)` |
 | I12 | `test_identity_reads_the_revision_strictly` | 1025 (`revision < 1`), 1030/1036 (operands) | C2–C6 | `(shared with C2–C6)` |
 | I13 | `test_record_go_refuses_a_bad_gate_or_empty_words[gate | evidence | verbatim]` | 1342, 1507, 1512 (2) | `TicketError`; nothing written | each alone |
 | I14 | `test_record_review_refuses_each_fault[verdict | index type | index range | index repeated | pass not listing all | wrong phase | no plan]` | 1565, 1567, 1579 (cap, see below), 1595, 1600 (2), 1606 | per fault | each alone. `1579` (`rounds >= 3` inside `record_review`) and `1595`/`1600`/`1606` (the read-back of a just-stored round) are **removed by construction**: the cap is a derived terminal state (A5, E8) and a batch lands whole (H20), so no guard remains to mutate |
@@ -301,10 +304,10 @@ identity of its `and`/`or`.
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
-- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 41, F 8, G 23,
-  H 33, I 26. Total 207 rows. Nine carry no test of their own in this release: A0.1–4 (impossible by
+- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 41, F 8, G 26,
+  H 33, I 26. Total 210 rows. Nine carry no test of their own in this release: A0.1–4 (impossible by
   construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), the two
-  evidence probes G9 and H19, and H33 (the ledger store's). The other 198 each have a test and a
+  evidence probes G9 and H19, and H33 (the ledger store's). The other 201 each have a test and a
   named mutation.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's

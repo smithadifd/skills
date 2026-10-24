@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import errno
 import fcntl
 import functools
 import hashlib
@@ -598,6 +599,14 @@ def _unreadable(where: str, why: str) -> StoreUnavailable:
     )
 
 
+def _card_not_regular(where: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"{where} is not a regular file (a link, a directory or another kind of file is at the card's path), "
+        "so it was not read and nothing was written; a person removes it.",
+        code="card_not_regular",
+    )
+
+
 def _check_card_shape(card: Any, key: str, where: str) -> None:
     """Refuse a card whose top-level fields are not of the section-2 shape."""
 
@@ -1059,10 +1068,21 @@ class MarkdownStore:
         self.path = self.repo / self.relative_path
         self.lock_path = self.path.with_name(f"{key}.lock")
         self.ref = self.relative_path.as_posix()
-        self.pass_id: str | None = None
+        self._pass_id: str | None = None
         self._ended: str | None = None
         # Threads sharing this handle take turns before the file lock.
         self._threads = threading.RLock()
+
+    @property
+    def pass_id(self) -> str | None:
+        """The pass this handle writes for: bound by its own ``apply``, cleared by ``release``.
+
+        Read-only. The field behind it changes in two places only, ``apply``
+        on a successful binding event and ``release``, so no caller binds or
+        rebinds a handle by assignment.
+        """
+
+        return self._pass_id
 
     @property
     def ended(self) -> str | None:
@@ -1096,20 +1116,27 @@ class MarkdownStore:
                     code="not_ignored",
                 )
 
-    @contextlib.contextmanager
-    def _locked(self) -> Iterator[None]:
-        """This handle's thread lock, then an exclusive ``flock`` on the lock file.
+    def _open_directory(self) -> int:
+        """``.ticket/`` itself, opened without following a link; the card and the lock are opened through it."""
 
-        The lock file is opened without following a link, through the
-        directory, and must be a regular file. The operating system drops the
-        lock if its holder dies.
+        return os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[int]:
+        """This handle's thread lock, then an exclusive ``flock`` on the lock file; yields the directory.
+
+        ``.ticket/`` is opened without following a link, and the lock file is
+        opened through it, without following a link, and must be a regular
+        file. The card is read through the same descriptor while the lock is
+        held (``_load``). The operating system drops the lock if its holder
+        dies.
         """
 
         with self._threads:
             self._inside_repo()
             self._check_ignored()
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            directory = self._open_directory()
             try:
                 fd = self._open_lock(directory)
                 try:
@@ -1119,7 +1146,7 @@ class MarkdownStore:
                             code="lock_not_regular",
                         )
                     fcntl.flock(fd, fcntl.LOCK_EX)
-                    yield
+                    yield directory
                 finally:
                     os.close(fd)
             finally:
@@ -1141,10 +1168,32 @@ class MarkdownStore:
                     code="lock_unopenable",
                 ) from exc
 
-    def _load(self) -> tuple[dict[str, Any], str]:
-        if not self.path.exists():
+    def _load(self, directory: int) -> tuple[dict[str, Any], str]:
+        """The card as read through ``directory``, or the blank card when there is none.
+
+        The card is opened relative to the verified ``.ticket/`` descriptor
+        without following a link and must be a regular file; a link or any
+        other kind of file at its path is refused ``card_not_regular`` before
+        a byte is read. ``O_NONBLOCK`` keeps a FIFO there from holding the
+        open until a writer appears; a regular file reads the same with it.
+        """
+
+        try:
+            fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
             return _blank_card(self.key, self.title), NO_TOKEN
-        body = self.path.read_text(encoding="utf-8")
+        except OSError as exc:
+            if exc.errno != errno.ELOOP:
+                raise
+            raise _card_not_regular(self.ref) from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise _card_not_regular(self.ref)
+        except BaseException:
+            os.close(fd)
+            raise
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            body = handle.read()
         start = body.find(_BLOCK_START)
         end = body.find(_BLOCK_END, start + 1)
         if start < 0 or end < 0:
@@ -1170,8 +1219,22 @@ class MarkdownStore:
     # The four calls.
 
     def read(self) -> tuple[dict[str, Any], str]:
+        """The card and its token, read through ``.ticket/`` without the lock.
+
+        A read takes no lock and runs no ignore check, so it works on a
+        repository that has not yet ignored ``.ticket/``; an absent ``.ticket/``
+        is the blank card, like an absent card.
+        """
+
         self._inside_repo()
-        return self._load()
+        try:
+            directory = self._open_directory()
+        except FileNotFoundError:
+            return _blank_card(self.key, self.title), NO_TOKEN
+        try:
+            return self._load(directory)
+        finally:
+            os.close(directory)
 
     def apply(self, token: str, events: Sequence[tuple[str, Any]]) -> str:
         """Land every event or none, only while the card is still at ``token``.
@@ -1189,19 +1252,19 @@ class MarkdownStore:
             _validate_event(kind, value, self.key)
         binding = _binding(events)
         joining = binding is not None and binding[0] == "join"
-        with self._locked():
-            card, current = self._load()
+        with self._locked() as directory:
+            card, current = self._load(directory)
             if current != token:
                 raise _stale(self.key, "the card on disk changed")
-            if binding is not None and (self.pass_id is not None or self._ended is not None):
-                raise _handle_used(self.key, self.pass_id or self._ended)
-            mine = binding[1] if joining else self.pass_id
+            if binding is not None and (self._pass_id is not None or self._ended is not None):
+                raise _handle_used(self.key, self._pass_id or self._ended)
+            mine = binding[1] if joining else self._pass_id
             _check_pass(self.key, card["pass"], mine, self._ended)
             card = _fold(card, events)
             if not joining:
                 self._save(card)
             if binding is not None:
-                self.pass_id, self._ended = binding[1], None
+                self._pass_id, self._ended = binding[1], None
         return token if joining else _token(card)
 
     def release(self) -> None:
@@ -1212,10 +1275,10 @@ class MarkdownStore:
         handle that was never bound clears nothing.
         """
 
-        mine = self.pass_id
-        self.pass_id, self._ended = None, mine
-        with self._locked():
-            card, _ = self._load()
+        mine = self._pass_id
+        self._pass_id, self._ended = None, mine
+        with self._locked() as directory:
+            card, _ = self._load(directory)
             if card["pass"] is not None and card["pass"]["id"] == mine:
                 card["pass"] = None
                 self._save(card)
@@ -1223,8 +1286,8 @@ class MarkdownStore:
     def clear_pass(self, pass_id: str) -> None:
         """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim."""
 
-        with self._locked():
-            card, _ = self._load()
+        with self._locked() as directory:
+            card, _ = self._load(directory)
             live = card["pass"]
             if live is None or live["id"] != pass_id:
                 raise StoreUnavailable(

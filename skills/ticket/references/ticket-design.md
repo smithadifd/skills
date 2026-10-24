@@ -354,6 +354,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
 | `lock_unopenable` | the lock file could not be opened as a regular file through the directory; the message carries the operating system's error | markdown store; a link or a directory at the lock path lands here |
+| `card_not_regular` | `.ticket/<key>.md` exists but is not a regular file (a link, a FIFO, a directory); it was not read and nothing was written | markdown store, on every read and write; the card is opened through the verified `.ticket/` directory descriptor without following a link, so a link at the card path lands here whether the open refuses it or it opens as something other than a regular file |
 
 `GateRequired` (a `TicketError`) stays for a step taken before its go.
 
@@ -486,7 +487,9 @@ binds a handle only by sending one of the two, never by assigning `pass_id`.
   `O_NOFOLLOW` through a directory fd; a lock path that is not a regular file is refused untouched;
   creating the lock file through the directory retries up to five attempts on `ENOENT`, because two
   first writers creating it at the same moment can see that error);
-  load; compute the token; refuse `stale` if it differs from the expected (held) one; for a binding
+  open the card through the same directory descriptor without following a link and refuse
+  `card_not_regular` unless it is a regular file, before a byte is read; load; compute the token;
+  refuse `stale` if it differs from the expected (held) one; for a binding
   event (a `claim` or `join`, alone in the call), refuse `handle_used` if this handle is bound or has
   held an ended pass; check the claim (a bound handle writes only while its pass is live, an unbound
   handle only while none is, a join only while the pass it names is live); fold the events; write a
@@ -496,6 +499,9 @@ binds a handle only by sending one of the two, never by assigning `pass_id`.
   the lock if the holder dies. A hand edit of the card between two steps changes the digest, so the
   next write refuses `stale` and the pass ends.
 - **`release`**: under the lock, load, clear `pass` only if its id is this handle's, save. No token.
+- **`read`**: no lock and no ignore check; `.ticket/` and the card are opened the same way, without
+  following a link, and a card that is not a regular file is refused `card_not_regular`; an absent
+  directory or card is the blank card.
 - `closed` sets `status: "closed"`; the close stamp in the same `apply` has `close: true`.
 
 ### 6.2 Ledger store (second)

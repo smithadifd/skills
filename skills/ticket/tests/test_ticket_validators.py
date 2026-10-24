@@ -10,7 +10,8 @@ import pytest
 
 import ticket
 from ticket_support import (
-    A, B, F8, F9, F10, KEY, TITLE, Source, build, card_bytes, card_path, open_pass, read_card, refusal, store,
+    A, B, F8, F9, F10, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass,
+    read_card, refusal, store,
 )
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -349,20 +350,19 @@ def test_I10_a_lock_that_is_not_a_regular_file_is_refused(repo):
 def test_I11_check_pass_refuses_each_case(repo, case):
     tried = [("tried", {"what": "A note.", "phase": "orient"})]
     if case == "bound none live":
-        handle = store(repo)
-        handle.pass_id = "0000000000000000"
+        handle = bound_to_a_cleared_pass(repo)
         expected = "pass_ended"
     elif case == "ended":
         session = open_pass(repo, Source())
         handle = store(repo)
-        handle.pass_id = session.pass_id
+        _, token = handle.read()
+        handle.apply(token, [("join", {"id": session.pass_id})])
         handle.release()
         expected = "pass_ended"
     else:
+        # A bound handle claims, and is cleared, before the live pass opens.
+        handle = bound_to_a_cleared_pass(repo) if case == "bound other live" else store(repo)
         open_pass(repo, Source())
-        handle = store(repo)
-        if case == "bound other live":
-            handle.pass_id = "0000000000000000"
         expected = "held"
     _, token = handle.read()
     before = card_bytes(repo)
