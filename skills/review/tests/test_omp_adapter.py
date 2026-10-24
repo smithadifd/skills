@@ -216,6 +216,10 @@ def test_decorated_prose_never_supplies_and_can_only_veto_the_record(
     if not record_present:
         assert result["status"] == "failure"
         assert "ReviewRecordMissing" in result["reason"]
+    elif "<" in decoration:
+        # Raw HTML is refused, never stripped, whatever the value says.
+        assert result["status"] == "failure"
+        assert "ReviewProseUnsafe: raw HTML" in result["reason"], result["reason"]
     elif prose_value == "APPROVE":
         assert result["status"] == "success", result["reason"]
         assert result["artifacts"]["findings.json"]["verdict"] == "approved"
@@ -229,10 +233,16 @@ def test_decorated_prose_never_supplies_and_can_only_veto_the_record(
     "text, expected_status, reason_name",
     [
         pytest.param(
-            "<strong>𝐕𝐞𝐫𝐝𝐢𝐜𝐭</strong>： **APPROVE**\n\n" + _record(),
+            "**𝐕𝐞𝐫𝐝𝐢𝐜𝐭**： **APPROVE**\n\n" + _record(),
             "success",
             None,
             id="matching-prose",
+        ),
+        pytest.param(
+            "<strong>𝐕𝐞𝐫𝐝𝐢𝐜𝐭</strong>： **APPROVE**\n\n" + _record(),
+            "failure",
+            "ReviewProseUnsafe: raw HTML",
+            id="matching-prose-in-raw-html",
         ),
         pytest.param(_record(), "success", None, id="no-prose-verdict"),
         pytest.param(

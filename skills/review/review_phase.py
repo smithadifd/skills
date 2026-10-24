@@ -91,6 +91,7 @@ EXIT:
 from __future__ import annotations
 
 import argparse
+import bisect
 import copy
 import html.entities
 import json
@@ -585,16 +586,26 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
 
 _OMP_REVIEW_RECORD_FIELDS = {"verdict", "bugs", "nits", "reviewed_head"}
 _OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
-# A CommonMark raw HTML tag on one line: an open tag (a tag name directly
-# after `<`, its attributes, an optional `/`) or a closing tag (a tag name
-# directly after `</`). Any other `<` is text a reader sees (`n < 0`,
-# `Map<K, V>`, `a <- b`), so it stays in the prose the checks read.
+# A CommonMark raw HTML tag: an open tag (a tag name directly after `<`, its
+# attributes, an optional `/`) or a closing tag (a tag name directly after
+# `</`). Its attribute whitespace may hold a line break, so it is searched on
+# a whole paragraph. Prose holding one is refused, never stripped. Any other
+# `<` is text a reader sees (`n < 0`, `Map<K, V>`, `a <- b`).
 _OMP_HTML_TAG = re.compile(
     r"<(?:[A-Za-z][A-Za-z0-9-]*"
     r"(?:[ \t\r\n]+[A-Za-z_:][A-Za-z0-9_.:-]*"
     r"(?:[ \t\r\n]*=[ \t\r\n]*(?:[^ \t\r\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
     r"[ \t\r\n]*/?|/[A-Za-z][A-Za-z0-9-]*[ \t\r\n]*)>"
 )
+# Raw HTML whose letters a reader does not see: a tag, or a `<!` or `<?`
+# start (a comment, declaration, CDATA section or processing instruction).
+_OMP_RAW_HTML = re.compile(r"<[!?]|" + _OMP_HTML_TAG.pattern)
+# A CommonMark HTML block start: a line beginning, after up to three spaces,
+# with `<` and a letter, `/`, `!` or `?`. It can interrupt a paragraph and
+# runs to the next blank line, so every prose line is checked for one.
+_OMP_HTML_BLOCK_START = re.compile(r" {0,3}<[A-Za-z/!?]")
+# A fence line, which ends a paragraph for the renderer and so for the reading.
+_OMP_FENCE_LINE = re.compile(r" {0,3}(?:`{3,}|~{3,})")
 # Every character reference an HTML5 decoder consumes: any `&...;`, a numeric
 # or hex reference with or without its semicolon (`&#101`, `&#x65`), and the
 # legacy named references HTML5 decodes without one (`&shy`, `&amp`).
@@ -605,7 +616,6 @@ _OMP_HTML_REFERENCE = re.compile(
     )
     + ")"
 )
-_OMP_PROSE_QUALIFIER = re.compile(r"^\s*\([^()\n]*\)\s*")
 _OMP_UNSAFE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Zl", "Zp", "Co", "Cn", "Cs"})
 _OMP_UNSAFE_FILLERS = frozenset({"\u115f", "\u1160", "\u2800", "\u3164", "\uffa0"})
 # The Latin fold reads a letter's own Unicode name; there is no lookalike
@@ -633,32 +643,24 @@ _OMP_VERDICT_KEY_CANDIDATE = re.compile(
     + r"[\W\d_]*".join(rf"(?:{letter}|[^\W\d_A-Za-z])" for letter in "verdict")
     + r")s?(?![^\W\d_]))"
 )
-# The value anchor: a whole-word uppercase verdict value on the folded line
-# before casefold, its words separated as value normalization separates them.
-_OMP_VALUE_ANCHOR = re.compile(
-    r"(?<![^\W\d_])(?:APPROVE|REQUEST[\s_-]+CHANGES)(?![^\W\d_])"
+# A value token: the letters of `approve`, or of `request changes`, with any
+# run of non-letters (a line break included) between consecutive letters and
+# no letter adjoining it on either side. It is read on a casefolded paragraph,
+# with or without a key, so no text between a key and its value matters.
+_OMP_VALUE_TOKEN = re.compile(
+    r"(?<![^\W\d_])(?:"
+    + r"[\W\d_]*".join("approve")
+    + "|"
+    + r"[\W\d_]*".join("request")
+    + r"[\W\d_]*"
+    + r"[\W\d_]*".join("changes")
+    + r")(?![^\W\d_])"
 )
+# An inline link or image, a full or collapsed reference link, or an image in
+# any form: the inline constructs besides raw HTML whose letters a reader
+# does not see.
+_OMP_LINK = re.compile(r"\]\(|\]\[|!\[")
 _OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
-# A verdict value read as a prefix, for the unstripped line: raw HTML, code or
-# other text may follow it on the same line.
-_OMP_VALUE_PREFIX = re.compile(r"(approve|request[\s_-]+changes)(?![^\W\d_])")
-
-
-def _strip_omp_decoration(text: str) -> str:
-    """Strip surrounding Markdown marks, whitespace, and Unicode punctuation."""
-    start = 0
-    end = len(text)
-    while start < end and (
-        text[start].isspace()
-        or unicodedata.category(text[start])[:1] in ("P", "S")
-    ):
-        start += 1
-    while end > start and (
-        text[end - 1].isspace()
-        or unicodedata.category(text[end - 1])[:1] in ("P", "S")
-    ):
-        end -= 1
-    return text[start:end]
 
 
 def _latin_fold(character: str) -> str:
@@ -687,46 +689,14 @@ def _latin_fold(character: str) -> str:
     return character
 
 
-def _strip_omp_raw_html(text: str) -> str:
-    """`text` without its CommonMark raw HTML: tags and comments.
+def _canonicalize_omp_prose(text: str) -> tuple[str, str]:
+    """A line as written, NFKC, then the Latin fold: `(cased, cased.casefold())`.
 
-    A comment is `<!--` through the first `-->` after it (`<!-->` and
-    `<!--->` included). An unclosed `<!--` is text, and so is every later
-    one, since no `-->` follows it either.
+    Nothing is deleted: every character maps to itself or to its fold. The
+    cased copy keeps letter case for the camel-case key bound and is what the
+    markup checks read; the casefolded copy is what keys and values match.
     """
-    kept = []
-    index = 0
-    comments = True
-    while (start := text.find("<", index)) != -1:
-        end = None
-        if comments and text.startswith("<!--", start):
-            close = text.find("-->", start + 2)
-            if close == -1:
-                comments = False
-            else:
-                end = close + 3
-        else:
-            tag = _OMP_HTML_TAG.match(text, start)
-            if tag:
-                end = tag.end()
-        if end is None:
-            kept.append(text[index:start + 1])
-            index = start + 1
-        else:
-            kept.append(text[index:start])
-            index = end
-    kept.append(text[index:])
-    return "".join(kept)
-
-
-def _canonicalize_omp_prose(text: str, strip: bool = True) -> tuple[str, str]:
-    """Raw HTML stripped, NFKC, then the Latin fold: `(cased, cased.casefold())`.
-
-    The cased copy keeps letter case for the camel-case key bound and the
-    uppercase value anchor; the casefolded copy is what the key matches. With
-    `strip` off the raw HTML stays, for the unstripped reading.
-    """
-    text = unicodedata.normalize("NFKC", _strip_omp_raw_html(text) if strip else text)
+    text = unicodedata.normalize("NFKC", text)
     cased = "".join(_latin_fold(character) for character in text)
     return cased, cased.casefold()
 
@@ -752,6 +722,51 @@ def _validate_omp_prose(lines: list[str | None]) -> None:
                     "ReviewProseUnsafe: "
                     f"filler U+{ord(character):04X} outside review record"
                 )
+
+
+def _omp_prose_segments(canonical: list[tuple[str, str] | None]) -> list[list[int]]:
+    """The prose paragraphs, as runs of line indexes.
+
+    A record, a blank line or a fence line ends a paragraph, which is where
+    the renderer ends one too.
+    """
+    segments: list[list[int]] = []
+    current: list[int] = []
+    for index, item in enumerate(canonical):
+        if item is None or not item[1].strip() or _OMP_FENCE_LINE.match(item[0]):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(index)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _refuse_omp_markup(
+    canonical: list[tuple[str, str] | None], segments: list[list[int]]
+) -> None:
+    """Refuse raw HTML, links and images, whose letters a reader does not see.
+
+    An HTML block start is refused on any line, since it can interrupt a
+    paragraph. A tag or a `<!` or `<?` start, and then a link or an image, are
+    refused on each whole paragraph, since a tag's attributes may span lines.
+    """
+    for item in canonical:
+        if item is not None and _OMP_HTML_BLOCK_START.match(item[0]):
+            raise ReviewProseUnsafe("ReviewProseUnsafe: raw HTML outside review record")
+    paragraphs = [
+        "".join(canonical[index][0] for index in segment) for segment in segments
+    ]
+    for paragraph in paragraphs:
+        if _OMP_RAW_HTML.search(paragraph):
+            raise ReviewProseUnsafe("ReviewProseUnsafe: raw HTML outside review record")
+    for paragraph in paragraphs:
+        if _OMP_LINK.search(paragraph):
+            raise ReviewProseUnsafe(
+                "ReviewProseUnsafe: Markdown link outside review record"
+            )
 
 
 def _refuse_mixed_words(canonical: list[tuple[str, str] | None]) -> None:
@@ -813,14 +828,6 @@ def _fenced_review_records(
     return records, prose
 
 
-def _omp_prose_value(text: str) -> str:
-    """Remove structural decoration surrounding a prose verdict value."""
-    text = text.strip()
-    while (qualifier := _OMP_PROSE_QUALIFIER.match(text)) is not None:
-        text = text[qualifier.end():].lstrip()
-    return _strip_omp_decoration(text)
-
-
 def _omp_verdict_keys(cased: str, folded: str) -> list[re.Match[str]]:
     """Every `verdict` key on a line, with its leading bound applied.
 
@@ -843,35 +850,47 @@ def _omp_verdict_keys(cased: str, folded: str) -> list[re.Match[str]]:
 
 
 def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
-    """Return every prose verdict, refusing unsafe or unclassifiable prose."""
+    """Every value token in the prose, read as written; nothing is deleted.
+
+    Unsafe characters, then raw HTML, links and images, then mixed-script
+    words are refused before anything is matched. A value token is read on
+    each paragraph and belongs to the line it starts on. A line with a key
+    must hold a value token, unless it is key-only and the next non-blank item
+    is the record or a line that holds one; it never looks back.
+    """
     _validate_omp_prose(lines)
     canonical = [
         None if line is None else _canonicalize_omp_prose(line)
         for line in lines
     ]
+    segments = _omp_prose_segments(canonical)
+    _refuse_omp_markup(canonical, segments)
     _refuse_mixed_words(canonical)
+    values: dict[int, list[str]] = {
+        index: [] for index, item in enumerate(canonical) if item is not None
+    }
+    for segment in segments:
+        # Casefold maps each code point on its own, so a paragraph's casefold
+        # is its lines' casefolds joined, and a token's offset finds its line.
+        starts = []
+        offset = 0
+        for index in segment:
+            starts.append(offset)
+            offset += len(canonical[index][1])
+        paragraph = "".join(canonical[index][1] for index in segment)
+        for token in _OMP_VALUE_TOKEN.finditer(paragraph):
+            line = segment[bisect.bisect_right(starts, token.start()) - 1]
+            values[line].append(
+                APPROVED if token.group().startswith("a") else CHANGES_REQUESTED
+            )
     verdicts = []
-    consumed: set[int] = set()
     for index, item in enumerate(canonical):
         if item is None:
             continue
         cased, folded = item
         keys = _omp_verdict_keys(cased, folded)
-        if not keys:
-            if index not in consumed and _OMP_VALUE_ANCHOR.search(cased):
-                raise ReviewProseUnsafe(
-                    "ReviewProseUnsafe: verdict value without a verdict key"
-                )
-            continue
-        if len(keys) != 1:
-            raise VerdictConflict(
-                "VerdictConflict: prose line contains multiple verdict keys"
-            )
-        value = _omp_prose_value(folded[keys[0].end():])
-        if not value:
-            # A key-only line looks forward only: its value is the next
-            # non-blank item, and when that item is the record it confirms
-            # the record by construction.
+        if keys and not values[index]:
+            key_only = _OMP_LETTER.search(folded, keys[-1].end()) is None
             following = next(
                 (
                     later
@@ -880,82 +899,16 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
                 ),
                 None,
             )
-            if following is not None:
-                if canonical[following] is None:
-                    continue
-                consumed.add(following)
-                value = _omp_prose_value(canonical[following][1])
-        normalized = re.sub(r"[\s_-]+", " ", value)
-        if normalized == "approve":
-            verdicts.append(APPROVED)
-        elif normalized == "request changes":
-            verdicts.append(CHANGES_REQUESTED)
-        else:
-            raise VerdictConflict(
-                f"VerdictConflict: unrecognized prose verdict value {value!r}"
-            )
-    # Stripping raw HTML may only add refusals, never hide a verdict: the same
-    # lines read as written must not show one the stripped lines hid. Raw HTML
-    # is not told apart from code spans, fenced or indented code, or escaped
-    # text, so a verdict in any of them still vetoes a record it disagrees
-    # with (declared over-refusal).
-    unstripped = [
-        None if line is None else _canonicalize_omp_prose(line, strip=False)
-        for line in lines
-    ]
-    _refuse_mixed_words(unstripped)
-    verdicts.extend(_omp_unstripped_verdicts(canonical, unstripped))
-    return verdicts
-
-
-def _omp_unstripped_verdicts(
-    stripped: list[tuple[str, str] | None],
-    unstripped: list[tuple[str, str] | None],
-) -> list[str]:
-    """Every verdict the unstripped lines show: each key's value and each anchor.
-
-    A key's value runs to the next key on its line and is read as a prefix,
-    since raw HTML or code may follow it. When a line's last key has no value
-    there, or its stripped line is key-only, the next non-blank unstripped
-    line is read as that value too.
-    """
-    verdicts = []
-    for index, item in enumerate(unstripped):
-        if item is None:
-            continue
-        cased, folded = item
-        keys = _omp_verdict_keys(cased, folded)
-        values = [
-            _omp_prose_value(
-                folded[key.end():following.start() if following else len(folded)]
-            )
-            for key, following in zip(keys, keys[1:] + [None])
-        ]
-        stripped_keys = _omp_verdict_keys(*stripped[index])
-        key_only = bool(stripped_keys) and not _omp_prose_value(
-            stripped[index][1][stripped_keys[-1].end():]
-        )
-        if keys and (not values[-1] or key_only):
-            following = next(
-                (
-                    later
-                    for later in range(index + 1, len(unstripped))
-                    if unstripped[later] is None or unstripped[later][1].strip()
-                ),
-                None,
-            )
-            if following is not None and unstripped[following] is not None:
-                values.append(_omp_prose_value(unstripped[following][1]))
-        for value in values:
-            prefix = _OMP_VALUE_PREFIX.match(value)
-            if prefix:
-                verdicts.append(
-                    APPROVED if prefix.group(1) == "approve" else CHANGES_REQUESTED
+            if following is None:
+                # Nothing follows a key-only line at the end of the reply.
+                confirmed = False
+            else:
+                confirmed = canonical[following] is None or bool(values[following])
+            if not key_only or not confirmed:
+                raise VerdictConflict(
+                    "VerdictConflict: verdict key without a verdict value"
                 )
-        for anchor in _OMP_VALUE_ANCHOR.finditer(cased):
-            verdicts.append(
-                APPROVED if anchor.group() == "APPROVE" else CHANGES_REQUESTED
-            )
+        verdicts.extend(values[index])
     return verdicts
 
 

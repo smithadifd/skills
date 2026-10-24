@@ -2248,21 +2248,32 @@ def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
     )
 
 
-# --- the omp prose checks stay linear on a line of comment openers ----------
+# --- the omp prose checks stay linear on long lines --------------------------
 #
-# The omp prose checks read every line twice, with its raw HTML stripped and as
-# written. An unclosed `<!--` ends comment stripping for the rest of its line,
-# so a line of nothing but openers is still read in one pass each time. A scan
-# that searched on from every opener would be quadratic, but in C; it only
-# outgrows the checks' linear per-character work at these lengths.
+# The omp prose checks read each line once, as written, and refuse raw HTML.
+# A refused line still costs the character checks and the fold, so a line of
+# comment openers is timed whole. A line of `<a ` openers that is not refused
+# at its start is searched for a tag once; searching on from every `<` would
+# be quadratic. A letter followed by a long run of non-letters is where a
+# value token pattern with overlapping repeats would backtrack.
 
 OMP_COMMENT_SHORT_COUNT = 16000
 OMP_COMMENT_LONG_COUNT = 4 * OMP_COMMENT_SHORT_COUNT
+OMP_TAG_SHORT_COUNT = 4000
+OMP_TAG_LONG_COUNT = 4 * OMP_TAG_SHORT_COUNT
+OMP_RUN_SHORT_LENGTH = 3000
+OMP_RUN_LONG_LENGTH = 4 * OMP_RUN_SHORT_LENGTH
+
+
+def _omp_prose_check(line):
+    try:
+        return review_phase._omp_prose_verdicts([line])
+    except review_phase.ParseError:
+        return None
 
 
 def test_omp_prose_check_time_grows_linearly_on_a_line_of_comment_openers():
-    def check(line):
-        return review_phase._omp_prose_verdicts([line])
+    check = _omp_prose_check
 
     shorter = _fastest_call_seconds(check, "<!--" * OMP_COMMENT_SHORT_COUNT)
     assert shorter <= HEADING_LIMIT_SECONDS, (
@@ -2274,6 +2285,30 @@ def test_omp_prose_check_time_grows_linearly_on_a_line_of_comment_openers():
         f"the omp prose checks: quadrupling {OMP_COMMENT_SHORT_COUNT} to "
         f"{OMP_COMMENT_LONG_COUNT} comment openers took {shorter * 1e3:.4f}ms to "
         f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
+    )
+
+
+OMP_GROWTH_CASES = [
+    ("tag-openers", lambda n: "x " + "<a " * n, OMP_TAG_SHORT_COUNT, OMP_TAG_LONG_COUNT),
+    ("value-letter-run", lambda n: "a" + "." * n, OMP_RUN_SHORT_LENGTH, OMP_RUN_LONG_LENGTH),
+]
+
+
+@pytest.mark.parametrize(
+    ("shape", "build", "short", "long"),
+    OMP_GROWTH_CASES,
+    ids=[shape for shape, _, _, _ in OMP_GROWTH_CASES],
+)
+def test_omp_prose_check_time_grows_linearly(shape, build, short, long):
+    shorter = _fastest_call_seconds(_omp_prose_check, build(short))
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"the omp prose checks took {shorter:.2f}s on the {short}-unit {shape} line"
+    )
+    longer = _fastest_call_seconds(_omp_prose_check, build(long))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"the omp prose checks on a {shape} line: quadrupling {short} to {long} "
+        f"units took {shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than "
+        f"{GROWTH_RATIO_BOUND} times"
     )
 
 
