@@ -1407,25 +1407,442 @@ def _render_card(card: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# --- The ledger store (design 6.2) ------------------------------------------
+
+# The writer name every ledger payload carries in its ``source``.
+_LEDGER_WRITER = "ticket"
+# A ticket record in an ``item.note``: the frame names the record's kind and
+# its format version, and the body is the record's canonical JSON (design 6.2.3).
+_RECORD_FRAME = re.compile(r"ticket-([a-z]+):v([1-9][0-9]*) (.+)", re.DOTALL)
+_RECORD_KINDS = ("plan", "decision", "review")
+_RECORD_VERSION = 2
+_CLAIM_PURPOSE = re.compile(r"ticket pass [0-9a-f]+ on (.+) at (\S+)")
+# How an ``ok: false`` answer is read (design 6.2.4). Only the two lost races
+# are ``stale``. A permanent refusal was rolled back or never started, so its
+# batch is never looked up. Any other code is ambiguous.
+_LEDGER_RACES = frozenset(("stale_revision", "conflict"))
+_LEDGER_PERMANENT = frozenset(
+    ("validation", "missing_harness", "shared_database", "synced_path", "not_found", "missing_db", "integrity")
+)
+# What a query for an item that does not exist answers: the design's
+# ``not_found``, and the ``empty`` the CLI's query verb gives a filter that
+# matches no row.
+_LEDGER_NO_ITEM = frozenset(("not_found", "empty"))
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _one_line(text: Any) -> str:
+    return " ".join(str(text).split())
+
+
+@dataclass(frozen=True)
+class _Answer:
+    """One answer of the ledger CLI: its envelope's ``ok``, ``data`` and ``error``.
+
+    ``ok`` is None when there is no envelope (garbage, a crash), and ``lost``
+    is true when nothing came back at all. ``status`` is the exit status, kept
+    for the message only: the store decides on the envelope.
+    """
+
+    status: int
+    output: str
+    ok: bool | None
+    data: Any = None
+    code: str | None = None
+    message: str = ""
+    lost: bool = False
+
+
+def _ledger_answer(status: int, stdout: str, stderr: str) -> _Answer:
+    output = _one_line(f"{stdout} {stderr}")
+    if not stdout.strip():
+        return _Answer(status, output, None, lost=True)
+    try:
+        envelope = json.loads(stdout)
+    except ValueError:
+        return _Answer(status, output, None)
+    if type(envelope) is not dict or type(envelope.get("ok")) is not bool:
+        return _Answer(status, output, None)
+    if envelope["ok"]:
+        return _Answer(status, output, True, data=envelope.get("data"))
+    error = envelope.get("error")
+    if type(error) is not dict or not _is_text(error.get("code")):
+        return _Answer(status, output, None)
+    return _Answer(status, output, False, code=error["code"], message=_one_line(error.get("message", "")))
+
+
+def _ledger_incompatible(cli: str, detail: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"the ledger CLI {cli} lacks append-many or --expect-revision, or does not accept the command the store "
+        f"sent ({_one_line(detail)}); select a ledger CLI that has both. Nothing was written.",
+        code="ledger_incompatible",
+    )
+
+
+def _fold_record(card: dict[str, Any], text: str, key: str, where: str) -> None:
+    """Fold one ``item.note`` into the card when it is a ticket record (design 6.2.3).
+
+    A text that is not framed is an ordinary note. A framed record of a kind or
+    version this skill does not know, a body that is not a JSON object, or a
+    body its section-I validator refuses is ``card_unreadable``: a record is
+    never skipped. A plan's identity is read first, as on the markdown card.
+    """
+
+    frame = _RECORD_FRAME.fullmatch(text)
+    if frame is None:
+        return
+    kind, version, body = frame[1], int(frame[2]), frame[3]
+    name = f"ticket-{kind}:v{version}"
+    if kind not in _RECORD_KINDS or version != _RECORD_VERSION:
+        raise _unreadable(where, f"it holds a ticket record this skill does not know ({name})")
+    try:
+        record = json.loads(body)
+    except ValueError as exc:
+        raise _unreadable(where, f"a {name} record is not JSON") from exc
+    if type(record) is not dict:
+        raise _unreadable(where, f"a {name} record is not an object")
+    try:
+        if kind == "plan":
+            _identity({"plan": record})
+            _validate_plan(record, key)
+        elif kind == "decision":
+            _validate_decision(record)
+        else:
+            _validate_review(record)
+    except TicketError as exc:
+        raise _unreadable(where, f"a {name} record is not valid ({exc})") from exc
+    if kind == "plan":
+        card["plan"] = record
+    else:
+        card[f"{kind}s"].append(record)
+
+
+def _trusted_close(events: Sequence[Mapping[str, Any]], states: list[int], stops: list[int], key: str) -> bool:
+    """Whether the item's closed status is this store's own atomic close (design 6.2).
+
+    It is when the latest ``item.state`` C has a close key of this ticket, the
+    event just before C is the close-phase ``item.stopped`` S with the same
+    pass and close token in its key and the same ``source``, and S is the
+    latest stop. A later note, link or session record leaves it trusted; a
+    later stop or state does not.
+    """
+
+    state_key = re.compile(rf"ticket-close/{re.escape(key)}/([0-9a-f]+)/([0-9a-f]+)/state")
+    closing = [index for index in states if state_key.fullmatch(events[index].get("idempotency_key") or "")]
+    if not closing:
+        return False
+    last = closing[-1]
+    state, stop = events[last], events[last - 1]
+    mark = state_key.fullmatch(state["idempotency_key"])
+    return (
+        last == states[-1]
+        and stops[-1:] == [last - 1]
+        and stop["kind"] == "item.stopped"
+        and stop["payload"].get("phase") == "close"
+        and stop.get("idempotency_key") == f"ticket-close/{key}/{mark[1]}/{mark[2]}/stop"
+        and stop["payload"].get("source") == state["payload"].get("source")
+    )
+
+
+def _ledger_card(events: Sequence[Mapping[str, Any]], key: str, title: str) -> tuple[dict[str, Any], Any]:
+    """The section-2 card folded from one item's exported events, in id order, and the latest state's blocked-by.
+
+    The pass is the latest claim of this ticket not yet released (the export
+    shows session records only while the item is open). An item that was
+    closed once reads ``closed``; its close stamp is marked ``close`` only
+    when the close is trusted, so an outside status write is refused
+    ``close_invalid`` and never resumed.
+    """
+
+    where = f"ledger item {key}"
+    card = _blank_card(key, title)
+    pass_key = re.compile(rf"ticket-pass/{re.escape(key)}/([0-9a-f]+)/(claimed|released)")
+    states: list[int] = []
+    stops: list[int] = []
+    for index, event in enumerate(events):
+        kind, payload = event["kind"], event["payload"]
+        mark = pass_key.fullmatch(event.get("idempotency_key") or "")
+        if kind == "session.opened" and mark and mark[2] == "claimed":
+            purpose = _CLAIM_PURPOSE.fullmatch(payload.get("purpose", ""))
+            card["pass"] = {"id": mark[1], "host": purpose and purpose[1], "started_at": purpose and purpose[2]}
+        elif kind == "session.closed" and mark and mark[2] == "released":
+            if card["pass"] is not None and card["pass"]["id"] == mark[1]:
+                card["pass"] = None
+        elif kind == "item.note":
+            _fold_record(card, payload["text"], key, where)
+        elif kind == "item.stopped":
+            stops.append(index)
+            card["stamps"].append(
+                {"point": payload["point"], "phase": payload["phase"], "next_skills": payload.get("skills", []),
+                 "refs": payload.get("refs", []), "close": False}
+            )
+        elif kind == "item.tried":
+            card["tried"].append({name: payload[name] for name in ("what", "phase", "outcome", "evidence") if name in payload})
+        elif kind == "item.state":
+            states.append(index)
+            if payload["status"] == "closed":
+                card["status"] = "closed"
+    if card["status"] == "closed" and _trusted_close(events, states, stops, key):
+        card["stamps"][-1]["close"] = True
+    _check_card_shape(card, key, where)
+    return card, events[states[-1]]["payload"].get("blocked_by") if states else None
+
+
+class LedgerStore:
+    """The card as the events of one item in a ledger, read and written through the ledger's CLI.
+
+    The token is the item's ``revision`` from ``query``: the id of its newest
+    event, ``none`` before the first. Every write is one ``append-many`` under
+    ``--expect-revision`` of the held token, so it lands only on the card the
+    pass last read or wrote, all of its events or none (design 6.2). The
+    ticket's own records travel as framed notes; the ledger's kinds carry the
+    claim, stamps, tried records and the closed status.
+    """
+
+    def __init__(self, cli: str | Path, key: str, title: str):
+        if not _KEY.fullmatch(key):
+            raise TicketError(f"unsafe ticket key: {key!r}")
+        self.cli = str(cli)
+        self.key = key
+        self.title = title
+        # A stamp's reference to the card: the ledger item itself.
+        self.ref = f"ledger/{key}"
+        self._pass_id: str | None = None
+        self._ended: str | None = None
+        # The card of this handle's last read or landed write; the claim check runs on it.
+        self._card = _blank_card(key, title)
+        # The item's owner, claim and blocked-by as last read, carried into the closed status.
+        self._item: dict[str, Any] = {}
+        # Threads sharing this handle take turns; a binding event binds under it.
+        self._threads = threading.RLock()
+
+    @property
+    def pass_id(self) -> str | None:
+        """The pass this handle writes for: bound by its own ``apply``, cleared by ``release``."""
+
+        return self._pass_id
+
+    @property
+    def ended(self) -> str | None:
+        """The id of the last pass this handle held that has ended, or None."""
+
+        return self._ended
+
+    def _run(self, *args: str, stdin: str = "") -> _Answer:
+        result = subprocess.run([self.cli, "--json", *args], input=stdin, capture_output=True, encoding="utf-8", check=False)
+        return _ledger_answer(result.returncode, result.stdout, result.stderr)
+
+    def _refused(self, what: str, answer: _Answer) -> StoreUnavailable:
+        said = f"{answer.code}: {answer.message}" if answer.code else f"no envelope, exit status {answer.status}: {answer.output}"
+        return StoreUnavailable(
+            f"the ledger refused to {what} ticket {self.key} ({said}). Nothing more was written and the pass ends; "
+            "a person reads the ledger's reason.",
+            code="ledger_refused",
+        )
+
+    def _data(self, answer: _Answer, what: str) -> Any:
+        if answer.ok:
+            return answer.data
+        if answer.code == "usage":
+            raise _ledger_incompatible(self.cli, f"{answer.code}: {answer.message}")
+        raise self._refused(what, answer)
+
+    # The four calls.
+
+    def read(self) -> tuple[dict[str, Any], str]:
+        """The card and its token: ``query`` gives the token, ``export-item`` the events.
+
+        The token is never taken from the export, which hides the session
+        records of a closed item and would leave a held revision stale.
+        """
+
+        with self._threads:
+            answer = self._run("query", "--item", self.key)
+            if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+                card, token, item = _blank_card(self.key, self.title), NO_TOKEN, {}
+            else:
+                row = next(row for row in self._data(answer, "read")["items"] if row["item_id"] == self.key)
+                if row.get("type") != "ticket":
+                    found = repr(row["type"]) if "type" in row else "none"
+                    raise StoreUnavailable(
+                        f"ledger item {self.key} is not a ticket (its type is {found}), so the pass will not claim or "
+                        "write to it. Nothing was written; a person resolves the key.",
+                        code="ledger_refused",
+                    )
+                card, blocked = _ledger_card(self._data(self._run("export-item", self.key), "read")["events"], self.key, self.title)
+                token = str(row["revision"])
+                item = {"owner": row.get("owner"), "claim": row.get("claim"), "blocked_by": blocked}
+            self._card, self._item = card, item
+            return copy.deepcopy(card), token
+
+    def apply(self, token: str, events: Sequence[tuple[str, Any]]) -> str:
+        """Land every event or none, only while the item's revision is still ``token``.
+
+        A used handle is refused ``handle_used`` for a binding event before any
+        CLI call; the claim is checked on the card this handle last read or
+        wrote, and ``--expect-revision`` makes that check hold at write time. A
+        join sends nothing and returns ``token``; a claim binds the handle
+        only after its batch landed.
+        """
+
+        for kind, value in events:
+            _validate_event(kind, value, self.key)
+        binding = _binding(events)
+        joining = binding is not None and binding[0] == "join"
+        with self._threads:
+            if binding is not None and (self._pass_id is not None or self._ended is not None):
+                raise _handle_used(self.key, self._pass_id or self._ended)
+            _check_pass(self.key, self._card["pass"], binding[1] if joining else self._pass_id, self._ended)
+            if not joining:
+                token = self._send(self._batch(token, events), token)
+                self._card = _fold(self._card, events)
+            if binding is not None:
+                self._pass_id, self._ended = binding[1], None
+            return token
+
+    def release(self) -> None:
+        """Close this handle's own claim with no ``--expect-revision``; a failure is reported and ignored.
+
+        Releasing again sends the same key, so the ledger replays the stored
+        release and writes nothing.
+        """
+
+        with self._threads:
+            mine = self._pass_id or self._ended
+            self._pass_id, self._ended = None, mine
+            if mine is None:
+                return
+            try:
+                self._send([self._released(mine)], None)
+            except StoreUnavailable as exc:
+                print(f"ticket.py: the release of pass {mine} did not land: {exc}", file=sys.stderr)
+
+    def clear_pass(self, pass_id: str) -> None:
+        """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim."""
+
+        card, _ = self.read()
+        live = card["pass"]
+        if live is None or live["id"] != pass_id:
+            raise StoreUnavailable(
+                f"pass {pass_id} is not the live pass on ticket {self.key}"
+                + (f" (the live pass is {live['id']})" if live else " (no pass is live)")
+                + "; nothing was changed",
+                code="held" if live else "pass_ended",
+            )
+        self._send([self._released(pass_id)], None)
+
+    # The batch and the answer.
+
+    def _element(self, kind: str, payload: Mapping[str, Any], key: str) -> dict[str, Any]:
+        return {"kind": kind, "payload": {**payload, "source": _LEDGER_WRITER}, "item_id": self.key, "idempotency_key": key}
+
+    def _released(self, pass_id: str) -> dict[str, Any]:
+        return self._element("session.closed", {"outcome": f"ticket pass {pass_id} released"}, f"ticket-pass/{self.key}/{pass_id}/released")
+
+    def _batch(self, token: str, events: Sequence[tuple[str, Any]]) -> list[dict[str, Any]]:
+        """The events as ledger batch elements, keyed by the mapping of design 6.2.
+
+        Ordinary keys carry the held token, one random request token per
+        ``apply`` and the event's index; the close's two keys share one random
+        close token and name the pass.
+        """
+
+        key = self.key
+        request, close = secrets.token_hex(8), secrets.token_hex(8)
+        batch = []
+        for index, (kind, value) in enumerate(events):
+            ordinary = f"ticket-write/{key}/{token}/{request}/{index}"
+            if kind == "claim":
+                if token == NO_TOKEN:
+                    batch.append(self._element("item.created", {"type": "ticket", "title": self.title}, f"ticket-item/{key}/created"))
+                purpose = f"ticket pass {value['id']} on {value['host']} at {value['started_at']}"
+                batch.append(self._element("session.opened", {"purpose": purpose}, f"ticket-pass/{key}/{value['id']}/claimed"))
+            elif kind in _RECORD_KINDS:
+                batch.append(self._element("item.note", {"text": f"ticket-{kind}:v{_RECORD_VERSION} {_canonical(value)}"}, ordinary))
+            elif kind == "stamp":
+                payload = {"point": value["point"], "phase": value["phase"], "skills": value["next_skills"], "refs": value["refs"]}
+                stop = f"ticket-close/{key}/{self._pass_id}/{close}/stop" if value["close"] else ordinary
+                batch.append(self._element("item.stopped", payload, stop))
+            elif kind == "tried":
+                batch.append(self._element("item.tried", value, ordinary))
+            elif kind == "closed":
+                payload = {"status": "closed"}
+                payload.update({name: self._item[name] for name in ("owner", "claim") if self._item.get(name)})
+                if self._item.get("blocked_by") is not None:
+                    payload["blocked_by"] = self._item["blocked_by"]
+                batch.append(self._element("item.state", payload, f"ticket-close/{key}/{self._pass_id}/{close}/state"))
+        return batch
+
+    def _send(self, batch: list[dict[str, Any]], expect: str | None) -> str:
+        """One ``append-many`` of ``batch``, read by design 6.2.4; returns the new token.
+
+        ``expect`` is the held token for ``--expect-revision``, or None for a
+        release. The two lost races are ``stale``; ``usage`` is
+        ``ledger_incompatible``; a permanent refusal is ``ledger_refused``
+        with no lookup; any other answer is resolved by the batch's last key.
+        """
+
+        args = ["append-many", self.key] + ([] if expect is None else ["--expect-revision", expect])
+        stdin = json.dumps(batch)
+        answer = self._run(*args, stdin=stdin)
+        if answer.lost:
+            # Nothing came back. The same batch again, under the same keys: a
+            # batch that landed replays with no write and no revision check.
+            answer = self._run(*args, stdin=stdin)
+        if answer.ok:
+            return str(answer.data["events"][-1]["id"])
+        if answer.code in _LEDGER_RACES:
+            raise _stale(self.key, f"the ledger answered {answer.code}: {answer.message}")
+        if answer.code == "usage":
+            raise _ledger_incompatible(self.cli, f"{answer.code}: {answer.message}")
+        if answer.code in _LEDGER_PERMANENT:
+            raise self._refused("write", answer)
+        return self._look_up(batch, answer)
+
+    def _look_up(self, batch: list[dict[str, Any]], answer: _Answer) -> str:
+        """An ambiguous answer: the batch landed exactly when its last key is stored with the same kind and payload."""
+
+        last = batch[-1]
+        wanted = (last["idempotency_key"], last["kind"], _canonical(last["payload"]))
+        export = self._run("export-item", self.key)
+        if export.ok:
+            for event in export.data["events"]:
+                if (event.get("idempotency_key"), event.get("kind"), _canonical(event.get("payload"))) == wanted:
+                    return str(event["id"])
+        raise self._refused("write", answer)
+
+
 # --- Store selection (design 6.3) -------------------------------------------
 
 LEDGER_SELECTOR = "TICKET_LEDGER_CLI"
 
 
 def choose_store(repo: str | Path, key: str, title: str) -> Store:
-    """The markdown store unless ``TICKET_LEDGER_CLI`` is set; an empty value counts as unset.
+    """The ledger store when ``TICKET_LEDGER_CLI`` names the ledger's CLI, else the markdown store.
 
-    The ledger store is not part of this release, so selecting it is refused
-    before anything is read or written rather than falling back.
+    An empty value counts as unset. The selected CLI is probed first: one
+    whose ``append-many --help`` does not exit 0 naming ``--expect-revision``
+    is refused ``ledger_incompatible`` before anything is read or written,
+    rather than falling back.
     """
 
-    if os.environ.get(LEDGER_SELECTOR, ""):
-        raise StoreUnavailable(
-            f"{LEDGER_SELECTOR} selects the ledger store, which this release does not include; unset it to use "
-            "the markdown store. Nothing was read or written.",
-            code="ledger_store_unavailable",
-        )
+    cli = os.environ.get(LEDGER_SELECTOR, "")
+    if cli:
+        _probe_ledger(cli)
+        return LedgerStore(cli, key, title)
     return MarkdownStore(repo, key, title)
+
+
+def _probe_ledger(cli: str) -> None:
+    try:
+        result = subprocess.run([cli, "append-many", "--help"], input="", capture_output=True, encoding="utf-8", check=False)
+    except OSError as exc:
+        raise _ledger_incompatible(cli, str(exc)) from exc
+    if result.returncode != 0 or "--expect-revision" not in result.stdout:
+        raise _ledger_incompatible(cli, f"append-many --help exited {result.returncode}")
 
 
 # --- The pass ----------------------------------------------------------------
@@ -1796,6 +2213,7 @@ class TicketPass:
 __all__ = [
     "FileTicketSource",
     "GateRequired",
+    "LedgerStore",
     "MarkdownStore",
     "MoreInfoExit",
     "PlanCard",

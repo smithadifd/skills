@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import ticket
+from ledger_support import FakeLedger
 from ticket_support import (
     A, B, F8, F9, F10, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass,
     read_card, refusal, store,
@@ -493,16 +494,17 @@ def _release(repo, env):
     ["empty selector is unset", "selector names the ledger", "release command exits 2 on an incompatible ledger",
      "release exits 1 on a bad card"],
 )
-def test_I20_store_selection(repo, monkeypatch, case):
+def test_I20_store_selection(repo, tmp_path, monkeypatch, case):
     env = {name: value for name, value in os.environ.items() if name != "TICKET_LEDGER_CLI"}
     if case == "empty selector is unset":
         monkeypatch.setenv("TICKET_LEDGER_CLI", "")
         assert isinstance(ticket.choose_store(repo, KEY, TITLE), ticket.MarkdownStore)
     elif case == "selector names the ledger":
-        monkeypatch.setenv("TICKET_LEDGER_CLI", sys.executable)
-        with pytest.raises(ticket.StoreUnavailable) as excinfo:
-            ticket.choose_store(repo, KEY, TITLE)
-        assert refusal(excinfo) == "ledger_store_unavailable"
+        fake = FakeLedger(tmp_path / "ledger")
+        monkeypatch.setenv("TICKET_LEDGER_CLI", str(fake.path))
+        assert isinstance(ticket.choose_store(repo, KEY, TITLE), ticket.LedgerStore)
+        assert [call.argv for call in fake.calls()] == [["append-many", "--help"]]
+        assert fake.events() == []
         assert not (repo / ".ticket").exists()
     elif case == "release command exits 2 on an incompatible ledger":
         result = _release(repo, dict(env, TICKET_LEDGER_CLI=sys.executable))

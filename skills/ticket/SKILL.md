@@ -67,10 +67,15 @@ token is a digest of the card as the pass last read or wrote it. If anything
 changed the card since then, another session or a hand edit, the write is
 refused as `stale` and the pass ends. Open it again to see the change.
 
-`choose_store` returns the markdown store. Setting `TICKET_LEDGER_CLI` to a
-non-empty value selects a ledger store, which this release does not include,
-so it is refused (`ledger_store_unavailable`) before anything is read or
-written.
+`choose_store` returns the markdown store unless `TICKET_LEDGER_CLI` names a
+ledger CLI (an empty value counts as unset); then it returns the ledger store,
+which keeps the card as the events of one ledger item. There the token is the
+item's newest event id, and each step is one `append-many` under
+`--expect-revision`, so concurrent writers never interleave half a step and a
+lost race is `stale`. A CLI without `append-many` or `--expect-revision` is
+refused (`ledger_incompatible`) before anything is read or written. Any other
+refusal by the CLI is `ledger_refused` and carries the CLI's own code and
+message; never retry it as if it were `stale`.
 
 ## One live pass
 
@@ -100,7 +105,9 @@ the person confirms that session is gone, release it with
 `python3 ${CLAUDE_SKILL_DIR}/ticket.py release <key> <pass-id> --repo <target-repo>`.
 The command a refusal prints is shell-quoted word by word, so it is safe to copy.
 It refuses unless that id is the live claim. It exits 0 when it released the
-claim, 1 when it refused, and 2 when the ledger store was selected.
+claim, 1 when it refused, and 2 when `TICKET_LEDGER_CLI` names an incompatible
+ledger CLI. With the ledger store it releases the claim on the ledger item and
+ignores `--repo`.
 
 ## 1. Orient
 
