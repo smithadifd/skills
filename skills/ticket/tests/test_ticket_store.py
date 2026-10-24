@@ -1,9 +1,12 @@
 """Matrix section G: the markdown store."""
 
+import contextlib
+import errno
 import fcntl
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -392,3 +395,123 @@ def test_G15_the_card_and_lock_are_inside_the_repository(repo, tmp_path):
     with pytest.raises(ticket.StoreUnavailable, match="outside the repository"):
         open_pass(repo, Source())
     assert list(outside.iterdir()) == []
+
+
+# --- G16-G23: the binding events and the refusal codes ----------------------
+
+
+def _tried(what="A note."):
+    return ("tried", {"what": what, "phase": "build"})
+
+
+CLAIM = {"id": "a1b2c3d4e5f60718", "host": "builder", "started_at": "2026-10-17T14:30:00Z"}
+
+
+def test_G16_a_join_event_saves_nothing_and_returns_the_same_token(repo):
+    first = open_pass(repo, Source(), handle=store(repo))
+    before = card_bytes(repo)
+    stat_before = os.stat(card_path(repo))
+    handle = store(repo)
+    _, token = handle.read()
+    assert handle.apply(token, [("join", {"id": first.pass_id})]) == token
+    assert card_bytes(repo) == before
+    stat_after = os.stat(card_path(repo))
+    assert (stat_after.st_ino, stat_after.st_mtime_ns) == (stat_before.st_ino, stat_before.st_mtime_ns)
+    assert (handle.pass_id, handle.ended) == (first.pass_id, None)
+    handle.apply(token, [_tried("Through the joined handle.")])
+    assert read_card(repo)["tried"][-1]["what"] == "Through the joined handle."
+
+
+@pytest.mark.parametrize("event", ["claim", "join"])
+def test_G17_a_binding_event_travels_alone(repo, event):
+    if event == "claim":
+        binding = ("claim", CLAIM)
+    else:
+        first = open_pass(repo, Source(), handle=store(repo))
+        binding = ("join", {"id": first.pass_id})
+    handle = store(repo)
+    before = card_bytes(repo)
+    _, token = handle.read()
+    with pytest.raises(ticket.TicketError, match="travels alone"):
+        handle.apply(token, [binding, _tried()])
+    assert card_bytes(repo) == before
+    assert (handle.pass_id, handle.ended) == (None, None)
+
+
+def test_G18_a_claim_binds_the_handle_before_the_lock_is_released(repo):
+    seen = []
+
+    class RecordingLock(ticket.MarkdownStore):
+        @contextlib.contextmanager
+        def _locked(self):
+            with super()._locked():
+                try:
+                    yield
+                finally:
+                    seen.append((self.pass_id, self.ended))
+
+    handle = RecordingLock(repo, KEY, TITLE)
+    handle.apply("none", [("claim", CLAIM)])
+    assert seen == [(CLAIM["id"], None)]
+    assert (handle.pass_id, handle.ended) == (CLAIM["id"], None)
+
+
+def test_G19_a_failed_save_during_a_claim_leaves_the_handle_unbound(repo):
+    failures = []
+
+    class FullDisk(ticket.MarkdownStore):
+        def _save(self, card):
+            if not failures:
+                failures.append(card)
+                raise OSError(errno.ENOSPC, "No space left on device")
+            super()._save(card)
+
+    handle = FullDisk(repo, KEY, TITLE)
+    with pytest.raises(OSError, match="No space left"):
+        open_pass(repo, Source(), handle=handle)
+    assert (handle.pass_id, handle.ended) == (None, None)
+    assert card_bytes(repo) is None
+    retry = open_pass(repo, Source(), handle=handle)
+    assert retry.live is True
+    assert read_card(repo)["pass"]["id"] == retry.pass_id
+
+
+def test_G20_a_card_outside_the_repository_is_refused_with_a_code(repo, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, repo / ".ticket")
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        store(repo).apply("none", [_tried()])
+    assert refusal(excinfo) == "outside_repository"
+    assert list(outside.iterdir()) == []
+
+
+def test_G21_an_unignored_card_is_refused_with_a_code(repo):
+    (repo / ".gitignore").unlink()
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        store(repo).apply("none", [_tried()])
+    assert refusal(excinfo) == "not_ignored"
+    assert not (repo / ".ticket").exists()
+    assert not (repo / ".gitignore").exists()
+    assert not (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8").count(".ticket")
+
+
+def test_G22_a_lock_that_is_not_a_regular_file_is_refused_with_a_code(repo):
+    _lock_path(repo).parent.mkdir()
+    os.mkfifo(_lock_path(repo))
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        store(repo).apply("none", [_tried()])
+    assert refusal(excinfo) == "lock_not_regular"
+    assert stat.S_ISFIFO(os.lstat(_lock_path(repo)).st_mode)
+    assert card_bytes(repo) is None
+
+
+def test_G23_an_unopenable_lock_is_refused_with_a_code(repo):
+    _lock_path(repo).parent.mkdir()
+    _lock_path(repo).mkdir()
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        store(repo).apply("none", [_tried()])
+    assert refusal(excinfo) == "lock_unopenable"
+    assert os.strerror(errno.EISDIR) in str(excinfo.value)
+    assert _lock_path(repo).is_dir()
+    assert card_bytes(repo) is None

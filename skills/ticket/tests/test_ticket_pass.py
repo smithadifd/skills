@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -399,10 +400,12 @@ def test_E11j_a_handle_whose_pass_ended_cannot_open_again(repo):
     first = open_pass(repo, Source(), handle=handle)
     first.end()
     before = card_bytes(repo)
+    src = Source()
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        open_pass(repo, Source(), handle=handle)
+        open_pass(repo, src, handle=handle)
     assert refusal(excinfo) == "handle_used"
     assert first.pass_id in str(excinfo.value)
+    assert src.trace == []
     assert card_bytes(repo) == before
     assert read_card(repo)["pass"] is None
 
@@ -412,9 +415,11 @@ def test_E11k_a_handle_whose_pass_ended_cannot_join(repo):
     open_pass(repo, Source(), handle=handle).end()
     live = open_pass(repo, Source())
     before = card_bytes(repo)
+    src = Source()
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        open_pass(repo, Source(), pass_id=live.pass_id, handle=handle)
+        open_pass(repo, src, pass_id=live.pass_id, handle=handle)
     assert refusal(excinfo) == "handle_used"
+    assert src.trace == []
     assert card_bytes(repo) == before
     assert read_card(repo)["pass"]["id"] == live.pass_id
 
@@ -424,9 +429,11 @@ def test_E11l_a_cleared_pass_does_not_free_its_handle(repo):
     first = open_pass(repo, Source(), handle=handle)
     store(repo).clear_pass(first.pass_id)
     before = card_bytes(repo)
+    src = Source()
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        open_pass(repo, Source(), handle=handle)
+        open_pass(repo, src, handle=handle)
     assert refusal(excinfo) == "handle_used"
+    assert src.trace == []
     assert card_bytes(repo) == before
     third = open_pass(repo, Source())
     with pytest.raises(ticket.StoreUnavailable) as late:
@@ -442,9 +449,11 @@ def test_E11m_a_join_on_a_bound_handle_is_refused(repo):
     handle = store(repo)
     first = open_pass(repo, Source(), handle=handle)
     before = card_bytes(repo)
+    src = Source()
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        open_pass(repo, Source(), pass_id=first.pass_id, handle=handle)
+        open_pass(repo, src, pass_id=first.pass_id, handle=handle)
     assert refusal(excinfo) == "handle_used"
+    assert src.trace == []
     assert card_bytes(repo) == before
     assert read_card(repo)["pass"]["id"] == first.pass_id
     first.record_tried("Still the live pass.")
@@ -455,9 +464,11 @@ def test_E11n_a_deleted_card_does_not_free_its_handle(repo):
     handle = store(repo)
     first = open_pass(repo, Source(), handle=handle)
     card_path(repo).unlink()
+    src = Source()
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        open_pass(repo, Source(), handle=handle)
+        open_pass(repo, src, handle=handle)
     assert refusal(excinfo) == "handle_used"
+    assert src.trace == []
     assert not card_path(repo).exists()
     with pytest.raises(ticket.StoreUnavailable) as late:
         first.record_tried("A late note.")
@@ -479,19 +490,27 @@ def test_E11o_a_fresh_handle_opens_after_a_pass_ends(repo):
 
 def test_E11p_the_pass_writes_no_private_store_state():
     card_box = {"card": ticket._blank_card(KEY, TITLE)}
-    ended_of = {}
 
     class ProtocolOnlyStore:
-        """Exactly the declared store interface: no `__dict__`, so any other attribute write raises."""
+        """Exactly the declared store interface: no `__dict__`, `pass_id` and `ended` read-only.
 
-        __slots__ = ("key", "pass_id", "ref")
+        It binds in its own `apply`, on a `claim` or a `join` (a join is
+        checked as the pass it names), and its `release` clears its own claim.
+        """
+
+        __slots__ = ("key", "ref", "_bound")
 
         def __init__(self):
-            self.key, self.pass_id, self.ref = KEY, None, f".ticket/{KEY}.md"
+            self.key, self.ref = KEY, f".ticket/{KEY}.md"
+            self._bound = (None, None)
+
+        @property
+        def pass_id(self):
+            return self._bound[0]
 
         @property
         def ended(self):
-            return ended_of.get(id(self))
+            return self._bound[1]
 
         def read(self):
             return copy.deepcopy(card_box["card"]), ticket._token(card_box["card"])
@@ -500,16 +519,19 @@ def test_E11p_the_pass_writes_no_private_store_state():
             card = card_box["card"]
             if ticket._token(card) != token:
                 raise ticket._stale(self.key, "the card changed")
-            ticket._check_pass(self.key, card["pass"], self.pass_id, self.ended)
+            binding = ticket._binding(events)
+            if binding is not None and self._bound != (None, None):
+                raise ticket._handle_used(self.key, self.pass_id or self.ended)
+            mine = binding[1] if binding is not None and binding[0] == "join" else self.pass_id
+            ticket._check_pass(self.key, card["pass"], mine, self.ended)
             card_box["card"] = card = ticket._fold(card, events)
-            for kind, value in events:
-                if kind == "claim":
-                    self.pass_id, ended_of[id(self)] = value["id"], None
+            if binding is not None:
+                self._bound = (binding[1], None)
             return ticket._token(card)
 
         def release(self):
             mine = self.pass_id
-            self.pass_id, ended_of[id(self)] = None, mine
+            self._bound = (None, mine)
             card = card_box["card"]
             if card["pass"] is not None and card["pass"]["id"] == mine:
                 card_box["card"] = {**card, "pass": None}
@@ -518,10 +540,9 @@ def test_E11p_the_pass_writes_no_private_store_state():
             raise AssertionError("not used by this test")
 
     first = ProtocolOnlyStore()
-    with pytest.raises(AttributeError):
-        first._ended = None
-    with pytest.raises(AttributeError):
-        first.ended = None
+    for name in ("pass_id", "ended", "_ended"):
+        with pytest.raises(AttributeError):
+            setattr(first, name, None)
     session = ticket.TicketPass.open(KEY, Source(), first)
     session.record_tried("A note through the declared interface.")
     joined = ticket.TicketPass.open(KEY, Source(), ProtocolOnlyStore(), pass_id=session.pass_id)
@@ -533,6 +554,139 @@ def test_E11p_the_pass_writes_no_private_store_state():
     assert [tried["what"] for tried in card["tried"]] == [
         "A note through the declared interface.", "A note from the joined pass.",
     ]
+
+
+# --- E11q-E11t: the handle becomes used during the open; the store refuses the bind ---
+
+
+def _open_outcome(src, handle, pass_id=None):
+    """What an open did: ``("refused", code, exc)``, or ``("claimed" | "joined", pass id, session)``."""
+
+    try:
+        session = ticket.TicketPass.open(KEY, src, handle, pass_id=pass_id)
+    except ticket.StoreUnavailable as exc:
+        return "refused", exc.code, exc
+    return ("claimed" if pass_id is None else "joined"), session.pass_id, session
+
+
+def test_E11q_a_claim_on_a_handle_bound_during_the_open_is_refused(repo):
+    handle = store(repo)
+    box = {}
+
+    class Racing(Source):
+        """A source whose pull opens pass A on the same handle before it returns."""
+
+        def pull(self, key):
+            if "a" not in box:
+                box["a"] = ticket.TicketPass.open(KEY, Source(), handle)
+                box["bytes"] = card_bytes(repo)
+            return super().pull(key)
+
+    racing = Racing()
+    kind, detail, result = _open_outcome(racing, handle)
+    a = box["a"]
+    outcome = f"{kind} {detail}"
+    if kind == "claimed":
+        outcome = (f"pass {detail} claimed on a handle bound to {a.pass_id} during the open; "
+                   f"the card holds {read_card(repo)['pass']['id']}")
+    assert (kind, detail) == ("refused", "handle_used"), outcome
+    assert a.pass_id in str(result)
+    assert "fresh store handle" in str(result)
+    assert racing.trace == ["pull"]
+    assert card_bytes(repo) == box["bytes"]
+    assert read_card(repo)["pass"]["id"] == a.pass_id
+    a.record_tried("A writes after the refused open.")
+    assert read_card(repo)["tried"][-1]["what"] == "A writes after the refused open."
+    assert a.live is True
+
+
+def test_E11r_two_threads_opening_on_one_fresh_handle_get_one_pass(repo):
+    for _ in range(5):
+        handle = store(repo)
+        pulled, go = threading.Event(), threading.Event()
+        outcomes = {}
+
+        class Paused(Source):
+            """A source whose pull waits until the other thread has claimed."""
+
+            def pull(self, key):
+                pulled.set()
+                assert go.wait(30)
+                return super().pull(key)
+
+        def open_b():
+            outcomes["b"] = _open_outcome(Paused(), handle)
+
+        thread = threading.Thread(target=open_b)
+        thread.start()
+        assert pulled.wait(30)
+        outcomes["a"] = _open_outcome(Source(), handle)
+        go.set()
+        thread.join(30)
+        assert not thread.is_alive()
+        summary = {name: (kind, detail) for name, (kind, detail, _) in outcomes.items()}
+        summary["card holds"] = read_card(repo)["pass"]["id"]
+        winners = [result for kind, _, result in outcomes.values() if kind == "claimed"]
+        losers = [result for kind, _, result in outcomes.values() if kind == "refused"]
+        assert (len(winners), len(losers)) == (1, 1), summary
+        assert losers[0].code == "handle_used"
+        assert winners[0].pass_id in str(losers[0])
+        assert read_card(repo)["pass"]["id"] == winners[0].pass_id
+        winners[0].record_tried("The winner writes.")
+        assert read_card(repo)["tried"][-1]["what"] == "The winner writes."
+        winners[0].end()
+        assert read_card(repo)["pass"] is None
+
+
+def test_E11s_a_join_binds_through_apply_and_writes_nothing(repo):
+    first = open_pass(repo, Source(), handle=store(repo))
+    before = card_bytes(repo)
+    mtime = os.stat(card_path(repo)).st_mtime_ns
+    reads, applies = [], []
+
+    class Recording(ticket.MarkdownStore):
+        def read(self):
+            card, token = super().read()
+            reads.append(token)
+            return card, token
+
+        def apply(self, token, events):
+            applies.append((token, list(events)))
+            return super().apply(token, events)
+
+    handle = Recording(repo, KEY, TITLE)
+    joined = ticket.TicketPass.open(KEY, Source(), handle, pass_id=first.pass_id)
+    assert applies == [(reads[0], [("join", {"id": first.pass_id})])]
+    assert card_bytes(repo) == before
+    assert os.stat(card_path(repo)).st_mtime_ns == mtime
+    assert (handle.pass_id, handle.ended) == (first.pass_id, None)
+    joined.record_tried("A note from the joined pass.")
+    assert read_card(repo)["tried"][-1]["what"] == "A note from the joined pass."
+    assert read_card(repo)["pass"]["id"] == first.pass_id
+
+
+def test_E11t_a_second_join_on_a_handle_bound_during_the_open_is_refused(repo):
+    first = open_pass(repo, Source(), handle=store(repo))
+    handle = store(repo)
+    box = {}
+
+    class Racing(Source):
+        """A source whose pull joins pass 1 on the same handle before it returns."""
+
+        def pull(self, key):
+            if "j1" not in box:
+                box["j1"] = ticket.TicketPass.open(KEY, Source(), handle, pass_id=first.pass_id)
+            return super().pull(key)
+
+    kind, detail, result = _open_outcome(Racing(), handle, pass_id=first.pass_id)
+    assert (kind, detail) == ("refused", "handle_used"), f"{kind} {detail}"
+    assert first.pass_id in str(result)
+    j1 = box["j1"]
+    assert j1.live is True
+    j1.record_tried("The first join writes.")
+    card = read_card(repo)
+    assert card["pass"]["id"] == first.pass_id
+    assert card["tried"][-1]["what"] == "The first join writes."
 
 
 @pytest.mark.parametrize("destination", ["person", "research", "someone_else"])

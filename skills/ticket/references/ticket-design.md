@@ -342,7 +342,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 |---|---|---|
 | `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | the command names the installed script by its absolute path (the directory of `ticket.py` itself, as `SKILL.md` writes `${CLAUDE_SKILL_DIR}/ticket.py`), so it runs from the target repository. The command is rendered with `shlex.join` over its whole argv (interpreter, script path, subcommand, key, pass id), so no stored value can add a shell word. A pass id is lowercase hex; a card whose live pass id is anything else is `card_unreadable` |
 | `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
-| `handle_used` | the store handle given to `open` was already used for a pass: it is bound to one, or a pass it held has ended; nothing was pulled, read or written | a refusal (`StoreUnavailable`) raised by `open` before `source.pull`, for a new pass and for a join alike; the message names that pass and the fix (open each pass with a fresh store handle). The rule it enforces is section 5's one handle per pass |
+| `handle_used` | the store handle is bound to a pass, or a pass it held has ended, and a binding event (`claim` or `join`) or an `open` reached it; nothing was written | a refusal (`StoreUnavailable`) raised by `apply` under the store's lock on a `claim` or `join` (the guard), and by `open` before `source.pull` (the early report), for a new pass and for a join alike; the message names the used pass and the fix (open each pass with a fresh store handle); the lost-claim handler re-raises it unchanged. The rule it enforces is section 5's one handle per pass |
 | `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
 | `card_unreadable` | the card does not parse or has the wrong shape, including a plan snapshot that breaks the snapshot rules while its identity is readable (section 2); on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |
 | `close_invalid` | `status` is closed but the close does not validate | a valid card can only reach `closed` through the atomic close (D2), so an invalid close is an edit or an outside status write, and D4 says a corrupt card is refused, not resumed into a writable pass |
@@ -350,6 +350,10 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | a permanent refusal is never reported as the retryable `stale` |
 | `ledger_incompatible` | the selected ledger CLI lacks `append-many` or `--expect-revision`, or answers `usage` to a command the store sends | |
 | `ledger_store_unavailable` | `TICKET_LEDGER_CLI` selects the ledger store, which this release does not include; nothing was read or written | raised by store selection and by the `release` command (which exits 2) |
+| `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
+| `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
+| `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
+| `lock_unopenable` | the lock file could not be opened as a regular file through the directory; the message carries the operating system's error | markdown store; a link or a directory at the lock path lands here |
 
 `GateRequired` (a `TicketError`) stays for a step taken before its go.
 
@@ -401,16 +405,54 @@ naming the winner. A person's `release <key> <pass-id>` clears the live claim on
 it. Release is the one unconditional write: it clears this handle's own claim whatever has landed
 since, so a pass that gave up never stays held. No claim expires by time.
 
-One live pass per ticket, and **one store handle per pass**. `TicketPass.open`, for a new pass and for a
-join alike, refuses a `store` handle that has already been used for a pass (it is bound to a pass, or a
-pass it held has ended) before it reads or writes anything, as `handle_used`, with a message naming the
-fix (open each pass with a fresh store handle). The check reads only members the store interface
-declares (`pass_id`, and the read-only `ended` beside it), and `TicketPass` never writes a store's
-private state, so a second store conforms from the interface alone. `apply`'s claim check is unchanged:
-`_check_pass` for every event. A fresh handle behaves exactly as before. The rule is what makes the
-unconditional release safe: `release` clears whatever pass the handle holds, and a handle that never
-carries two passes gives no older pass object, still marked live, a way to end and clear a newer pass's
-claim.
+One live pass per ticket, and **one store handle per pass**, enforced at the one moment it can be:
+inside the store, under its own lock, as part of the write that binds the handle. A handle carries the
+pass it writes for (`pass_id`), and `release` clears whatever pass the handle holds; so a handle that
+came to hold a pass other than the one its caller thinks it holds would let `release` clear that other
+pass's claim. The rules below make that state unreachable. Each has matrix rows.
+
+1. **A handle binds once, under the lock, or not at all.** A *binding event* is `claim` or `join`.
+   `apply` runs, inside the lock and after the token check, in this order: (a) if the events carry a
+   binding event and the handle is used (bound to a pass, or a pass it held has ended), refuse
+   `handle_used` naming the used pass; (b) check the claim against the card as loaded, with the pass
+   the join names for a join (the live pass must be that id) and no pass for a claim (none may be
+   live, else `held`); (c) fold the events; (d) save, except for a join, which changes no card byte;
+   (e) bind the handle to the pass. All five happen under one hold of the lock, and nothing binds a
+   handle anywhere else. Two opens that share one fresh handle therefore never both claim: the second
+   one's claim meets a bound handle under the lock and is refused, whatever the card showed before.
+2. **A binding event travels alone.** An `apply` whose events carry a `claim` or `join` beside any
+   other event is a `TicketError` and writes nothing: a bind is one step and never rides with a record.
+3. **`open` writes nothing into a store.** It reads `pass_id` and `ended` for an early `handle_used`
+   report before `source.pull` (a courtesy to the caller; the lock-time check is the guard) and then
+   drives the store only through `read` and `apply`: a new pass sends `[claim]`, a join sends
+   `[join {id: P}]` under the token it just read. `pass_id` and `ended` are read-only on the interface
+   (section 6); a store sets them only in its own `apply` and `release`, so a second store conforms
+   from the interface alone.
+4. **A `join` is an event with no card effect.** It names exactly the id of the live pass it continues
+   (lowercase hex, like a claim id); folding it changes nothing; the markdown store saves nothing for
+   it, so the card's bytes and modification time are unchanged and the token returned is the one
+   passed. The ledger store appends nothing for it and binds the handle under its own serialization
+   (section 6.2).
+5. **`release()` clears only its own claim.** It reads the handle's `pass_id`, marks the handle ended,
+   and under the lock clears the card's `pass` only when its id equals that one. By rule 1 a handle
+   never held another id, so no pass object can release a pass it did not open, and a handle that was
+   never bound clears nothing. This is what makes the unconditional release safe.
+6. **The lost-claim handler passes `handle_used` through.** A refused claim is re-read once and
+   reported `held` naming the winner, except a `handle_used`, which is re-raised unchanged: `held`
+   would send the caller to the release command for a pass that is not stuck, while the fix is a fresh
+   handle.
+7. **Sequential reuse is refused before the pull.** A bound or ended handle given to `open`, for a new
+   pass or a join, is refused `handle_used` before `source.pull`, with the card untouched. A fresh
+   handle after a pass ends opens and joins as before.
+8. **A failed binding write leaves the handle unbound.** If the save raises during a claim, step (e)
+   never runs: the handle stays fresh and a retry on it claims.
+9. **Every markdown-store refusal carries a code** (section 4.5).
+
+A handle's states: *fresh* (no pass, nothing ended) becomes *bound to P* only when `apply([claim])` or
+`apply([join])` succeeds under the lock, and a failed save leaves it fresh; `release()` takes it to
+*ended, held P*; neither later state returns to fresh, and a binding event on either is `handle_used`
+(any other event on an ended handle is `pass_ended`). A handle shared by threads for the *same* pass
+stays supported: they take turns on its thread lock.
 
 ## 6. Both stores behind one interface
 
@@ -419,14 +461,18 @@ read()                      -> (card, token)
 apply(token, events)        -> token      # all events land, or none; refuses `stale`
 release()                   -> None       # unconditional; clears this handle's claim
 clear_pass(pass_id)         -> None       # a person's release: refuse unless pass_id is the live claim
-pass_id                     -> str | None # the pass this handle writes for: a claim binds it, a join sets it
+pass_id                     -> str | None # read-only: the pass this handle writes for; its own apply binds it
 ended                       -> str | None # read-only: the last pass this handle held that has ended, or None
 ```
 
-Events: `claim`, `release`, `plan`, `stamp`, `decision`, `review`, `tried`, `closed`. The pass folds
-them into the card shape of section 2 in memory for validation; the store validates each event on
-write with the same validators (section I of the matrix) and refuses the whole `apply` on any invalid
-value (`TicketError`, nothing written). The `token` passed to `apply` is always the pass's held token.
+Events: `claim`, `join`, `release`, `plan`, `stamp`, `decision`, `review`, `tried`, `closed`. The pass
+folds them into the card shape of section 2 in memory for validation; the store validates each event
+on write with the same validators (section I of the matrix) and refuses the whole `apply` on any
+invalid value (`TicketError`, nothing written). The `token` passed to `apply` is always the pass's held
+token. `claim` and `join` are the *binding events* (section 5): each travels alone in its `apply`, binds
+the handle to its pass under the store's serialization, and is refused `handle_used` on a handle that is
+bound or has held an ended pass. A `join` names the live pass it continues and changes no card; a caller
+binds a handle only by sending one of the two, never by assigning `pass_id`.
 
 ### 6.1 Markdown store (first)
 
@@ -440,11 +486,15 @@ value (`TicketError`, nothing written). The `token` passed to `apply` is always 
   `O_NOFOLLOW` through a directory fd; a lock path that is not a regular file is refused untouched;
   creating the lock file through the directory retries up to five attempts on `ENOENT`, because two
   first writers creating it at the same moment can see that error);
-  load; compute the token; refuse `stale` if it differs from the expected (held) one; check the claim
-  (`_check_pass`: a bound handle writes only while its pass is live, an unbound handle only while none
-  is); fold the events; write a temporary file beside the card and rename it into place; return the
-  new token. The operating system drops the lock if the holder dies. A hand edit of the card between
-  two steps changes the digest, so the next write refuses `stale` and the pass ends.
+  load; compute the token; refuse `stale` if it differs from the expected (held) one; for a binding
+  event (a `claim` or `join`, alone in the call), refuse `handle_used` if this handle is bound or has
+  held an ended pass; check the claim (a bound handle writes only while its pass is live, an unbound
+  handle only while none is, a join only while the pass it names is live); fold the events; write a
+  temporary file beside the card and rename it into place, except for a join, which saves nothing;
+  bind the handle to the claim's or join's pass, still under the lock; return the new token (a join
+  returns the one passed). A save that fails leaves the handle unbound. The operating system drops
+  the lock if the holder dies. A hand edit of the card between two steps changes the digest, so the
+  next write refuses `stale` and the pass ends.
 - **`release`**: under the lock, load, clear `pass` only if its id is this handle's, save. No token.
 - `closed` sets `status: "closed"`; the close stamp in the same `apply` has `close: true`.
 
@@ -466,6 +516,7 @@ pass `P`, held token `R`, close token `T`:
 |---|---|---|
 | `claim` on token `none` | `item.created {type: "ticket", title, source: W}`, then the `claim` row below, in one batch | `ticket-item/K/created` |
 | `claim` | `session.opened {purpose: "ticket pass <id> on <host> at <started_at>", source: W}` | `ticket-pass/K/P/claimed` |
+| `join` | no event: a join appends nothing; the handle binds to `P` under the store's own serialization, and a used handle is refused `handle_used` before any CLI call | none |
 | `release` | `session.closed {outcome, source: W}`, no `--expect-revision` | `ticket-pass/K/P/released` |
 | `plan` | `item.note {text: "ticket-plan:v2 " + canonical JSON of the plan snapshot, source: W}` | ordinary |
 | `decision` | `item.note {text: "ticket-decision:v2 " + canonical JSON of the decision record, source: W}` | ordinary |

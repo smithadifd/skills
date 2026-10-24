@@ -379,6 +379,16 @@ def _validate_claim(claim: Any) -> None:
         raise TicketError("the claim's id must be lowercase hex")
 
 
+def _validate_join(join: Any) -> None:
+    """A join names exactly the live pass it continues (design section 5): it binds the handle and changes no card."""
+
+    if type(join) is not dict or set(join) != {"id"}:
+        raise TicketError("a join names exactly the id of the pass it continues")
+    _text(join["id"], "the join's id")
+    if not _PASS_ID.fullmatch(join["id"]):
+        raise TicketError("the join's id must be lowercase hex")
+
+
 def _validate_stamp(stamp: Any) -> None:
     if type(stamp) is not dict or set(stamp) != {"point", "phase", "next_skills", "refs", "close"}:
         raise TicketError("a stamp has exactly point, phase, next_skills, refs and close")
@@ -554,6 +564,8 @@ def _validate_event(kind: str, value: Any, key: str) -> None:
         _validate_review(value)
     elif kind == "tried":
         _validate_tried(value)
+    elif kind == "join":
+        _validate_join(value)
     elif kind != "closed":
         raise TicketError(f"unknown event: {kind!r}")
 
@@ -645,6 +657,9 @@ def _fold_event(card: dict[str, Any], kind: str, value: Any) -> None:
         card["tried"].append(copy.deepcopy(value))
     elif kind == "closed":
         card["status"] = "closed"
+    elif kind == "join":
+        # A join binds the store handle (design section 5); the card is unchanged.
+        return
 
 
 def _fold(card: Mapping[str, Any], events: Sequence[tuple[str, Any]]) -> dict[str, Any]:
@@ -947,6 +962,36 @@ def _check_pass(key: str, live: Mapping[str, Any] | None, mine: str | None, ende
     )
 
 
+# The two binding events (design section 5): a successful one binds the handle to
+# the pass it names, inside the store's locked write, and nowhere else.
+_BINDING = ("claim", "join")
+
+
+def _binding(events: Sequence[tuple[str, Any]]) -> tuple[str, str] | None:
+    """The binding event's ``(kind, pass id)`` among ``events``, or None.
+
+    A binding event travels alone: one with company is a ``TicketError`` and
+    nothing is written, so a bind is one step and never rides with a record.
+    """
+
+    bound = [(kind, value["id"]) for kind, value in events if kind in _BINDING]
+    if not bound:
+        return None
+    if len(events) != 1:
+        raise TicketError(f"a {bound[0][0]} travels alone in its apply; nothing was written")
+    return bound[0]
+
+
+def _handle_used(key: str, used: str) -> StoreUnavailable:
+    """The refusal of a store handle already used for a pass: one handle serves one pass."""
+
+    return StoreUnavailable(
+        f"this store handle was already used for pass {used} on ticket {key}, so nothing was written; "
+        "open each pass with a fresh store handle",
+        code="handle_used",
+    )
+
+
 def _stale(key: str, detail: str) -> StoreUnavailable:
     return StoreUnavailable(
         f"ticket {key} changed since this pass last read or wrote it: {detail}. Nothing was written and the pass "
@@ -959,14 +1004,21 @@ def _stale(key: str, detail: str) -> StoreUnavailable:
 
 
 class Store(Protocol):
-    """Four calls. A handle carries the pass it writes for in ``pass_id``: a
-    successful ``claim`` binds it, and a pass that joins sets it. One handle
-    serves one pass: ``TicketPass.open`` refuses a handle that is bound, or
-    whose pass has ``ended``, and reads nothing else of a store."""
+    """Four calls. A handle carries the pass it writes for in ``pass_id`` and
+    binds to it only inside its own ``apply``: a ``claim`` or a ``join`` event,
+    alone in its call, binds the handle under the store's serialization, and a
+    used handle (bound to a pass, or whose pass has ``ended``) is refused there
+    as ``handle_used``. One handle serves one pass (design section 5).
+    ``TicketPass`` reads ``pass_id`` and ``ended`` and writes neither: a caller
+    binds a handle by sending the event, never by assigning."""
 
     key: str
-    pass_id: str | None
     ref: str
+
+    @property
+    def pass_id(self) -> str | None:
+        """The pass this handle writes for: bound by its own ``apply``, cleared by ``release``."""
+        ...
 
     @property
     def ended(self) -> str | None:
@@ -1025,7 +1077,8 @@ class MarkdownStore:
             self.path.parent.resolve().relative_to(self.repo)
         except ValueError as exc:
             raise StoreUnavailable(
-                f".ticket for ticket {self.key} resolves outside the repository, so nothing was written"
+                f".ticket for ticket {self.key} resolves outside the repository, so nothing was written",
+                code="outside_repository",
             ) from exc
 
     def _check_ignored(self) -> None:
@@ -1039,7 +1092,8 @@ class MarkdownStore:
             if result.returncode != 0:
                 raise StoreUnavailable(
                     f"{relative.as_posix()} is not git-ignored; add `.ticket/` to the repository's ignore rules "
-                    "and retry. No ignore file was changed and nothing was written."
+                    "and retry. No ignore file was changed and nothing was written.",
+                    code="not_ignored",
                 )
 
     @contextlib.contextmanager
@@ -1061,7 +1115,8 @@ class MarkdownStore:
                 try:
                     if not stat.S_ISREG(os.fstat(fd).st_mode):
                         raise StoreUnavailable(
-                            f"{self.ref[:-3]}.lock is not a regular file, so it was not used and nothing was written"
+                            f"{self.ref[:-3]}.lock is not a regular file, so it was not used and nothing was written",
+                            code="lock_not_regular",
                         )
                     fcntl.flock(fd, fcntl.LOCK_EX)
                     yield
@@ -1082,7 +1137,8 @@ class MarkdownStore:
                 if isinstance(exc, FileNotFoundError) and attempts:
                     continue
                 raise StoreUnavailable(
-                    f"cannot open {self.ref[:-3]}.lock as a regular file ({exc}), so nothing was written"
+                    f"cannot open {self.ref[:-3]}.lock as a regular file ({exc}), so nothing was written",
+                    code="lock_unopenable",
                 ) from exc
 
     def _load(self) -> tuple[dict[str, Any], str]:
@@ -1118,24 +1174,43 @@ class MarkdownStore:
         return self._load()
 
     def apply(self, token: str, events: Sequence[tuple[str, Any]]) -> str:
-        """Land every event or none, only while the card is still at ``token``."""
+        """Land every event or none, only while the card is still at ``token``.
+
+        A binding event (a ``claim`` or a ``join``, alone in its call) binds
+        this handle to its pass inside the lock, in this order (design section
+        5, rule 1): a used handle is refused ``handle_used``; the claim is
+        checked against the card as loaded (a claim needs no live pass, a join
+        needs the pass it names); the events fold; the card is saved, except
+        for a join, which changes no byte; only then is the handle bound. A
+        save that fails leaves the handle unbound.
+        """
 
         for kind, value in events:
             _validate_event(kind, value, self.key)
+        binding = _binding(events)
+        joining = binding is not None and binding[0] == "join"
         with self._locked():
             card, current = self._load()
             if current != token:
                 raise _stale(self.key, "the card on disk changed")
-            _check_pass(self.key, card["pass"], self.pass_id, self._ended)
+            if binding is not None and (self.pass_id is not None or self._ended is not None):
+                raise _handle_used(self.key, self.pass_id or self._ended)
+            mine = binding[1] if joining else self.pass_id
+            _check_pass(self.key, card["pass"], mine, self._ended)
             card = _fold(card, events)
-            self._save(card)
-        for kind, value in events:
-            if kind == "claim":
-                self.pass_id, self._ended = value["id"], None
-        return _token(card)
+            if not joining:
+                self._save(card)
+            if binding is not None:
+                self.pass_id, self._ended = binding[1], None
+        return token if joining else _token(card)
 
     def release(self) -> None:
-        """Clear this handle's own claim, whatever has landed since; no token."""
+        """Clear this handle's own claim, whatever has landed since; no token.
+
+        ``mine`` is the one pass this handle ever held (design section 5, rule
+        5): a handle binds once, so this clears no other pass's claim, and a
+        handle that was never bound clears nothing.
+        """
 
         mine = self.pass_id
         self.pass_id, self._ended = None, mine
@@ -1308,19 +1383,18 @@ class TicketPass:
     def open(cls, key: str, source: TicketSource, store: Store, *, pass_id: str | None = None) -> "TicketPass":
         """Open a pass: a new one claims the ticket; ``pass_id`` continues that live pass.
 
-        One store handle serves one pass: a handle bound to a pass, or whose
-        pass has ended, is refused (``handle_used``) before anything is
-        pulled, read or written. Then the source is pulled, the card is read
+        One store handle serves one pass. A handle bound to a pass, or whose
+        pass has ended, is reported ``handle_used`` here, before anything is
+        pulled or read; the guard is the store's own check, under its lock,
+        when the claim or join reaches it, so a handle that becomes used during
+        the open is refused there. Then the source is pulled, the card is read
         and its state derived. A refused card writes nothing; a stopped or
-        closed ticket is reported and takes no claim.
+        closed ticket is reported and takes no claim. The open writes nothing
+        into a store: a new pass sends its claim, a join sends a ``join`` event.
         """
 
         if store.pass_id is not None or store.ended is not None:
-            raise StoreUnavailable(
-                f"this store handle was already used for pass {store.pass_id or store.ended} on ticket {key}, "
-                "so nothing was read or written; open each pass with a fresh store handle",
-                code="handle_used",
-            )
+            raise _handle_used(key, store.pass_id or store.ended)
         ticket = source.pull(key)
         card, token = store.read()
         state, flags, identity = _derive(card, ticket, pass_id, key)
@@ -1335,8 +1409,8 @@ class TicketPass:
         if pass_id is None:
             session._claim()
         else:
-            _check_pass(key, card["pass"], pass_id, None)
-            store.pass_id = pass_id
+            # The join binds the handle inside the store, under its lock; it changes no card byte.
+            session._token = store.apply(token, [("join", {"id": pass_id})])
             session._pass_id = pass_id
         session._live = True
         return session
@@ -1346,6 +1420,9 @@ class TicketPass:
         try:
             token = self.store.apply(self._token, [("claim", claim)])
         except StoreUnavailable as exc:
+            if exc.code == "handle_used":
+                # Not a lost race: the handle was bound meanwhile, and the fix is a fresh handle.
+                raise
             # A lost race: read once more and name the pass that won.
             card, _ = self.store.read()
             if card["pass"] is not None:
