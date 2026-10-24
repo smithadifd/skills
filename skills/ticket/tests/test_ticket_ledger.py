@@ -627,12 +627,28 @@ def test_H32_error_and_unusable_are_resolved_by_the_batch_key(fake, answer):
 # --- The join, the store's own used-handle guard, and the folds of an outsider's events ---
 
 
+class _LockExits:
+    """Delegates to a handle's real lock and records the handle's binding at every release."""
+
+    def __init__(self, handle):
+        self.handle, self.lock, self.seen = handle, handle._threads, []
+
+    def __enter__(self):
+        return self.lock.__enter__()
+
+    def __exit__(self, *exc):
+        self.seen.append((self.handle.pass_id, self.handle.ended))
+        return self.lock.__exit__(*exc)
+
+
 def test_H33_a_join_appends_nothing_and_binds_under_the_store_lock(fake):
     first = open_ledger(fake, Source())
     handle = fake.store()
     _, token = handle.read()
+    exits = handle._threads = _LockExits(handle)
     events, calls = fake.events(), fake.calls()
     assert handle.apply(token, [("join", {"id": first.pass_id})]) == token
+    assert exits.seen == [(first.pass_id, None)]
     assert fake.events() == events
     assert fake.calls() == calls
     assert (handle.pass_id, handle.ended) == (first.pass_id, None)
@@ -640,6 +656,15 @@ def test_H33_a_join_appends_nothing_and_binds_under_the_store_lock(fake):
     assert landed == str(fake.events()[-1]["id"])
     assert fake.events()[-1]["kind"] == "item.tried"
     assert kinds(fake.events()).count("session.opened") == 1
+
+
+def test_a_claim_binds_the_handle_before_the_store_lock_is_released(fake):
+    handle = fake.store()
+    _, token = handle.read()
+    exits = handle._threads = _LockExits(handle)
+    handle.apply(token, [("claim", _CLAIM)])
+    assert exits.seen == [(_CLAIM["id"], None)]
+    assert (handle.pass_id, handle.ended) == (_CLAIM["id"], None)
 
 
 def test_a_second_process_joins_a_live_pass_by_its_id_and_continues(fake):
