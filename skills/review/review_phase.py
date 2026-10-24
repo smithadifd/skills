@@ -639,6 +639,9 @@ _OMP_VALUE_ANCHOR = re.compile(
     r"(?<![^\W\d_])(?:APPROVE|REQUEST[\s_-]+CHANGES)(?![^\W\d_])"
 )
 _OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+# A verdict value read as a prefix, for the unstripped line: raw HTML, code or
+# other text may follow it on the same line.
+_OMP_VALUE_PREFIX = re.compile(r"(approve|request[\s_-]+changes)(?![^\W\d_])")
 
 
 def _strip_omp_decoration(text: str) -> str:
@@ -716,13 +719,14 @@ def _strip_omp_raw_html(text: str) -> str:
     return "".join(kept)
 
 
-def _canonicalize_omp_prose(text: str) -> tuple[str, str]:
+def _canonicalize_omp_prose(text: str, strip: bool = True) -> tuple[str, str]:
     """Raw HTML stripped, NFKC, then the Latin fold: `(cased, cased.casefold())`.
 
     The cased copy keeps letter case for the camel-case key bound and the
-    uppercase value anchor; the casefolded copy is what the key matches.
+    uppercase value anchor; the casefolded copy is what the key matches. With
+    `strip` off the raw HTML stays, for the unstripped reading.
     """
-    text = unicodedata.normalize("NFKC", _strip_omp_raw_html(text))
+    text = unicodedata.normalize("NFKC", _strip_omp_raw_html(text) if strip else text)
     cased = "".join(_latin_fold(character) for character in text)
     return cased, cased.casefold()
 
@@ -889,6 +893,68 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
         else:
             raise VerdictConflict(
                 f"VerdictConflict: unrecognized prose verdict value {value!r}"
+            )
+    # Stripping raw HTML may only add refusals, never hide a verdict: the same
+    # lines read as written must not show one the stripped lines hid. Raw HTML
+    # is not told apart from code spans, fenced or indented code, or escaped
+    # text, so a verdict in any of them still vetoes a record it disagrees
+    # with (declared over-refusal).
+    unstripped = [
+        None if line is None else _canonicalize_omp_prose(line, strip=False)
+        for line in lines
+    ]
+    _refuse_mixed_words(unstripped)
+    verdicts.extend(_omp_unstripped_verdicts(canonical, unstripped))
+    return verdicts
+
+
+def _omp_unstripped_verdicts(
+    stripped: list[tuple[str, str] | None],
+    unstripped: list[tuple[str, str] | None],
+) -> list[str]:
+    """Every verdict the unstripped lines show: each key's value and each anchor.
+
+    A key's value runs to the next key on its line and is read as a prefix,
+    since raw HTML or code may follow it. When a line's last key has no value
+    there, or its stripped line is key-only, the next non-blank unstripped
+    line is read as that value too.
+    """
+    verdicts = []
+    for index, item in enumerate(unstripped):
+        if item is None:
+            continue
+        cased, folded = item
+        keys = _omp_verdict_keys(cased, folded)
+        values = [
+            _omp_prose_value(
+                folded[key.end():following.start() if following else len(folded)]
+            )
+            for key, following in zip(keys, keys[1:] + [None])
+        ]
+        stripped_keys = _omp_verdict_keys(*stripped[index])
+        key_only = bool(stripped_keys) and not _omp_prose_value(
+            stripped[index][1][stripped_keys[-1].end():]
+        )
+        if keys and (not values[-1] or key_only):
+            following = next(
+                (
+                    later
+                    for later in range(index + 1, len(unstripped))
+                    if unstripped[later] is None or unstripped[later][1].strip()
+                ),
+                None,
+            )
+            if following is not None and unstripped[following] is not None:
+                values.append(_omp_prose_value(unstripped[following][1]))
+        for value in values:
+            prefix = _OMP_VALUE_PREFIX.match(value)
+            if prefix:
+                verdicts.append(
+                    APPROVED if prefix.group(1) == "approve" else CHANGES_REQUESTED
+                )
+        for anchor in _OMP_VALUE_ANCHOR.finditer(cased):
+            verdicts.append(
+                APPROVED if anchor.group() == "APPROVE" else CHANGES_REQUESTED
             )
     return verdicts
 

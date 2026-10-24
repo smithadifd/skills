@@ -2248,6 +2248,35 @@ def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
     )
 
 
+# --- the omp prose checks stay linear on a line of comment openers ----------
+#
+# The omp prose checks read every line twice, with its raw HTML stripped and as
+# written. An unclosed `<!--` ends comment stripping for the rest of its line,
+# so a line of nothing but openers is still read in one pass each time. A scan
+# that searched on from every opener would be quadratic, but in C; it only
+# outgrows the checks' linear per-character work at these lengths.
+
+OMP_COMMENT_SHORT_COUNT = 16000
+OMP_COMMENT_LONG_COUNT = 4 * OMP_COMMENT_SHORT_COUNT
+
+
+def test_omp_prose_check_time_grows_linearly_on_a_line_of_comment_openers():
+    def check(line):
+        return review_phase._omp_prose_verdicts([line])
+
+    shorter = _fastest_call_seconds(check, "<!--" * OMP_COMMENT_SHORT_COUNT)
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"the omp prose checks took {shorter:.2f}s on "
+        f"{OMP_COMMENT_SHORT_COUNT} comment openers"
+    )
+    longer = _fastest_call_seconds(check, "<!--" * OMP_COMMENT_LONG_COUNT)
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"the omp prose checks: quadrupling {OMP_COMMENT_SHORT_COUNT} to "
+        f"{OMP_COMMENT_LONG_COUNT} comment openers took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
+    )
+
+
 # --- INTERVAL line and body patterns stay linear and keep their grammar ------
 #
 # `_INTERVAL_LINE` runs on the trailing lines of every successfully parsed

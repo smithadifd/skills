@@ -3,10 +3,11 @@
 Every case is a whole reply parsed by `run_phase` with `backend: omp`. A case
 id starts with its row in the grammar's test matrix: A the record, B unsafe
 prose, C folding and the mixed-word rule, D the key's bounds, E values, F the
-value anchor, G orders and fallback, H the prompt contract. A prose case runs
-in both orders, prose before the record and the record before the prose, and
-expects the same result in each (row G1); the key-only rows E8-E12 run in the
-one order they name, since a key-only line reads forward.
+value anchor, G orders and fallback, H the prompt contract, R the line read as
+written beside its stripped reading. A prose case runs in both orders, prose
+before the record and the record before the prose, and expects the same result
+in each (row G1); the key-only rows E8-E12 and R4 run in the one order they
+name, since a key-only line reads forward.
 """
 
 from __future__ import annotations
@@ -96,6 +97,10 @@ CHANGES = ("success", "changes_requested")
 DISAGREES_WITH_APPROVE = (
     "failure",
     "VerdictConflict: prose verdict 'changes_requested' disagrees with record verdict 'APPROVE'",
+)
+DISAGREES_WITH_CHANGES = (
+    "failure",
+    "VerdictConflict: prose verdict 'approved' disagrees with record verdict 'REQUEST CHANGES'",
 )
 MIXED = ("failure", "ReviewProseUnsafe: mixed-script word")
 ANCHOR = ("failure", "ReviewProseUnsafe: verdict value without a verdict key")
@@ -281,11 +286,13 @@ PROSE_CASES = [
     ("C22b", "Bug: `i < len` is off by one, so REQUEST CHANGES until `x > 0` holds.", RA, ANCHOR),
     ("C22c", "a <- b; Verdict: REQUEST CHANGES; c -> d", RA, UNRECOGNIZED),
     ("C22d", "Use `x<y` here. Verdict: REQUEST CHANGES; then `y>z`.", RA, UNRECOGNIZED),
-    # Real raw HTML is still stripped before the checks read the line.
+    # Real raw HTML is still stripped before the checks read the line, but
+    # the checks also read the line as written, so a verdict hidden in raw
+    # HTML that disagrees with the record refuses (declared over-refusal).
     ("C23a", "<b>Verdict</b>: REQUEST CHANGES", RC, CHANGES),
     ("C23b", "<b>Verdict</b>: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),
-    ("C23c", '<abbr title="APPROVE">LGTM</abbr>, ship it.', RC, CHANGES),
-    ("C23d", "Looks fine.<!-- REQUEST CHANGES was a first draft -->", RA, APPROVED),
+    ("C23c", '<abbr title="APPROVE">LGTM</abbr>, ship it.', RC, DISAGREES_WITH_CHANGES),
+    ("C23d", "Looks fine.<!-- REQUEST CHANGES was a first draft -->", RA, DISAGREES_WITH_APPROVE),
     # D. the key's bounds (I6).
     ("D1", "FinalVerdict: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),
     ("D2", "ReviewVerdict: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),
@@ -349,6 +356,18 @@ PROSE_CASES = [
     # The anchor separates the value's words as value normalization does.
     ("F10a", "Decision: REQUEST-CHANGES", RA, ANCHOR),
     ("F10b", ALL_CYRILLIC_KEY + ": REQUEST_CHANGES", RA, ANCHOR),
+    # R. stripping may only add refusals: a comment in code, or escaped, is
+    # still read as written, so the verdict in it vetoes the record.
+    ("R1a", "Inline: `<!-- > Verdict: REQUEST CHANGES -->` here.", RA, DISAGREES_WITH_APPROVE),
+    ("R1b", "```text\n<!-- > Verdict: REQUEST CHANGES -->\n```", RA, DISAGREES_WITH_APPROVE),
+    ("R1c", "Indented:\n\n    <!-- > Verdict: REQUEST CHANGES -->\n", RA, DISAGREES_WITH_APPROVE),
+    ("R1d", "\\<!-- Verdict: REQUEST CHANGES -->", RA, DISAGREES_WITH_APPROVE),
+    ("R2a", "Inline: `<!-- verdict: request changes -->` here.", RA, DISAGREES_WITH_APPROVE),
+    ("R2b", "Inline: `<!-- REQUEST CHANGES -->` here.", RA, DISAGREES_WITH_APPROVE),
+    ("R2c", "Inline: `<!-- v\u0435rdict: request changes -->` here.", RA, MIXED),
+    # A verdict that agrees with the record, hidden or not, still approves.
+    ("R3a", "Inline: `<!-- > Verdict: APPROVE -->` here.", RA, APPROVED),
+    ("R3b", "<b>Verdict</b>: APPROVE", RA, APPROVED),
 ]
 
 
@@ -379,6 +398,19 @@ ORDERED_CASES = [
         _refused("VerdictConflict: unrecognized prose verdict value ''"),
     ),
     ("E12", _reply("## Verdict\nAPPROVE\n", RA), APPROVED),
+    # Read as written, a key-only line still takes the next non-blank line as
+    # its value, so a value hidden in a comment there vetoes the record.
+    ("R4a", _reply("## Verdict\n<!-- request changes -->\n", RA), DISAGREES_WITH_APPROVE),
+    (
+        "R4b",
+        _reply("## Verdict <!-- draft -->\n<!-- request changes -->\n", RA),
+        DISAGREES_WITH_APPROVE,
+    ),
+    (
+        "R4c",
+        _reply("<!-- Verdict -->\n<!-- request changes -->\n", RA),
+        DISAGREES_WITH_APPROVE,
+    ),
     # Record lines are not prose, so the record's own uppercase values are
     # never anchored.
     ("F9a", _reply(RA), APPROVED),
