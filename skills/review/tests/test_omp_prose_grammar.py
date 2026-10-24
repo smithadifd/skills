@@ -274,6 +274,18 @@ PROSE_CASES = [
     # separator-tolerant key candidate as one word.
     ("C21a", "V/\u0395/R/D/I/C/T: request changes", RA, MIXED),
     ("C21b", "V \u0395 R D I C T: request changes", RA, MIXED),
+    # Only CommonMark raw HTML is stripped (a tag name directly after `<` or
+    # `</`, or a comment). Any other `<` ... `>` is visible text, so the
+    # verdict between them still vetoes the record.
+    ("C22a", "If `n < 0` the loop never ends. Verdict: REQUEST CHANGES; see `Map<K, V>`.", RA, UNRECOGNIZED),
+    ("C22b", "Bug: `i < len` is off by one, so REQUEST CHANGES until `x > 0` holds.", RA, ANCHOR),
+    ("C22c", "a <- b; Verdict: REQUEST CHANGES; c -> d", RA, UNRECOGNIZED),
+    ("C22d", "Use `x<y` here. Verdict: REQUEST CHANGES; then `y>z`.", RA, UNRECOGNIZED),
+    # Real raw HTML is still stripped before the checks read the line.
+    ("C23a", "<b>Verdict</b>: REQUEST CHANGES", RC, CHANGES),
+    ("C23b", "<b>Verdict</b>: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),
+    ("C23c", '<abbr title="APPROVE">LGTM</abbr>, ship it.', RC, CHANGES),
+    ("C23d", "Looks fine.<!-- REQUEST CHANGES was a first draft -->", RA, APPROVED),
     # D. the key's bounds (I6).
     ("D1", "FinalVerdict: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),
     ("D2", "ReviewVerdict: REQUEST CHANGES", RA, DISAGREES_WITH_APPROVE),

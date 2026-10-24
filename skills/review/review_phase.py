@@ -585,7 +585,16 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
 
 _OMP_REVIEW_RECORD_FIELDS = {"verdict", "bugs", "nits", "reviewed_head"}
 _OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
-_OMP_HTML_TAG = re.compile(r"<[^>]*>")
+# A CommonMark raw HTML tag on one line: an open tag (a tag name directly
+# after `<`, its attributes, an optional `/`) or a closing tag (a tag name
+# directly after `</`). Any other `<` is text a reader sees (`n < 0`,
+# `Map<K, V>`, `a <- b`), so it stays in the prose the checks read.
+_OMP_HTML_TAG = re.compile(
+    r"<(?:[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t\r\n]+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:[ \t\r\n]*=[ \t\r\n]*(?:[^ \t\r\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t\r\n]*/?|/[A-Za-z][A-Za-z0-9-]*[ \t\r\n]*)>"
+)
 # Every character reference an HTML5 decoder consumes: any `&...;`, a numeric
 # or hex reference with or without its semicolon (`&#101`, `&#x65`), and the
 # legacy named references HTML5 decodes without one (`&shy`, `&amp`).
@@ -675,13 +684,45 @@ def _latin_fold(character: str) -> str:
     return character
 
 
+def _strip_omp_raw_html(text: str) -> str:
+    """`text` without its CommonMark raw HTML: tags and comments.
+
+    A comment is `<!--` through the first `-->` after it (`<!-->` and
+    `<!--->` included). An unclosed `<!--` is text, and so is every later
+    one, since no `-->` follows it either.
+    """
+    kept = []
+    index = 0
+    comments = True
+    while (start := text.find("<", index)) != -1:
+        end = None
+        if comments and text.startswith("<!--", start):
+            close = text.find("-->", start + 2)
+            if close == -1:
+                comments = False
+            else:
+                end = close + 3
+        else:
+            tag = _OMP_HTML_TAG.match(text, start)
+            if tag:
+                end = tag.end()
+        if end is None:
+            kept.append(text[index:start + 1])
+            index = start + 1
+        else:
+            kept.append(text[index:start])
+            index = end
+    kept.append(text[index:])
+    return "".join(kept)
+
+
 def _canonicalize_omp_prose(text: str) -> tuple[str, str]:
-    """Tags stripped, NFKC, then the Latin fold: `(cased, cased.casefold())`.
+    """Raw HTML stripped, NFKC, then the Latin fold: `(cased, cased.casefold())`.
 
     The cased copy keeps letter case for the camel-case key bound and the
     uppercase value anchor; the casefolded copy is what the key matches.
     """
-    text = unicodedata.normalize("NFKC", _OMP_HTML_TAG.sub("", text))
+    text = unicodedata.normalize("NFKC", _strip_omp_raw_html(text))
     cased = "".join(_latin_fold(character) for character in text)
     return cased, cased.casefold()
 
