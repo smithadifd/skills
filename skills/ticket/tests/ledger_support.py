@@ -94,14 +94,14 @@ class FakeLedger:
         out = json.dumps({"data": None, "error": {"code": code, "message": message}, "ok": False}, sort_keys=True)
         self.script(verb, stdout=out + "\n", status=EXIT[code] if status is None else status, commit=commit)
 
-    def outside(self, kind, payload, actor="outsider", session="outside-session"):
-        """An outsider's event, appended straight into the ledger with a random key."""
+    def outside(self, kind, payload, actor="outsider", session="outside-session", key=None):
+        """An outsider's event, appended straight into the ledger under ``key`` or a random one."""
 
         def append(state):
             events = state["events"]
             events.append({
                 "id": (events[-1]["id"] if events else 0) + 1, "kind": kind, "payload": payload, "payload_version": 1,
-                "item_id": KEY, "idempotency_key": secrets.token_hex(16), "actor": actor, "session": session,
+                "item_id": KEY, "idempotency_key": key or secrets.token_hex(16), "actor": actor, "session": session,
             })
 
         self._change(append)

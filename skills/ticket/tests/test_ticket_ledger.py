@@ -622,3 +622,167 @@ def test_H32_error_and_unusable_are_resolved_by_the_batch_key(fake, answer):
     assert refusal(excinfo) == "ledger_refused"
     assert f"unusable database: {code} detail" in str(excinfo.value)
     assert session.live is False
+
+
+# --- The join, the store's own used-handle guard, and the folds of an outsider's events ---
+
+
+def test_H33_a_join_appends_nothing_and_binds_under_the_store_lock(fake):
+    first = open_ledger(fake, Source())
+    handle = fake.store()
+    _, token = handle.read()
+    events, calls = fake.events(), fake.calls()
+    assert handle.apply(token, [("join", {"id": first.pass_id})]) == token
+    assert fake.events() == events
+    assert fake.calls() == calls
+    assert (handle.pass_id, handle.ended) == (first.pass_id, None)
+    landed = handle.apply(token, [("tried", {"what": "A write after the join.", "phase": "build"})])
+    assert landed == str(fake.events()[-1]["id"])
+    assert fake.events()[-1]["kind"] == "item.tried"
+    assert kinds(fake.events()).count("session.opened") == 1
+
+
+def test_a_second_process_joins_a_live_pass_by_its_id_and_continues(fake):
+    src = Source()
+    first = build_ledger(fake, src, "S2", 0)
+    opened = len(claims(fake))
+    joined = open_ledger(fake, src, pass_id=first.pass_id)
+    assert joined.live is True and joined.pass_id == first.pass_id
+    assert len(claims(fake)) == opened
+    joined.record_tried("Run the suite.")
+    assert kinds(fake.events())[-1] == "item.tried"
+    assert fake.store().read()[0]["pass"]["id"] == first.pass_id
+
+
+def test_a_join_naming_another_id_is_refused_held_and_writes_nothing(fake):
+    src = Source()
+    first = open_ledger(fake, src)
+    before = fake.events()
+    with pytest.raises(ticket.TicketHeld) as excinfo:
+        open_ledger(fake, src, pass_id="0000000000000000")
+    assert excinfo.value.holder["id"] == first.pass_id
+    assert fake.events() == before
+
+
+_CLAIM = {"id": "0123456789abcdef", "host": "example-host", "started_at": "2026-01-01T00:00:00Z"}
+
+
+@pytest.mark.parametrize("event", ["claim", "join"])
+@pytest.mark.parametrize("used", ["bound", "ended"])
+def test_a_binding_apply_on_a_used_handle_is_refused_before_any_cli_call(fake, used, event):
+    handle = fake.store()
+    session = open_ledger(fake, Source(), handle=handle)
+    if used == "ended":
+        session.end()
+    value = _CLAIM if event == "claim" else {"id": session.pass_id}
+    token = str(fake.events()[-1]["id"])
+    events, calls = fake.events(), fake.calls()
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        handle.apply(token, [(event, value)])
+    assert refusal(excinfo) == "handle_used"
+    assert session.pass_id in str(excinfo.value)
+    assert fake.events() == events
+    assert fake.calls() == calls
+
+
+def test_a_claim_on_a_handle_bound_during_the_open_is_refused_by_the_store(fake):
+    handle = fake.store()
+    box = {}
+
+    class Racing(Source):
+        """A source whose pull opens pass A on the same handle before it returns."""
+
+        def pull(self, key):
+            if "a" not in box:
+                box["a"] = open_ledger(fake, Source(), handle=handle)
+                box["events"], box["appends"] = fake.events(), len(fake.appends())
+            return super().pull(key)
+
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        open_ledger(fake, Racing(), handle=handle)
+    a = box["a"]
+    assert refusal(excinfo) == "handle_used"
+    assert a.pass_id in str(excinfo.value) and "fresh store handle" in str(excinfo.value)
+    assert fake.events() == box["events"]
+    assert len(fake.appends()) == box["appends"]
+    assert fake.store().read()[0]["pass"]["id"] == a.pass_id
+    a.record_tried("A writes after the refused open.")
+    assert fake.events()[-1]["kind"] == "item.tried"
+    assert a.live is True
+
+
+def test_a_second_join_on_a_handle_bound_during_the_open_is_refused_by_the_store(fake):
+    first = open_ledger(fake, Source())
+    handle = fake.store()
+    box = {}
+
+    class Racing(Source):
+        """A source whose pull joins the pass on the same handle before it returns."""
+
+        def pull(self, key):
+            if "j1" not in box:
+                box["j1"] = open_ledger(fake, Source(), pass_id=first.pass_id, handle=handle)
+            return super().pull(key)
+
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        open_ledger(fake, Racing(), pass_id=first.pass_id, handle=handle)
+    assert refusal(excinfo) == "handle_used"
+    assert first.pass_id in str(excinfo.value)
+    j1 = box["j1"]
+    assert j1.live is True
+    j1.record_tried("The first join writes.")
+    assert fake.events()[-1]["kind"] == "item.tried"
+    assert fake.store().read()[0]["pass"]["id"] == first.pass_id
+
+
+def _outside_close(fake, phase="close", stop_source=WRITER, state_source=WRITER):
+    """An outsider's stop and state under this store's own ``ticket-close`` keys, with the named phase and sources."""
+
+    stem = f"ticket-close/{KEY}/0123456789abcdef/fedcba9876543210"
+    fake.outside("item.stopped", {"point": "Closed by hand.", "phase": phase, "skills": [], "refs": [], "source": stop_source},
+                 key=f"{stem}/stop")
+    fake.outside("item.state", {"status": "closed", "source": state_source}, key=f"{stem}/state")
+
+
+@pytest.mark.parametrize(
+    "variant, trusted",
+    [("control", True), ("phase", False), ("source", False)],
+    ids=["right keys, close phase, same source", "a stop that is not a close phase", "a stop of another source"],
+)
+def test_an_outside_close_under_the_close_keys_is_trusted_only_with_a_close_phase_and_one_source(fake, variant, trusted):
+    src = Source()
+    build_ledger(fake, src, "S4", 1).end()
+    if variant == "control":
+        _outside_close(fake)
+    elif variant == "phase":
+        _outside_close(fake, phase="build")
+    else:
+        _outside_close(fake, state_source="another-writer")
+    before = fake.events()
+    # The fold marks the last stamp as the close only for a trusted close. The resume refuses a close stamp
+    # that is not at the close phase on its own, so the mark is the observable guard for the phase and the source.
+    card, _ = fake.store().read()
+    assert card["status"] == "closed"
+    assert card["stamps"][-1]["close"] is trusted
+    if trusted:
+        assert open_ledger(fake, src).phase == "closed"
+    else:
+        with pytest.raises(ticket.StoreUnavailable) as excinfo:
+            open_ledger(fake, src)
+        assert refusal(excinfo) == "close_invalid"
+    assert fake.events() == before
+
+
+def test_a_release_naming_another_pass_leaves_the_live_pass_holding(fake):
+    src = Source()
+    live = open_ledger(fake, src)
+    fake.outside("session.closed", {"outcome": "released by hand"}, key=f"ticket-pass/{KEY}/0123456789abcdef/released")
+    holder = fake.store().read()[0]["pass"]
+    assert (holder or {}).get("id") == live.pass_id
+    before = fake.events()
+    with pytest.raises(ticket.TicketHeld) as excinfo:
+        open_ledger(fake, src)
+    assert excinfo.value.holder["id"] == live.pass_id
+    assert fake.events() == before
+    fake.outside("session.closed", {"outcome": "released by hand"}, key=f"ticket-pass/{KEY}/{live.pass_id}/released")
+    assert fake.store().read()[0]["pass"] is None
