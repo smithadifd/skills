@@ -654,7 +654,10 @@ _OMP_VERDICT_KEY_CANDIDATE = re.compile(
 # A value token: the letters of `approve`, or of `request changes`, with any
 # run of non-letters (a line break included) between consecutive letters and
 # no letter adjoining it on either side. It is read on a casefolded paragraph,
-# with or without a key, so no text between a key and its value matters.
+# with or without a key, so no text between a key and its value matters. It
+# is read both after NFKC and as written, since NFKC turns some symbols that
+# are not letters into letters (`™` into `TM`), which would adjoin a token
+# that is whole as written.
 _OMP_VALUE_TOKEN = re.compile(
     r"(?<![^\W\d_])(?:"
     + r"[\W\d_]*".join("approve")
@@ -708,7 +711,16 @@ def _canonicalize_omp_prose(text: str) -> tuple[str, str]:
     cased copy keeps letter case for the camel-case key bound and is what the
     markup checks read; the casefolded copy is what keys and values match.
     """
-    text = unicodedata.normalize("NFKC", text)
+    return _fold_omp_prose_as_written(unicodedata.normalize("NFKC", text))
+
+
+def _fold_omp_prose_as_written(text: str) -> tuple[str, str]:
+    """A line with the Latin fold and no NFKC: `(cased, cased.casefold())`.
+
+    Keys and value tokens are also read on this copy, so a symbol NFKC turns
+    into a letter cannot hide a token that is whole as written. It can only
+    add a value or a refusal.
+    """
     cased = "".join(_latin_fold(character) for character in text)
     return cased, cased.casefold()
 
@@ -923,7 +935,11 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
     value token is read on each paragraph and belongs to the line it starts
     on. A line with a key
     must hold a value token, unless it is key-only and the next non-blank item
-    is the record or a line that holds one; it never looks back.
+    is the record or a line that holds one; it never looks back. Keys and
+    tokens are read after NFKC and again as written (the Latin fold, no
+    NFKC); the values are the union of both readings, and a key found as
+    written must find a value in that union. The NFKC reading's key check is
+    unchanged, so the second reading can only add a value or a refusal.
     """
     lines = _omp_commonmark_lines(lines)
     _validate_omp_prose(lines)
@@ -934,30 +950,46 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
     segments = _omp_prose_segments(lines, canonical)
     _refuse_omp_markup(lines, canonical, segments)
     _refuse_mixed_words(canonical)
-    values: dict[int, list[str]] = {
-        index: [] for index, item in enumerate(canonical) if item is not None
+    as_written = [
+        None if line is None else _fold_omp_prose_as_written(line)
+        for line in lines
+    ]
+    found: list[dict[int, list[str]]] = []
+    for reading in (canonical, as_written):
+        reading_values: dict[int, list[str]] = {
+            index: [] for index, item in enumerate(reading) if item is not None
+        }
+        for segment in segments:
+            # Casefold maps each code point on its own, so a paragraph's
+            # casefold is its lines' casefolds joined, and a token's offset
+            # finds its line.
+            starts = []
+            offset = 0
+            for index in segment:
+                starts.append(offset)
+                offset += len(reading[index][1])
+            paragraph = "".join(reading[index][1] for index in segment)
+            for token in _OMP_VALUE_TOKEN.finditer(paragraph):
+                line = segment[bisect.bisect_right(starts, token.start()) - 1]
+                reading_values[line].append(
+                    APPROVED if token.group().startswith("a") else CHANGES_REQUESTED
+                )
+        found.append(reading_values)
+    nfkc_values, written_values = found
+    values = {
+        index: nfkc_values[index]
+        + [value for value in written_values[index] if value not in nfkc_values[index]]
+        for index in nfkc_values
     }
-    for segment in segments:
-        # Casefold maps each code point on its own, so a paragraph's casefold
-        # is its lines' casefolds joined, and a token's offset finds its line.
-        starts = []
-        offset = 0
-        for index in segment:
-            starts.append(offset)
-            offset += len(canonical[index][1])
-        paragraph = "".join(canonical[index][1] for index in segment)
-        for token in _OMP_VALUE_TOKEN.finditer(paragraph):
-            line = segment[bisect.bisect_right(starts, token.start()) - 1]
-            values[line].append(
-                APPROVED if token.group().startswith("a") else CHANGES_REQUESTED
-            )
     verdicts = []
     for index, item in enumerate(canonical):
         if item is None:
             continue
-        cased, folded = item
-        keys = _omp_verdict_keys(cased, folded)
-        if keys and not values[index]:
+        for reading, key_values in ((canonical, nfkc_values), (as_written, values)):
+            cased, folded = reading[index]
+            keys = _omp_verdict_keys(cased, folded)
+            if not keys or key_values[index]:
+                continue
             key_only = _OMP_LETTER.search(folded, keys[-1].end()) is None
             following = next(
                 (
@@ -971,7 +1003,7 @@ def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
                 # Nothing follows a key-only line at the end of the reply.
                 confirmed = False
             else:
-                confirmed = canonical[following] is None or bool(values[following])
+                confirmed = canonical[following] is None or bool(key_values[following])
             if not key_only or not confirmed:
                 raise VerdictConflict(
                     "VerdictConflict: verdict key without a verdict value"

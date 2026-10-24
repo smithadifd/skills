@@ -5,7 +5,8 @@ B unsafe characters, C raw HTML refused, D links and images refused, E the
 fold and mixed-script words, F the key, G the value token, H key lines and
 bare keys, I prose placement and fences, J terminal errors, K the prompt
 contract, L whitespace the renderer reads differently from `str`, M
-CommonMark structure read as written, never after NFKC. A prose
+CommonMark structure read as written, never after NFKC, N a value token
+beside a symbol NFKC turns into letters. A prose
 row runs in both orders, prose before the record and the record before the
 prose, unless it names one; a "parse" row goes through
 `parse_omp`, a "run_phase" row through `run_phase` with `backend: omp`.
@@ -667,6 +668,74 @@ def test_sweep_no_nfkc_changing_non_letter_in_a_visible_position_approves(positi
     ]
     assert points, "no non-letter NFKC-changing code point to sweep"
     approved = _approvals(VISIBLE_POSITIONS[position], points)
+    assert approved == [], f"{len(approved)} approved, first {approved[:12]}"
+
+
+# --- N. a value token beside a symbol NFKC turns into letters -----------------
+# NFKC turns some symbols that are not letters into letters (U+2122 into `TM`),
+# which would adjoin a token that is whole as written; the token is also read
+# as written, so the reply is refused.
+
+ADJOINING_ROWS = [
+    ("N1", "REQUEST CHANGES\u2122"),
+    ("N2", "\u2122REQUEST CHANGES"),
+    ("N3", "This needs work: REQUEST CHANGES\u2120"),
+    ("N4", "REQUEST CHANGES\u3389"),
+    ("N5", "REQUEST CHANGES\u24c7"),
+]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(_ordered(prose, RA, order), id=f"{case}.{order}")
+        for case, prose in ADJOINING_ROWS
+        for order in BOTH
+    ],
+)
+def test_a_token_beside_a_symbol_nfkc_makes_a_letter_is_read(text):
+    _expect_parse(text, DISAGREES_A)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            _ordered("The change is correct and the tests cover it.", RA, order),
+            id=f"N6.{order}",
+        )
+        for order in BOTH
+    ],
+)
+def test_a_clean_approve_record_with_ordinary_prose_approves(text):
+    _expect_parse(text, OK_A)
+
+
+ADJOINING_POSITIONS = {
+    "after": "REQUEST CHANGES{c}",
+    "before": "{c}REQUEST CHANGES",
+}
+
+
+@pytest.mark.parametrize("position", list(ADJOINING_POSITIONS))
+def test_sweep_no_nfkc_changing_non_letter_adjoining_a_token_approves(position):
+    """Every NFKC-changing code point that is not a letter as written.
+
+    Its NFKC form may hold letters (U+2122 is `TM`), and those are swept
+    too. Excluded: a letter (category L*) and a letter number (category Nl:
+    the Roman numerals U+2160-U+217F, whose glyphs are Latin letters, and
+    U+3038-U+303A), which the token's bound reads as a letter as written.
+    Under Unicode 16.0 (Python 3.14) that leaves 1,411 of the 4,964
+    NFKC-changing code points, 944 of them with a letter in their NFKC form;
+    other Unicode versions shift the counts slightly.
+    """
+    points = [
+        point
+        for point in _nfkc_changed()
+        if not _has_letter(point) and unicodedata.category(point) != "Nl"
+    ]
+    assert points, "no non-letter NFKC-changing code point to sweep"
+    approved = _approvals(ADJOINING_POSITIONS[position], points)
     assert approved == [], f"{len(approved)} approved, first {approved[:12]}"
 
 
