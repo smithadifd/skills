@@ -658,3 +658,145 @@ def test_G28_a_socket_at_the_card_path_is_refused_unread(repo, monkeypatch, kind
     assert stat.S_ISSOCK(os.lstat(card_path(repo)).st_mode)
     assert _temporary_files(repo) == []
     assert [p.name for p in card_path(repo).parent.iterdir() if p.name.endswith(".md")] == [f"{KEY}.md"]
+
+
+# --- G29-G31: the open-failure map by errno; the post-open race check; the handle check ahead of the token check
+
+
+def _put_back_the_card(repo, body):
+    """A regular card at the card's path again, whatever node the last attempt left there, or none."""
+
+    node = card_path(repo)
+    with contextlib.suppress(FileNotFoundError):
+        if stat.S_ISDIR(os.lstat(node).st_mode):
+            node.rmdir()
+        else:
+            node.unlink()
+    node.write_bytes(body)
+
+
+@pytest.mark.parametrize("name", ["ENOTSUP", "ENXIO"])
+def test_G29_an_open_that_fails_as_on_a_socket_is_refused_from_the_error_alone(repo, monkeypatch, name):
+    # A socket swapped in after the pre-open check makes the open fail with one
+    # of these errors; here the node is gone again before any second look, so
+    # the error alone must carry the refusal. No socket is bound.
+    number = getattr(errno, name)
+    store(repo).apply("none", [_tried("Before the swap.")])
+    body, (_, token) = card_bytes(repo), store(repo).read()
+    real_open, failures = os.open, []
+
+    def open_that_fails_as_on_a_socket(path, flags, *args, **kwargs):
+        if path == card_path(repo).name and "dir_fd" in kwargs:
+            failures.append(path)
+            card_path(repo).unlink()
+            raise OSError(number, os.strerror(number), path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(ticket.os, "open", open_that_fails_as_on_a_socket)
+    for attempt in (lambda: store(repo).read(), lambda: store(repo).apply(token, [_tried()])):
+        _put_back_the_card(repo, body)
+        with pytest.raises(ticket.StoreUnavailable) as excinfo:
+            attempt()
+        assert refusal(excinfo) == "card_not_regular"
+        assert excinfo.value.__cause__.errno == number
+    assert failures == [f"{KEY}.md", f"{KEY}.md"]
+    assert not card_path(repo).exists()
+    assert sorted(p.name for p in card_path(repo).parent.iterdir()) == [f"{KEY}.lock"]
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_G30_a_card_swapped_for_a_fifo_or_a_directory_at_the_open_is_refused_unread(repo, monkeypatch, kind):
+    # The pre-open check saw the regular card; by the open a FIFO or a directory
+    # is there instead. Both open (a socket does not), so only the check of what
+    # opened can refuse them.
+    store(repo).apply("none", [_tried("Before the swap.")])
+    body, (_, token) = card_bytes(repo), store(repo).read()
+    real_open, swaps = os.open, []
+
+    def open_over_a_swapped_node(path, flags, *args, **kwargs):
+        if path == card_path(repo).name and "dir_fd" in kwargs:
+            swaps.append(path)
+            card_path(repo).unlink()
+            if kind == "fifo":
+                os.mkfifo(card_path(repo))
+            else:
+                card_path(repo).mkdir()
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(ticket.os, "open", open_over_a_swapped_node)
+    for attempt in (lambda: store(repo).read(), lambda: store(repo).apply(token, [_tried()])):
+        _put_back_the_card(repo, body)
+        with pytest.raises(ticket.StoreUnavailable) as excinfo:
+            attempt()
+        assert refusal(excinfo) == "card_not_regular"
+        mode = os.lstat(card_path(repo)).st_mode
+        assert stat.S_ISFIFO(mode) if kind == "fifo" else stat.S_ISDIR(mode)
+    assert swaps == [f"{KEY}.md", f"{KEY}.md"]
+    assert _temporary_files(repo) == []
+    assert sorted(p.name for p in card_path(repo).parent.iterdir()) == [f"{KEY}.lock", f"{KEY}.md"]
+
+
+def _opened(src, handle):
+    """The pass an open returned, or the refusal it raised."""
+
+    try:
+        return ticket.TicketPass.open(KEY, src, handle)
+    except ticket.StoreUnavailable as exc:
+        return exc
+
+
+def test_G31_two_opens_on_one_handle_that_both_read_before_either_claims_get_handle_used(repo):
+    # Both opens pass the entry check on a fresh handle and read the same blank
+    # card; the first then claims and binds the handle. The second's claim meets
+    # a stale token and a used handle at once: the handle wins, so the second is
+    # refused handle_used, never held with a release command for the pass its
+    # own handle now holds.
+    read_first, read_second, claimed_first = threading.Event(), threading.Event(), threading.Event()
+    reads = []
+
+    class BothReadBeforeEitherClaims(ticket.MarkdownStore):
+        """The first open on this handle pauses after its read until the second has read; the second
+        pauses after its read until the first's apply has returned."""
+
+        def read(self):
+            result = super().read()
+            reads.append(result[1])
+            if len(reads) == 1:
+                read_first.set()
+                assert read_second.wait(30)
+            elif len(reads) == 2:
+                read_second.set()
+                assert claimed_first.wait(30)
+            return result
+
+        def apply(self, token, events):
+            try:
+                return super().apply(token, events)
+            finally:
+                claimed_first.set()
+
+    handle = BothReadBeforeEitherClaims(repo, KEY, TITLE)
+    outcomes = {}
+
+    def open_first():
+        outcomes["first"] = _opened(Source(), handle)
+
+    thread = threading.Thread(target=open_first)
+    thread.start()
+    assert read_first.wait(30)
+    outcomes["second"] = _opened(Source(), handle)
+    thread.join(30)
+    assert not thread.is_alive()
+    first, second = outcomes["first"], outcomes["second"]
+    assert reads[:2] == [ticket.NO_TOKEN, ticket.NO_TOKEN]
+    assert isinstance(first, ticket.TicketPass), f"the first open: {first}"
+    assert isinstance(second, ticket.StoreUnavailable), f"the second open: {second}"
+    assert second.code == "handle_used", f"refused {second.code}"
+    assert not isinstance(second, ticket.TicketHeld)
+    assert first.pass_id in str(second) and "fresh store handle" in str(second)
+    assert ticket.release_command(KEY, first.pass_id) not in str(second)
+    assert read_card(repo)["pass"]["id"] == first.pass_id
+    first.record_tried("The first open writes.")
+    assert read_card(repo)["tried"][-1]["what"] == "The first open writes."
+    first.end()
+    assert read_card(repo)["pass"] is None

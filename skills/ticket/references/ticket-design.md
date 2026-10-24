@@ -342,7 +342,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 |---|---|---|
 | `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | the command names the installed script by its absolute path (the directory of `ticket.py` itself, as `SKILL.md` writes `${CLAUDE_SKILL_DIR}/ticket.py`), so it runs from the target repository. The command is rendered with `shlex.join` over its whole argv (interpreter, script path, subcommand, key, pass id), so no stored value can add a shell word. A pass id is lowercase hex; a card whose live pass id is anything else is `card_unreadable` |
 | `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
-| `handle_used` | the store handle is bound to a pass, or a pass it held has ended, and a binding event (`claim` or `join`) or an `open` reached it; nothing was written | a refusal (`StoreUnavailable`) raised by `apply` under the store's lock on a `claim` or `join` (the guard), and by `open` before `source.pull` (the early report), for a new pass and for a join alike; the message names the used pass and the fix (open each pass with a fresh store handle); the lost-claim handler re-raises it unchanged. The rule it enforces is section 5's one handle per pass |
+| `handle_used` | the store handle is bound to a pass, or a pass it held has ended, and a binding event (`claim` or `join`) or an `open` reached it; nothing was written | a refusal (`StoreUnavailable`) raised by `apply` under the store's lock on a `claim` or `join` (the guard), ahead of the card read and the token check, so it wins over `stale` and over every card refusal, and by `open` before `source.pull` (the early report), for a new pass and for a join alike; the message names the used pass and the fix (open each pass with a fresh store handle); the lost-claim handler re-raises it unchanged. The rule it enforces is section 5's one handle per pass |
 | `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
 | `card_unreadable` | the card does not parse or has the wrong shape, including a plan snapshot that breaks the snapshot rules while its identity is readable (section 2); on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |
 | `close_invalid` | `status` is closed but the close does not validate | a valid card can only reach `closed` through the atomic close (D2), so an invalid close is an edit or an outside status write, and D4 says a corrupt card is refused, not resumed into a writable pass |
@@ -354,7 +354,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
 | `lock_unopenable` | the lock file could not be opened as a regular file through the directory; the message carries the operating system's error | markdown store; a link or a directory at the lock path lands here |
-| `card_not_regular` | `.ticket/<key>.md` exists but is not a regular file (a link, a FIFO, a directory, a socket); it was not read and nothing was written | markdown store, on every read and write; an existing node at the card's path that is not a regular file is refused before it is opened (a no-follow `stat` through the verified `.ticket/` directory descriptor), the open itself follows no link, what it opened is checked once more (`fstat`) as the race check, and an open that fails on such a node lands here too, so a link, a FIFO, a directory or a socket at the card path is refused by whichever of the three sees it; any other error of the open (a permission error on a regular file) propagates |
+| `card_not_regular` | `.ticket/<key>.md` exists but is not a regular file (a link, a FIFO, a directory, a socket); it was not read and nothing was written | markdown store, on every read and write; an existing node at the card's path that is not a regular file is refused before it is opened (a no-follow `stat` through the verified `.ticket/` directory descriptor), the open itself follows no link, what it opened is checked once more (`fstat`) as the race check, and an open that fails with the error such a node gives (`ELOOP` for a link; `ENXIO`, `EOPNOTSUPP` or `ENOTSUP` for a socket) lands here from that error alone, with no second look at the path, as does one whose failure a second no-follow `stat` traces to a non-regular node still there; so a link, a FIFO, a directory or a socket at the card path is refused by whichever of the three sees it; any other error of the open (a permission error on a regular file) propagates |
 
 `GateRequired` (a `TicketError`) stays for a step taken before its go.
 
@@ -413,14 +413,17 @@ came to hold a pass other than the one its caller thinks it holds would let `rel
 pass's claim. The rules below make that state unreachable. Each has matrix rows.
 
 1. **A handle binds once, under the lock, or not at all.** A *binding event* is `claim` or `join`.
-   `apply` runs, inside the lock and after the token check, in this order: (a) if the events carry a
-   binding event and the handle is used (bound to a pass, or a pass it held has ended), refuse
-   `handle_used` naming the used pass; (b) check the claim against the card as loaded, with the pass
+   `apply` runs, inside the lock, in this order: (a) if the events carry a binding event and the
+   handle is used (bound to a pass, or a pass it held has ended), refuse `handle_used` naming the
+   used pass, before the card is read and before the token check, so this refusal wins over a stale
+   token and over every card refusal; then load the card and refuse `stale` if its token differs
+   from the held one; (b) check the claim against the card as loaded, with the pass
    the join names for a join (the live pass must be that id) and no pass for a claim (none may be
    live, else `held`); (c) fold the events; (d) save, except for a join, which changes no card byte;
    (e) bind the handle to the pass. All five happen under one hold of the lock, and nothing binds a
    handle anywhere else. Two opens that share one fresh handle therefore never both claim: the second
-   one's claim meets a bound handle under the lock and is refused, whatever the card showed before.
+   one's claim meets a bound handle under the lock and is refused `handle_used`, whatever the card
+   showed before and whether or not its token is still current.
 2. **A binding event travels alone.** An `apply` whose events carry a `claim` or `join` beside any
    other event is a `TicketError` and writes nothing: a bind is one step and never rides with a record.
 3. **`open` writes nothing into a store.** It reads `pass_id` and `ended` for an early `handle_used`
@@ -441,7 +444,9 @@ pass's claim. The rules below make that state unreachable. Each has matrix rows.
 6. **The lost-claim handler passes `handle_used` through.** A refused claim is re-read once and
    reported `held` naming the winner, except a `handle_used`, which is re-raised unchanged: `held`
    would send the caller to the release command for a pass that is not stuck, while the fix is a fresh
-   handle.
+   handle. Because the used-handle check runs ahead of the token check (rule 1), the second of two
+   opens on one handle whose reads both predate the first's claim is refused `handle_used`, not
+   `stale`, so the handler never names the pass that same handle now holds.
 7. **Sequential reuse is refused before the pull.** A bound or ended handle given to `open`, for a new
    pass or a join, is refused `handle_used` before `source.pull`, with the card untouched. A fresh
    handle after a pass ends opens and joins as before.
@@ -488,17 +493,19 @@ binds a handle only by sending one of the two, never by assigning `pass_id`.
   descriptor (opened without following a link) and never through a path, so a `.ticket` swapped for
   a link after that open cannot send the card outside the repository; an existing card-path node that
   is not a regular file is refused `card_not_regular` before it is opened, with the post-open `fstat`
-  kept as the race check.
+  kept as the race check, and an open that fails with a link's or a socket's error is refused from
+  that error alone.
 - **`apply`**: take the handle's thread lock, then an exclusive `flock` on the lock file (opened with
   `O_NOFOLLOW` through a directory fd; a lock path that is not a regular file is refused untouched;
   creating the lock file through the directory retries up to five attempts on `ENOENT`, because two
   first writers creating it at the same moment can see that error);
+  for a binding event (a `claim` or `join`, alone in the call), refuse `handle_used` if this handle
+  is bound or has held an ended pass, before the card is touched;
   check and open the card through the same directory descriptor (a no-follow `stat` refuses
   `card_not_regular` before the open unless the node is a regular file, the open follows no link,
   and an `fstat` of what opened is the race check), before a byte is read; load; compute the token;
-  refuse `stale` if it differs from the expected (held) one; for a binding
-  event (a `claim` or `join`, alone in the call), refuse `handle_used` if this handle is bound or has
-  held an ended pass; check the claim (a bound handle writes only while its pass is live, an unbound
+  refuse `stale` if it differs from the expected (held) one;
+  check the claim (a bound handle writes only while its pass is live, an unbound
   handle only while none is, a join only while the pass it names is live); fold the events; create a
   temporary file beside the card (exclusive, no link followed, a random name), write it and rename it
   into place, every step relative to the same directory descriptor, except for a join, which saves

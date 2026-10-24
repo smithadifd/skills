@@ -1045,6 +1045,14 @@ class Store(Protocol):
 _LOCK_OPEN_ATTEMPTS = 5
 _BLOCK_START = "<!-- ticket-card:v2\n"
 _BLOCK_END = "\n-->"
+# The errors a no-follow open gives for a node at the card's path that is not
+# a regular file: a link (ELOOP) or a socket (ENXIO on Linux; EOPNOTSUPP, and
+# ENOTSUP where it is a distinct number, on Darwin). An open that fails with
+# one of these is refused ``card_not_regular`` from the error alone, so the
+# refusal does not depend on the node still being there for a second look.
+_NOT_REGULAR_OPEN_ERRNOS = frozenset(
+    getattr(errno, name) for name in ("ELOOP", "ENXIO", "EOPNOTSUPP", "ENOTSUP") if hasattr(errno, name)
+)
 
 
 def _token(card: Mapping[str, Any]) -> str:
@@ -1185,9 +1193,12 @@ class MarkdownStore:
         (a link, a FIFO, a directory, a socket) is refused ``card_not_regular``
         before it is opened; the open itself follows no link, and what it
         opened is checked once more (``fstat``), the race check for a node
-        swapped in between the two. An open that fails on such a node is
-        refused the same way; any other error (a permission error on a
-        regular file) propagates as it is. ``O_NONBLOCK`` keeps a FIFO there
+        swapped in between the two. An open that fails with the error such
+        a node gives (``_NOT_REGULAR_OPEN_ERRNOS``) is refused the same way
+        from the error alone, even if the node is gone again by then; so is
+        one whose failure a second no-follow ``stat`` traces to a
+        non-regular node still there; any other error (a permission error
+        on a regular file) propagates as it is. ``O_NONBLOCK`` keeps a FIFO there
         from holding the open until a writer appears; a regular file reads
         the same with it.
         """
@@ -1202,8 +1213,10 @@ class MarkdownStore:
         except FileNotFoundError:
             return _blank_card(self.key, self.title), NO_TOKEN
         except OSError as exc:
+            if exc.errno in _NOT_REGULAR_OPEN_ERRNOS:
+                raise _card_not_regular(self.ref) from exc
             mode = self._card_mode(directory)
-            if exc.errno == errno.ELOOP or (mode is not None and not stat.S_ISREG(mode)):
+            if mode is not None and not stat.S_ISREG(mode):
                 raise _card_not_regular(self.ref) from exc
             raise
         try:
@@ -1272,11 +1285,15 @@ class MarkdownStore:
 
         A binding event (a ``claim`` or a ``join``, alone in its call) binds
         this handle to its pass inside the lock, in this order (design section
-        5, rule 1): a used handle is refused ``handle_used``; the claim is
-        checked against the card as loaded (a claim needs no live pass, a join
-        needs the pass it names); the events fold; the card is saved, except
-        for a join, which changes no byte; only then is the handle bound. A
-        save that fails leaves the handle unbound.
+        5, rule 1): a used handle is refused ``handle_used`` first, before the
+        card is read, so that refusal wins over a stale token and over every
+        card refusal (two opens on one handle that both read before either
+        claimed must see ``handle_used``, never ``held``); the card is loaded
+        and a token that differs from the one given is refused ``stale``; the
+        claim is checked against the card as loaded (a claim needs no live
+        pass, a join needs the pass it names); the events fold; the card is
+        saved, except for a join, which changes no byte; only then is the
+        handle bound. A save that fails leaves the handle unbound.
         """
 
         for kind, value in events:
@@ -1284,11 +1301,11 @@ class MarkdownStore:
         binding = _binding(events)
         joining = binding is not None and binding[0] == "join"
         with self._locked() as directory:
+            if binding is not None and (self._pass_id is not None or self._ended is not None):
+                raise _handle_used(self.key, self._pass_id or self._ended)
             card, current = self._load(directory)
             if current != token:
                 raise _stale(self.key, "the card on disk changed")
-            if binding is not None and (self._pass_id is not None or self._ended is not None):
-                raise _handle_used(self.key, self._pass_id or self._ended)
             mine = binding[1] if joining else self._pass_id
             _check_pass(self.key, card["pass"], mine, self._ended)
             card = _fold(card, events)
