@@ -17,10 +17,13 @@ from the implementation. Hermetic: no network, no environment lookups.
 from __future__ import annotations
 
 import copy
+import itertools
 import json
+import random
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -304,10 +307,12 @@ def test_claude_adapter_parses_the_reviewer_agent_documented_format():
         ("path/to/file.js", 42),
         ("path/to/other.js", 17),
     ]
-    # The documented shape carries no timing claim, so it never needs a
-    # caller's timing record to pass the phase.
+    # The documented shape ends with its INTERVAL record, so the block as
+    # written passes the phase.
+    assert block.group(1).splitlines()[-1] == "INTERVAL: none"
     result = review_phase.run_phase(_envelope("claude-fresh", block.group(1)))
-    assert result["status"] == "success"
+    assert result["status"] == "success", result["reason"]
+    assert result["intervals"] == []
 
 
 def test_claude_adapter_parses_the_review_skill_bullets():
@@ -393,6 +398,21 @@ def test_claude_adapter_parses_the_skill_mds_own_worked_example():
     assert findings[0]["line"] == 41
 
 
+def test_skill_md_asks_for_the_interval_record_its_parser_requires():
+    # The skill's own output format must end a review with the line the phase
+    # refuses a review without; the worked example plus that line passes.
+    skill_md = (SKILL_DIR / "SKILL.md").read_text()
+    assert "End the review with an `INTERVAL:` line" in skill_md
+    assert "`INTERVAL: none`" in skill_md
+    match = re.search(r"e\.g\.\s*`- (\[BUG\][^`]*)`", skill_md, re.DOTALL)
+    example = re.sub(r"\s+", " ", match.group(1)).strip()
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", f"- {example}\n\nINTERVAL: none\n")
+    )
+    assert result["status"] == "success", result["reason"]
+    assert result["intervals"] == []
+
+
 def test_claude_adapter_parses_the_headless_verdict_label_shape():
     text = (FIXTURES / "claude-fresh-headless.md").read_text()
     verdict, findings = review_phase.parse_claude_fresh(text)
@@ -449,7 +469,8 @@ def _claude_two_verdicts(first: str, second: str) -> str:
         f"{first}\n\n"
         "### Issues\n"
         "- `src/report.py:14` — the total skips the last row; include it in the sum.\n\n"
-        f"{second}\n"
+        f"{second}\n\n"
+        "INTERVAL: none\n"
     )
 
 
@@ -559,7 +580,7 @@ def test_every_adapter_refuses_full_span_conflicting_verdicts(
     labels = [decorated, "## Verdict: APPROVE"]
     if reverse:
         labels.reverse()
-    text = "\n\n".join(labels) + "\n"
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
         parser(text)
     result = review_phase.run_phase(_adapter_envelope(backend, text))
@@ -584,7 +605,7 @@ def test_every_adapter_refuses_decorated_conflicting_verdicts(
     labels = [decorated, "## Verdict: APPROVE"]
     if reverse:
         labels.reverse()
-    text = "\n\n".join(labels) + "\n"
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
         parser(text)
     result = review_phase.run_phase(_adapter_envelope(backend, text))
@@ -609,7 +630,7 @@ def test_every_adapter_refuses_cross_vocabulary_conflict(backend, parser, revers
     ]
     if reverse:
         labels.reverse()
-    text = "\n\n".join(labels) + "\n"
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
         parser(text)
     result = review_phase.run_phase(_adapter_envelope(backend, text))
@@ -634,7 +655,7 @@ def test_every_adapter_refuses_inline_grok_heading_conflict(backend, parser, rev
     ]
     if reverse:
         labels.reverse()
-    text = "## FINDINGS\n- none\n\n" + "\n\n".join(labels) + "\n"
+    text = "## FINDINGS\n- none\n\n" + "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
         parser(text)
     result = review_phase.run_phase(_adapter_envelope(backend, text))
@@ -652,7 +673,7 @@ def test_every_adapter_refuses_inline_grok_heading_conflict(backend, parser, rev
     ],
 )
 def test_every_adapter_rejects_an_unknown_verdict_value(backend, parser):
-    text = "## Verdict: APPROVE\n\nVERDICT: MAYBE\n"
+    text = "## Verdict: APPROVE\n\nVERDICT: MAYBE\n\nINTERVAL: none\n"
     with pytest.raises(review_phase.ParseError, match="unrecognized verdict"):
         parser(text)
     result = review_phase.run_phase(_adapter_envelope(backend, text))
@@ -759,7 +780,7 @@ def test_mappable_conflict_precedes_an_unknown_verdict_error(
         *conflicting,
         "VERDICT: MAYBE",
     ]
-    text = "\n\n".join(labels) + "\n"
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
         parser(text)
     result = review_phase.run_phase(_adapter_envelope(backend, text))
@@ -779,7 +800,8 @@ def _grok_two_verdicts(first: str, second: str) -> str:
         "## FINDINGS\n"
         "- `src/report.py:14` — the total skips the last row.\n\n"
         f"## VERDICT\n{first} — the first reading.\n\n"
-        f"## VERDICT\n{second} — the second reading.\n"
+        f"## VERDICT\n{second} — the second reading.\n\n"
+        "INTERVAL: none\n"
     )
 
 
@@ -789,7 +811,8 @@ def _grok_two_verdicts(first: str, second: str) -> str:
         pytest.param(_grok_two_verdicts("flagged", "cleared"), id="flagged-then-cleared"),
         pytest.param(_grok_two_verdicts("cleared", "flagged"), id="cleared-then-flagged"),
         pytest.param(
-            "FINDINGS:\n- none\nVERDICT: flagged — one.\nVERDICT: cleared — two.\n",
+            "FINDINGS:\n- none\nVERDICT: flagged — one.\nVERDICT: cleared — two.\n"
+            "\nINTERVAL: none\n",
             id="label-flagged-then-cleared",
         ),
     ],
@@ -852,7 +875,8 @@ def test_run_phase_refuses_non_sentinel_prose_in_issues():
     text = (
         "## Verdict: REQUEST CHANGES\n\n"
         "### Issues\n"
-        "This paragraph is not a bullet or a numbered item at all.\n"
+        "This paragraph is not a bullet or a numbered item at all.\n\n"
+        "INTERVAL: none\n"
     )
     result = review_phase.run_phase(_envelope("claude-fresh", text))
     assert result["status"] == "failure", result
@@ -868,7 +892,15 @@ def test_run_phase_returns_a_v1_result_with_both_artifacts():
     before = copy.deepcopy(envelope)
     result = review_phase.run_phase(envelope)
     assert envelope == before
-    assert set(result) == {"phase_result", "status", "artifacts", "reason", "resume_token"}
+    assert set(result) == {
+        "phase_result",
+        "status",
+        "artifacts",
+        "reason",
+        "resume_token",
+        "intervals",
+    }
+    assert result["intervals"] == []
     assert result["phase_result"] == "v1"
     assert result["status"] == "success"
     assert result["resume_token"] is None
@@ -1022,13 +1054,41 @@ def test_standalone_and_caller_paths_validate_against_the_same_schema(tmp_path: 
         assert result["artifacts"]["findings.json"]["schema"] == "review-findings/v1"
 
 
-# --- measured-interval records ----------------------------------------------
+# --- the INTERVAL record -----------------------------------------------------
+#
+# The last non-blank line of every return is its INTERVAL record:
+# `INTERVAL: none`, or one measured line per interval the verdict relies on.
+# Nothing else in a return is read for time, so the cases below put durations,
+# commit shas and quoted INTERVAL lines everywhere else and expect them to
+# change nothing.
 
 DURATION_WITHOUT_INTERVAL = (FIXTURES / "duration-without-interval.md").read_text()
 DURATION_WITH_INTERVAL = (FIXTURES / "duration-with-interval.md").read_text()
+MEASURED = (
+    "INTERVAL: from request start, events.tsv:14 to result write, "
+    "result.md mtime = 41m"
+)
+MEASURED_RECORD = {
+    "start_event": "request start",
+    "start_source": "events.tsv:14",
+    "end_event": "result write",
+    "end_source": "result.md mtime",
+    "duration": "41m",
+}
+SECOND_MEASURED = (
+    "INTERVAL: from first retry, worker.log:88 to last retry, worker.log:131 = 2.5h"
+)
+SECOND_RECORD = {
+    "start_event": "first retry",
+    "start_source": "worker.log:88",
+    "end_event": "last retry",
+    "end_source": "worker.log:131",
+    "duration": "2.5h",
+}
 
 
-def _timed_grok(interval_line: str | None) -> str:
+def _timed_grok(*record_lines: str) -> str:
+    """A cleared grok return; its record lines start on line 7."""
     lines = [
         "## FINDINGS",
         "- none",
@@ -1036,14 +1096,56 @@ def _timed_grok(interval_line: str | None) -> str:
         "## VERDICT",
         "cleared — the caller waited for 41 minutes.",
         "",
+        *record_lines,
+        "",
     ]
-    if interval_line is not None:
-        lines.append(interval_line)
-        lines.append("")
     return "\n".join(lines)
 
 
-def test_clean_review_with_no_timing_claim_is_byte_for_byte_unchanged():
+def _reviewer_block(
+    *tail: str,
+    summary: str = "Checked the change.",
+    issues: str = "- none",
+    evidence: str = "- Ran: checks passed",
+) -> str:
+    """The reviewer agent's block. With one-line parts, Evidence is line 9
+    and the tail starts on line 11."""
+    return "\n".join(
+        [
+            "## Verdict: APPROVE",
+            "",
+            summary,
+            "",
+            "### Issues",
+            issues,
+            "",
+            "### Evidence",
+            evidence,
+            "",
+            *tail,
+            "",
+        ]
+    )
+
+
+def _accepted(text: str, backend: str = "claude-fresh") -> dict:
+    result = review_phase.run_phase(_envelope(backend, text))
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["review.md"] == text
+    return result
+
+
+def _refused(text: str, backend: str = "claude-fresh") -> str:
+    result = review_phase.run_phase(_envelope(backend, text))
+    assert result["status"] == "failure", result
+    assert result["artifacts"]["review.md"] == text
+    assert result["artifacts"]["findings.json"] is None
+    assert result["resume_token"] is None
+    assert "intervals" not in result
+    return result["reason"]
+
+
+def test_clean_review_with_interval_none_carries_an_empty_interval_list():
     result = review_phase.run_phase(_envelope("grok-notools", GROK_CLEARED))
     expected = review_phase._result(
         "success",
@@ -1056,8 +1158,8 @@ def test_clean_review_with_no_timing_claim_is_byte_for_byte_unchanged():
             "findings": [],
         },
     )
+    expected["intervals"] = []
     assert result == expected
-    assert "intervals" not in result
 
     skill = review_phase.run_phase(_envelope("claude-fresh", REVIEW_SKILL_CLEAN))
     skill_expected = review_phase._result(
@@ -1071,43 +1173,155 @@ def test_clean_review_with_no_timing_claim_is_byte_for_byte_unchanged():
             "findings": [],
         },
     )
+    skill_expected["intervals"] = []
     assert skill == skill_expected
-    assert "intervals" not in skill
 
 
-def test_code_timeout_mentions_are_not_duration_claims():
-    result = review_phase.run_phase(_envelope("grok-notools", GROK_FLAGGED))
-    assert result["status"] == "success"
-    assert "intervals" not in result
-    assert result["artifacts"]["review.md"] == GROK_FLAGGED
-
-
-def test_duration_without_interval_is_refused():
-    result = review_phase.run_phase(
-        _envelope("grok-notools", DURATION_WITHOUT_INTERVAL)
+def test_missing_record_is_refused_naming_the_last_non_blank_line():
+    reason = _refused(DURATION_WITHOUT_INTERVAL, backend="grok-notools")
+    assert reason == (
+        "grok-notools: review_interval_missing: line 5: "
+        "cleared — the caller waited for 41 minutes."
     )
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "no INTERVAL record" in result["reason"]
-    assert result["artifacts"]["review.md"] == DURATION_WITHOUT_INTERVAL
-    assert result["artifacts"]["findings.json"] is None
-    assert result["resume_token"] is None
+
+
+@pytest.mark.parametrize(
+    ("text", "named"),
+    [
+        pytest.param(_reviewer_block(), "line 9: - Ran: checks passed", id="absent"),
+        pytest.param(
+            _reviewer_block("INTERVAL: none", "Happy to look again."),
+            "line 12: Happy to look again.",
+            id="present-but-not-last",
+        ),
+        pytest.param(
+            _reviewer_block(evidence="- Probe:\n```text\nINTERVAL: none\n```"),
+            "line 12: ```",
+            id="last-line-is-a-fence-closer",
+        ),
+        pytest.param(
+            _reviewer_block("- INTERVAL: none"),
+            "line 11: - INTERVAL: none",
+            id="bulleted",
+        ),
+        pytest.param(
+            _reviewer_block("**INTERVAL: none**"),
+            "line 11: **INTERVAL: none**",
+            id="emphasised",
+        ),
+    ],
+)
+def test_review_without_a_trailing_record_is_refused(text, named):
+    reason = _refused(text)
+    assert reason == f"claude-fresh: review_interval_missing: {named}"
+
+
+def test_missing_record_refusal_cuts_the_named_line_at_200_characters():
+    body = "The caller waited for 41 minutes. " + ("x" * 220)
+    reason = _refused(_reviewer_block(evidence=body))
+    _, _, named = reason.partition("review_interval_missing: line 9: ")
+    assert len(named) == 200
+    assert named == body[:200]
+
+
+def test_blank_return_text_names_line_zero_when_called_directly():
+    with pytest.raises(review_phase.ParseError) as exc:
+        review_phase._require_intervals("\n  \n")
+    assert str(exc.value) == "review_interval_missing: line 0: "
+
+
+def test_interval_none_is_accepted_whatever_the_rest_of_the_review_says():
+    text = _reviewer_block(
+        "INTERVAL: none",
+        summary=(
+            "The job ran for 41 minutes at 919960d; the old INTERVAL: from a, b "
+            "to c, d = 3h line was a probe input."
+        ),
+        issues="- `a.py:3` — the retry waits `2h` and then 3 days before giving up.",
+        evidence=(
+            "- Ran: `pytest` took 12 seconds; 1df4a5c is the base.\n"
+            "```text\n"
+            "INTERVAL: from start, a.log:1 to end, a.log:9 = 41m\n"
+            "INTERVAL: none\n"
+            "it took 2h\n"
+            "```\n"
+            "- Quoted: `INTERVAL: from x, y to z, w = 5m`"
+        ),
+    )
+    result = _accepted(text)
+    assert result["intervals"] == []
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "approved"
+    assert [f["line"] for f in findings["findings"]] == [3]
+
+
+# The classes the prose duration scan used to get wrong. Each now ends in
+# `INTERVAL: none`, and none of them asks for anything more.
+NO_LONGER_READ = {
+    "short-sha": _reviewer_block(
+        "INTERVAL: none", summary="Checked 919960d against the base commit."
+    ),
+    "duration-in-a-code-span": _reviewer_block(
+        "INTERVAL: none", summary="The probe `it took 2h` is quoted from the brief."
+    ),
+    "duration-in-a-fence": _reviewer_block(
+        "INTERVAL: none",
+        summary="The probes quoted from the brief:\n```\nit took 2h\nwaits 3d\n```",
+    ),
+    "sentinel-looking-fence-info-string": _reviewer_block(
+        "INTERVAL: none",
+        issues="- none",
+        evidence=(
+            "- Probe:\n"
+            "```No bugs or security issues found.\n"
+            "it took 2h\n"
+            "```"
+        ),
+    ),
+    "duration-in-prose": _reviewer_block(
+        "INTERVAL: none", summary="The job ran for 41 minutes before the timeout."
+    ),
+}
+
+
+@pytest.mark.parametrize("text", list(NO_LONGER_READ.values()), ids=list(NO_LONGER_READ))
+def test_text_outside_the_record_never_demands_an_interval(text):
+    result = _accepted(text)
+    assert result["intervals"] == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pr-35-claude-empirical-r2.output.md",
+        "pr-36-claude-empirical-r1.attempt1.output.md",
+        "pr-36-claude-empirical-r1.output.md",
+    ],
+)
+def test_copied_approve_review_quoting_durations_parses_with_interval_none(name):
+    result = _accepted((FIXTURES / name).read_text(encoding="utf-8"))
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "approved"
+    assert result["intervals"] == []
+    assert not any(
+        f["severity"] == "error" or f["rule"] == "issue" for f in findings["findings"]
+    )
+
+
+def test_copied_request_changes_review_quoting_durations_parses_with_interval_none():
+    text = (FIXTURES / "pr-36-claude-empirical-r1.attempt2.output.md").read_text(
+        encoding="utf-8"
+    )
+    result = _accepted(text)
+    findings = result["artifacts"]["findings.json"]
+    assert findings["verdict"] == "changes_requested"
+    assert result["intervals"] == []
+    assert any(f["rule"] == "issue" for f in findings["findings"])
 
 
 def test_duration_with_complete_interval_is_parsed_onto_the_phase_result():
-    result = review_phase.run_phase(
-        _envelope("grok-notools", DURATION_WITH_INTERVAL)
-    )
-    assert result["status"] == "success", result["reason"]
-    assert result["intervals"] == [
-        {
-            "start_event": "request start",
-            "start_source": "events.tsv:14",
-            "end_event": "result write",
-            "end_source": "result.md mtime",
-            "duration": "41m",
-        }
-    ]
+    result = _accepted(DURATION_WITH_INTERVAL, backend="grok-notools")
+    assert result["intervals"] == [MEASURED_RECORD]
     findings = result["artifacts"]["findings.json"]
     assert findings["verdict"] == "approved"
     assert findings["findings"] == []
@@ -1115,60 +1329,1286 @@ def test_duration_with_complete_interval_is_parsed_onto_the_phase_result():
     assert review_phase.validate_findings(findings) == []
 
 
-def test_interval_missing_start_event_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from , events.tsv:14 to result write, "
-        "result.md mtime = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "start_event" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
+def test_two_distinct_records_are_parsed_in_order():
+    result = _accepted(_timed_grok(MEASURED, SECOND_MEASURED), backend="grok-notools")
+    assert result["intervals"] == [MEASURED_RECORD, SECOND_RECORD]
 
 
-def test_interval_missing_start_source_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from request start, to result write, "
-        "result.md mtime = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "start_source" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-
-
-def test_interval_missing_end_event_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from request start, events.tsv:14 to , "
-        "result.md mtime = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "end_event" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-
-
-def test_interval_missing_end_source_is_refused():
-    text = _timed_grok(
-        "INTERVAL: from request start, events.tsv:14 to result write,  = 41m"
-    )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
-    assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "end_source" in result["reason"]
-    assert result["artifacts"]["findings.json"] is None
-
-
-def test_interval_missing_duration_is_refused():
-    text = _timed_grok(
+def test_end_source_holding_an_equals_sign_splits_on_the_last_one():
+    line = (
         "INTERVAL: from request start, events.tsv:14 to result write, "
-        "result.md mtime = "
+        "worker log line status=done = 41m"
     )
-    result = review_phase.run_phase(_envelope("grok-notools", text))
+    result = _accepted(_timed_grok(line), backend="grok-notools")
+    assert result["intervals"] == [
+        dict(MEASURED_RECORD, end_source="worker log line status=done")
+    ]
+
+
+def test_blank_line_ends_the_record_block():
+    # Only the run of INTERVAL lines that ends at the last non-blank line is
+    # the record; the line above the blank is never read.
+    result = _accepted(
+        _timed_grok("INTERVAL: none", "", "INTERVAL: none"), backend="grok-notools"
+    )
+    assert result["intervals"] == []
+    result = _accepted(_timed_grok(MEASURED, "", SECOND_MEASURED), backend="grok-notools")
+    assert result["intervals"] == [SECOND_RECORD]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "INTERVAL: none",
+        "interval: NONE",
+        "  Interval : None",
+        "\tINTERVAL:\tnone\t",
+    ],
+)
+def test_interval_none_label_and_value_are_case_insensitive(line):
+    result = _accepted(_timed_grok(line), backend="grok-notools")
+    assert result["intervals"] == []
+
+
+@pytest.mark.parametrize(
+    ("line", "detail"),
+    [
+        pytest.param("INTERVAL: maybe", "", id="neither-none-nor-from"),
+        pytest.param("INTERVAL:", "", id="empty"),
+        pytest.param("INTERVAL: none.", "", id="none-with-a-period"),
+        pytest.param("INTERVAL: none, nothing measured", "", id="none-with-more"),
+        pytest.param("INTERVAL: fromage a, b to c, d = 1s", "", id="from-glued-to-a-word"),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = 41 minutes",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="spelled-out-unit",
+        ),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = 41min",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="unknown-unit",
+        ),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = 41 m",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="spaced-unit",
+        ),
+        pytest.param(
+            "INTERVAL: from a, b to c, d = about 41m",
+            " (duration is not a number then ms, s, m, h or d)",
+            id="words-before-the-number",
+        ),
+    ],
+)
+def test_malformed_record_is_refused(line, detail):
+    reason = _refused(_timed_grok(line), backend="grok-notools")
+    assert reason == f"grok-notools: review_interval_malformed: line 7: {line}{detail}"
+
+
+@pytest.mark.parametrize(
+    "duration", ["41m", "500ms", "2.5h", "3d", "90s", "0.25s"]
+)
+def test_every_documented_duration_unit_is_accepted(duration):
+    line = f"INTERVAL: from a, b to c, d = {duration}"
+    result = _accepted(_timed_grok(line), backend="grok-notools")
+    assert result["intervals"][0]["duration"] == duration
+
+
+@pytest.mark.parametrize(
+    ("line", "missing"),
+    [
+        pytest.param(
+            "INTERVAL: from , events.tsv:14 to result write, result.md mtime = 41m",
+            "start_event",
+            id="start-event",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, to result write, result.md mtime = 41m",
+            "start_source",
+            id="start-source",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, events.tsv:14 to , result.md mtime = 41m",
+            "end_event",
+            id="end-event",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, events.tsv:14 to result write,  = 41m",
+            "end_source",
+            id="end-source",
+        ),
+        pytest.param(
+            "INTERVAL: from request start, events.tsv:14 to result write, result.md mtime =",
+            "duration",
+            id="duration",
+        ),
+        pytest.param(
+            "INTERVAL: from request start to result write = 41m",
+            "start_event, start_source, end_event, end_source, duration",
+            id="no-separators",
+        ),
+    ],
+)
+def test_record_with_an_empty_part_is_refused_naming_the_part(line, missing):
+    reason = _refused(_timed_grok(line), backend="grok-notools")
+    assert reason == (
+        f"grok-notools: review_interval_endpoints_missing: line 7: {line} (missing {missing})"
+    )
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        pytest.param(("INTERVAL: none", MEASURED), id="none-then-measured"),
+        pytest.param((MEASURED, "INTERVAL: none"), id="measured-then-none"),
+        pytest.param(("INTERVAL: none", "interval: None"), id="none-twice"),
+    ],
+)
+def test_contradictory_record_is_refused_at_its_second_line(lines):
+    reason = _refused(_timed_grok(*lines), backend="grok-notools")
+    assert reason == (
+        f"grok-notools: review_interval_contradictory: line 8: {lines[1]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        pytest.param(MEASURED, id="identical"),
+        pytest.param("  " + MEASURED + "\t", id="identical-after-trimming"),
+    ],
+)
+def test_duplicate_measured_line_is_refused(second):
+    reason = _refused(_timed_grok(MEASURED, SECOND_MEASURED, second), backend="grok-notools")
+    assert reason == f"grok-notools: review_interval_duplicate: line 9: {second}"
+
+
+def test_first_failing_line_wins_in_text_order():
+    reason = _refused(
+        _timed_grok(MEASURED, "INTERVAL: maybe", "INTERVAL: none"), backend="grok-notools"
+    )
+    assert reason == "grok-notools: review_interval_malformed: line 8: INTERVAL: maybe"
+
+
+def test_the_adapters_never_see_the_trailing_record():
+    # Each of these ends on a findings section, so a record line read by the
+    # adapter would be foreign prose in it.
+    for name, backend in [
+        ("claude-fresh-numbered.md", "claude-fresh"),
+        ("clean-approve.md", "claude-fresh"),
+        ("claude-fresh-headless.md", "claude-fresh"),
+    ]:
+        text = (FIXTURES / name).read_text(encoding="utf-8")
+        assert text.rstrip().endswith("INTERVAL: none"), name
+        assert _accepted(text, backend=backend)["intervals"] == [], name
+
+
+def test_an_interval_line_above_the_record_is_read_like_any_other_line():
+    text = _reviewer_block(
+        "INTERVAL: none", issues="INTERVAL: none\n- `a.py:1` — the loop never exits"
+    )
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+    reason = _refused(text)
+    assert "ISSUES" in reason
+
+
+def test_grok_record_after_the_verdict_value_parses_and_before_it_refuses():
+    after = "## FINDINGS\n- none\n\n## VERDICT\ncleared — fine\nINTERVAL: none\n"
+    assert _accepted(after, backend="grok-notools")["intervals"] == []
+    before = "## FINDINGS\n- none\n\n## VERDICT\nINTERVAL: none\ncleared — fine\n"
+    reason = _refused(before, backend="grok-notools")
+    assert reason == "grok-notools: review_interval_missing: line 6: cleared — fine"
+
+
+def test_from_text_cli_refuses_a_missing_record_with_exit_1(tmp_path: Path):
+    review = tmp_path / "return.md"
+    review.write_text("No bugs or security issues found.\n", encoding="utf-8")
+    proc = _run_cli("--from-text", str(review), "--backend", "claude-fresh")
+    assert proc.returncode == review_phase.EXIT_FAILURE, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["reason"] == (
+        "claude-fresh: review_interval_missing: line 1: No bugs or security issues found."
+    )
+
+
+class _ApprovingJev:
+    calls = 0
+
+    def decide(self, text: str) -> tuple[str, float]:
+        type(self).calls += 1
+        return review_phase.APPROVED, 0.95
+
+
+def _jev_fallback_run(monkeypatch, text: str, backend: str = "claude-fresh") -> dict:
+    monkeypatch.setattr(_ApprovingJev, "calls", 0)
+    monkeypatch.setattr(review_phase, "JevClient", _ApprovingJev)
+    envelope = _envelope(backend, text)
+    envelope["adapters"] = {"jev_fallback": True}
+    return review_phase.run_phase(envelope)
+
+
+def test_jev_fallback_refuses_a_missing_record_before_jev_is_asked(monkeypatch):
+    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n")
+    assert _ApprovingJev.calls == 0
     assert result["status"] == "failure"
-    assert "review_interval_endpoints_missing" in result["reason"]
-    assert "duration" in result["reason"]
+    assert result["reason"] == (
+        "claude-fresh: review_interval_missing: line 1: The diff looks reasonable."
+    )
+    assert "intervals" not in result
+
+
+def test_jev_fallback_accepts_interval_none(monkeypatch):
+    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n\nINTERVAL: none\n")
+    assert _ApprovingJev.calls == 1
+    assert result["status"] == "success", result["reason"]
+    assert result["verdict_source"] == "jev"
+    assert result["intervals"] == []
+
+
+def test_jev_fallback_success_carries_the_measured_record(monkeypatch):
+    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n\n" + MEASURED + "\n")
+    assert _ApprovingJev.calls == 1
+    assert result["status"] == "success", result["reason"]
+    assert result["verdict_source"] == "jev"
+    assert result["intervals"] == [MEASURED_RECORD]
+
+
+def test_jev_fallback_other_adapter_path_still_requires_the_record(monkeypatch):
+    text = "## Verdict: APPROVE\n\n### Issues\n- none\n"
+    result = _jev_fallback_run(monkeypatch, text, backend="grok-notools")
+    assert _ApprovingJev.calls == 0
+    assert result["status"] == "failure"
+    assert result["reason"] == "grok-notools: review_interval_missing: line 4: - none"
+    accepted = _jev_fallback_run(monkeypatch, text + "INTERVAL: none\n", backend="grok-notools")
+    assert accepted["status"] == "success", accepted["reason"]
+    assert accepted["verdict_source"] == "regex"
+    assert accepted["intervals"] == []
+
+
+def test_jev_shadow_runs_only_after_the_record_passes(monkeypatch):
+    monkeypatch.setenv("REVIEW_PHASE_JEV_SHADOW", "1")
+    monkeypatch.setattr(_ApprovingJev, "calls", 0)
+    monkeypatch.setattr(review_phase, "JevClient", _ApprovingJev)
+    refused = review_phase.run_phase(_envelope("grok-notools", DURATION_WITHOUT_INTERVAL))
+    assert refused["status"] == "failure"
+    assert "review_interval_missing" in refused["reason"]
+    assert "jev_verdict" not in refused
+    assert _ApprovingJev.calls == 0
+    accepted = review_phase.run_phase(_envelope("grok-notools", DURATION_WITH_INTERVAL))
+    assert accepted["status"] == "success", accepted["reason"]
+    assert accepted["intervals"] == [MEASURED_RECORD]
+    assert accepted["jev_verdict"] == "approved"
+    assert _ApprovingJev.calls == 1
+
+
+# Each shape ends on a findings section, so a last line that is not a record
+# would be foreign prose in that section if an adapter read it first. `{tail}`
+# starts on the line given.
+_SECTION_LAST_SHAPES = [
+    pytest.param(
+        "claude-fresh",
+        "## Verdict: APPROVE\n\nChecked the change.\n\n### Issues\n- none\n{tail}\n",
+        7,
+        id="claude-issues",
+    ),
+    pytest.param(
+        "claude-fresh",
+        "## Verdict: APPROVE\n\nChecked the change.\n\n### Issues\n- none\n\n"
+        "### Minor notes\n- `a.py:3` — the helper name is vague\n{tail}\n",
+        10,
+        id="claude-minor-notes",
+    ),
+    pytest.param(
+        "claude-fresh",
+        "VERDICT: APPROVE\n\nFINDINGS:\n- none\n{tail}\n",
+        5,
+        id="claude-headless-findings",
+    ),
+    pytest.param(
+        "grok-notools",
+        "## VERDICT\ncleared — fine\n\n## FINDINGS\n- none\n{tail}\n",
+        6,
+        id="grok-findings",
+    ),
+    pytest.param(
+        "grok-notools",
+        "VERDICT: cleared — fine\n\nFINDINGS:\n- none\n{tail}\n",
+        5,
+        id="grok-headless-findings",
+    ),
+]
+
+
+@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
+@pytest.mark.parametrize("last", ["**INTERVAL: none**", "Happy to look again."])
+@pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
+def test_section_ending_in_a_non_record_line_is_refused_as_missing(
+    monkeypatch, backend, shape, tail_line, last, jev_fallback
+):
+    text = shape.format(tail=last)
+    if jev_fallback:
+        result = _jev_fallback_run(monkeypatch, text, backend=backend)
+        assert _ApprovingJev.calls == 0
+        assert result["status"] == "failure"
+        reason = result["reason"]
+    else:
+        reason = _refused(text, backend=backend)
+    assert reason == f"{backend}: review_interval_missing: line {tail_line}: {last}"
+
+
+@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
+@pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
+def test_malformed_record_under_an_unparsed_section_is_refused_by_its_own_name(
+    monkeypatch, backend, shape, tail_line, jev_fallback
+):
+    text = shape.format(tail="Happy to look again.\nINTERVAL: maybe")
+    if jev_fallback:
+        result = _jev_fallback_run(monkeypatch, text, backend=backend)
+        assert _ApprovingJev.calls == 0
+        assert result["status"] == "failure"
+        reason = result["reason"]
+    else:
+        reason = _refused(text, backend=backend)
+    assert reason == (
+        f"{backend}: review_interval_malformed: line {tail_line + 1}: INTERVAL: maybe"
+    )
+
+
+RECORD_LIMIT_SECONDS = 1.0
+
+
+def test_record_check_finishes_long_inputs_within_a_second():
+    many_records = "\n".join(
+        f"INTERVAL: from start {n}, a.log:{n} to end {n}, b.log:{n} = {n}s"
+        for n in range(40_000)
+    )
+    long_line = "INTERVAL: from a, b to c, " + "k=v " * 50_000 + "= 1s"
+    repeated_separators = "INTERVAL: from a, b " + "to x, " * 40_000 + "= 1s"
+    many_blank_lines = "No bugs or security issues found.\n" + " \n" * 100_000
+    shapes = {
+        "40000-records": (many_records, 40_000),
+        "200kb-end-source-of-equals-signs": (long_line, 1),
+        "240kb-repeated-separators": (repeated_separators, 1),
+        "100000-trailing-blank-lines": (many_blank_lines, None),
+    }
+    for name, (text, count) in shapes.items():
+        start = time.perf_counter()
+        try:
+            records = review_phase._require_intervals(text)
+        except review_phase.ParseError:
+            records = None
+        elapsed = time.perf_counter() - start
+        assert elapsed <= RECORD_LIMIT_SECONDS, (
+            f"the record check took {elapsed:.2f}s on {name}"
+        )
+        assert (records is None) if count is None else (len(records) == count), name
+
+
+# --- prose clean markers ----------------------------------------------------
+
+
+def _claude_approve_with(body: str, issues: str = "- none") -> str:
+    return (
+        "## Verdict: APPROVE\n\n"
+        f"### Summary\n{body}\n\n"
+        f"### Issues\n{issues}\n\n"
+        "INTERVAL: none\n"
+    )
+
+
+PROSE_CLEAN_MARKERS = [
+    "None",
+    "None.",
+    "None blocking.",
+    "No issues",
+    "No issues.",
+    "none blocking",
+    "NO ISSUES.",
+    "- None",
+    "- None blocking.",
+    "- No issues.",
+]
+
+
+@pytest.mark.parametrize("marker", PROSE_CLEAN_MARKERS)
+def test_prose_clean_marker_under_issues_parses_as_zero_findings(marker):
+    text = _claude_approve_with("Looks fine.", issues=marker)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert findings == []
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+
+
+@pytest.mark.parametrize("marker", PROSE_CLEAN_MARKERS)
+def test_prose_clean_marker_without_a_verdict_line_still_refuses(marker):
+    text = f"### Summary\nLooks fine.\n\n### Issues\n{marker}\n"
+    with pytest.raises(review_phase.ParseError, match="no verdict"):
+        review_phase.parse_claude_fresh(text)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Nothing much to report here.",
+        "None of the call sites were updated.",
+        "No issues were found in the parser but the tests are thin.",
+        "Several things look odd.",
+    ],
+)
+def test_other_prose_under_issues_still_refuses(prose):
+    text = _claude_approve_with("Looks fine.", issues=prose)
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+# --- prose after a bulleted clean marker refuses ----------------------------
+
+CLEAN_MARKER_THEN_PROSE = "- None blocking.\nA real issue is described in prose."
+CLEAN_MARKER_THEN_CONTINUATION = "- None blocking.\n  Checked every call site."
+
+
+def test_bulleted_clean_marker_followed_by_prose_refuses():
+    text = _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_PROSE)
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+def test_bulleted_clean_marker_followed_by_an_indented_continuation_approves():
+    text = _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_CONTINUATION)
+    verdict, _findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+
+
+def test_run_phase_refuses_prose_after_a_bulleted_clean_marker():
+    refused = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_PROSE),
+        )
+    )
+    assert refused["status"] == "failure"
+    assert "ISSUES" in refused["reason"]
+    assert refused["artifacts"]["findings.json"] is None
+    continued = review_phase.run_phase(
+        _envelope(
+            "claude-fresh",
+            _claude_approve_with("Checked.", issues=CLEAN_MARKER_THEN_CONTINUATION),
+        )
+    )
+    assert continued["status"] == "success", continued["reason"]
+    assert continued["artifacts"]["findings.json"]["verdict"] == "approved"
+
+
+@pytest.mark.parametrize(
+    "issues",
+    [
+        pytest.param("- none\nNothing to report.", id="adjacent"),
+        pytest.param("- none\n\nNothing to report.", id="blank-line-between"),
+        pytest.param("- none\nnothing to report", id="lowercase-no-period"),
+    ],
+)
+def test_bulleted_clean_marker_followed_by_nothing_to_report_approves(issues):
+    text = _claude_approve_with("Checked.", issues=issues)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert findings == []
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "A real issue is described in prose.",
+        "Nothing much to report here.",
+        "None of the call sites were updated.",
+        "Nothing to report, but see below.",
+    ],
+)
+def test_bulleted_clean_marker_followed_by_other_prose_refuses(prose):
+    text = _claude_approve_with("Checked.", issues=f"- none\n{prose}")
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+def test_nothing_to_report_with_more_on_the_line_is_foreign_prose():
+    text = _claude_approve_with("Checked.", issues="Nothing to report, but see below.")
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "ISSUES" in result["reason"]
+
+
+def test_prose_before_a_bulleted_clean_marker_refuses():
+    text = _claude_approve_with("Checked.", issues="A real issue is described in prose.\n- none")
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+# --- (b) prose under a findings section -------------------------------------
+
+FINDING = "- `a.py:1` — first issue"
+ISSUES_REFUSED = {
+    "finding-then-paragraph": f"{FINDING}\nA second issue is described in prose.",
+    "paragraph-then-finding": "A first issue is described in prose.\n- `a.py:1` — second issue",
+    "finding-blank-line-then-paragraph": f"{FINDING}\n\nA second issue is described in prose.",
+    "clean-marker-then-paragraph": "- none\nA real issue is described in prose.",
+}
+# (issues, expected finding descriptions)
+ISSUES_ACCEPTED = {
+    "finding-with-indented-continuation": (
+        f"{FINDING}\n  continued on an indented line.",
+        ["first issue continued on an indented line."],
+    ),
+    "finding-with-continuation-after-a-blank-line": (
+        f"{FINDING}\n\n  continued after a blank line.",
+        ["first issue continued after a blank line."],
+    ),
+    "finding-then-an-exact-clean-marker": (f"{FINDING}\nNothing to report.", ["first issue"]),
+    "none-then-nothing-to-report": ("- none\nNothing to report.", []),
+    "clean-marker-then-indented-continuation": (
+        "- None blocking.\n  Checked every call site.",
+        ["None blocking. Checked every call site."],
+    ),
+}
+
+
+@pytest.mark.parametrize("issues", list(ISSUES_REFUSED.values()), ids=list(ISSUES_REFUSED))
+def test_foreign_prose_under_issues_refuses_beside_any_bullet(issues):
+    text = _claude_approve_with("Checked.", issues=issues)
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+
+
+@pytest.mark.parametrize(
+    "issues, descriptions", list(ISSUES_ACCEPTED.values()), ids=list(ISSUES_ACCEPTED)
+)
+def test_bullets_continuations_and_exact_clean_markers_parse(issues, descriptions):
+    text = _claude_approve_with("Checked.", issues=issues)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert [f["description"] for f in findings] == descriptions
+
+
+def test_foreign_prose_beside_a_minor_note_refuses():
+    text = (
+        "## Verdict: APPROVE\n\n### Issues\n- none\n\n"
+        "### Minor notes\n- `a.py:1` — a note\nA paragraph about something else.\n"
+    )
+    with pytest.raises(review_phase.ParseError, match="MINOR NOTES"):
+        review_phase.parse_claude_fresh(text)
+
+
+def test_foreign_prose_beside_a_grok_finding_refuses():
+    text = (
+        "## FINDINGS\n- `a.py:1` — an issue\nA paragraph about something else.\n\n"
+        "## VERDICT\nflagged — one issue\n"
+    )
+    with pytest.raises(review_phase.ParseError, match="FINDINGS"):
+        review_phase.parse_grok_notools(text)
+
+
+# --- (c) end to end through run_phase ----------------------------------------
+
+
+def _sol_probe_return(body: str, issues: str = "- none") -> str:
+    """The return shape of the second-family review's probes."""
+    return (
+        "## Verdict: APPROVE\n\n"
+        f"{body}\n\n"
+        "### Issues\n"
+        f"{issues}\n\n"
+        "### Evidence\n"
+        "- Ran: checks passed\n\n"
+        "INTERVAL: none\n"
+    )
+
+
+SOL_ISSUES_PROBES_REFUSED = {
+    "clean-then-foreign": "- none\nA real issue is described in prose.",
+    "real-then-foreign": "- `a.py:1` — first issue\nA second issue is described in prose.",
+    "foreign-then-real": "A first issue is described in prose.\n- `a.py:1` — second issue",
+}
+SOL_ISSUES_PROBES_ACCEPTED = {
+    "clean-then-indented": "- None blocking.\n  Checked every call site.",
+}
+
+
+@pytest.mark.parametrize(
+    "issues",
+    list(SOL_ISSUES_PROBES_REFUSED.values()),
+    ids=list(SOL_ISSUES_PROBES_REFUSED),
+)
+def test_run_phase_refuses_the_second_family_prose_probes(issues):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _sol_probe_return("Checked.", issues=issues))
+    )
+    assert result["status"] == "failure"
+    assert "ISSUES" in result["reason"]
     assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize(
+    "issues",
+    list(SOL_ISSUES_PROBES_ACCEPTED.values()),
+    ids=list(SOL_ISSUES_PROBES_ACCEPTED),
+)
+def test_run_phase_accepts_the_second_family_continuation_probe(issues):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _sol_probe_return("Checked.", issues=issues))
+    )
+    assert result["status"] == "success", result["reason"]
+    assert result["artifacts"]["findings.json"]["verdict"] == "approved"
+
+
+@pytest.mark.parametrize("issues", list(ISSUES_REFUSED.values()), ids=list(ISSUES_REFUSED))
+def test_run_phase_refuses_foreign_prose_under_issues(issues):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _claude_approve_with("Checked.", issues=issues))
+    )
+    assert result["status"] == "failure"
+    assert "ISSUES" in result["reason"]
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize(
+    "issues, descriptions", list(ISSUES_ACCEPTED.values()), ids=list(ISSUES_ACCEPTED)
+)
+def test_run_phase_accepts_bullets_continuations_and_exact_clean_markers(issues, descriptions):
+    result = review_phase.run_phase(
+        _envelope("claude-fresh", _claude_approve_with("Checked.", issues=issues))
+    )
+    assert result["status"] == "success", result["reason"]
+    findings = result["artifacts"]["findings.json"]["findings"]
+    assert [f["description"] for f in findings] == descriptions
+
+
+# --- the growth tests share one timing helper --------------------------------
+#
+# The growth tests below time spans of a few milliseconds or less, where runner
+# noise alone can triple a timing. A pattern that was once quadratic or cubic
+# cannot be fed an input long enough to take 5 ms in one call (the old heading
+# form took seconds on 2,000 spaces), so the tests keep their inputs short and
+# repeat the call until one timed span lasts GROWTH_WINDOW_SECONDS. Each size is
+# timed several times and the fastest per-call time is kept, since noise only
+# ever adds time. The longer input is four times the shorter, so a linear scan
+# grows about four times and a quadratic one about sixteen; the bound of eight
+# sits between them.
+GROWTH_REPETITIONS = 9
+GROWTH_RATIO_BOUND = 8
+GROWTH_WINDOW_SECONDS = 0.005
+
+
+def _span_seconds(scan, text: str, calls: int, clock=time.perf_counter) -> float:
+    start = clock()
+    for _ in range(calls):
+        scan(text)
+    return clock() - start
+
+
+def _fastest_call_seconds(scan, text: str, clock=time.perf_counter) -> float:
+    """The fastest per-call time over several timed spans.
+
+    A span repeats the call until it lasts GROWTH_WINDOW_SECONDS (a single call
+    when one already does). The spans that find that call count are discarded,
+    since they are shorter than the window and so the noisiest samples. A first
+    call over HEADING_LIMIT_SECONDS ends it, so a pattern that is far too slow
+    is not timed again. `clock` is a seam for the helper's own test.
+    """
+    calls = 1
+    span = _span_seconds(scan, text, calls, clock)
+    while span < GROWTH_WINDOW_SECONDS:
+        calls *= 2
+        span = _span_seconds(scan, text, calls, clock)
+    if calls == 1 and span > HEADING_LIMIT_SECONDS:
+        return span
+    best = span / calls
+    for _ in range(GROWTH_REPETITIONS - 1):
+        best = min(best, _span_seconds(scan, text, calls, clock) / calls)
+    return best
+
+
+class _VirtualClock:
+    """A clock that moves only when a scan spends time on it."""
+
+    def __init__(self, costs):
+        self.now = 0.0
+        self.costs = costs
+        self.calls = 0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def scan(self, text: str) -> None:
+        self.now += self.costs(self.calls)
+        self.calls += 1
+
+
+def test_fastest_call_ignores_the_spans_shorter_than_the_window():
+    # The first four calls are cheap (a warm-up or a coarse timer reading), so
+    # every calibration span reads as fast. Only spans that reach the window
+    # count, and those measure the steady 1 ms per call.
+    clock = _VirtualClock(lambda index: 0.0002 if index < 4 else 0.001)
+    fastest = _fastest_call_seconds(clock.scan, "", clock)
+    assert fastest >= 0.0007, (
+        f"the fastest per-call time was {fastest * 1e3:.3f}ms, "
+        "a span shorter than the window was counted"
+    )
+
+
+def test_fastest_call_returns_a_first_call_over_the_limit_without_timing_again():
+    clock = _VirtualClock(lambda index: 2 * HEADING_LIMIT_SECONDS)
+    assert _fastest_call_seconds(clock.scan, "", clock) == 2 * HEADING_LIMIT_SECONDS
+    assert clock.calls == 1
+
+
+# --- the heading pattern stays linear and keeps its grammar ------------------
+#
+# `_HEADING` runs on every line of every review. One line of `# a`, 3,000
+# spaces and `b` used to take over ten seconds. The forms below are the
+# headings the adapter tests already exercise, plus the edge forms, each with
+# the title the earlier pattern gave.
+
+HEADING_LIMIT_SECONDS = 1.0
+THREE_THOUSAND_SPACE_LINE = "# a" + " " * 3000 + "b"
+
+
+def _timed_heading_match(line: str):
+    start = time.perf_counter()
+    matched = review_phase._HEADING.match(line)
+    return matched, time.perf_counter() - start
+
+
+def test_heading_match_finishes_the_3000_space_line_within_a_second():
+    matched, elapsed = _timed_heading_match(THREE_THOUSAND_SPACE_LINE)
+    assert elapsed <= HEADING_LIMIT_SECONDS, (
+        f"_HEADING took {elapsed:.2f}s on a line of `# a`, 3,000 spaces and `b`"
+    )
+    assert matched is not None
+    assert review_phase._heading_title(matched) == "a" + " " * 3000 + "b"
+
+
+def test_claude_adapter_parses_a_review_holding_the_3000_space_line_within_a_second():
+    text = "\n".join(
+        ["## Verdict: APPROVE", "", "### Issues", "- none", "", "### Evidence",
+         THREE_THOUSAND_SPACE_LINE, ""]
+    )
+    start = time.perf_counter()
+    parsed = review_phase.parse_claude_fresh(text)
+    elapsed = time.perf_counter() - start
+    assert parsed == ("approved", [])
+    assert elapsed <= HEADING_LIMIT_SECONDS, f"parse_claude_fresh took {elapsed:.2f}s"
+
+
+HEADING_GROWTH_SHAPES = {
+    "hash-a-spaces-b": lambda n: "# a" + " " * n + "b",
+    "hash-a-spaces-hash-b": lambda n: "# a" + " " * n + "#" + " " * n + "b",
+    "hash-spaces-then-hashes": lambda n: "#" + " " * n + "###" + " " * n + "x",
+    "alternating-space-hash": lambda n: "# a" + " #" * (n // 2) + "b",
+    "b-spaces-hash-spaces-hash": lambda n: "# b" + " " * n + "#" + " " * n + "#",
+    "seven-hashes-spaces-b": lambda n: "#######" + " " * n + "b",
+    "only-spaces-after-hash": lambda n: "#" + " " * n,
+    "hash-a-spaces-newline-spaces-x": lambda n: "# a" + " " * n + "\n" + " " * n + "x",
+    "label-colon-spaces-newline-spaces-x": (
+        lambda n: "FINDINGS:" + " " * n + "\n" + " " * n + "x"
+    ),
+}
+
+
+# The earlier heading pattern took seconds on 2,000 spaces, so these lengths
+# stay small enough for that form to finish and fail the growth bound.
+HEADING_SHORT_LENGTH = 500
+HEADING_LONG_LENGTH = 4 * HEADING_SHORT_LENGTH
+
+
+@pytest.mark.parametrize("shape", list(HEADING_GROWTH_SHAPES))
+def test_heading_match_time_grows_linearly_with_line_length(shape):
+    match = review_phase._HEADING.match
+    shorter = _fastest_call_seconds(match, HEADING_GROWTH_SHAPES[shape](HEADING_SHORT_LENGTH))
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"_HEADING took {shorter:.2f}s on the {HEADING_SHORT_LENGTH}-space {shape} line"
+    )
+    longer = _fastest_call_seconds(match, HEADING_GROWTH_SHAPES[shape](HEADING_LONG_LENGTH))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"_HEADING on a {shape} line: quadrupling {HEADING_SHORT_LENGTH} to "
+        f"{HEADING_LONG_LENGTH} spaces took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
+    )
+
+
+HEADING_FORMS = [
+    ('## FINDINGS', 'FINDINGS'),
+    ('## VERDICT', 'VERDICT'),
+    ('FINDINGS:', 'FINDINGS'),
+    ('VERDICT: flagged — the retry logic needs the backoff reset before merge.', 'VERDICT'),
+    ('## Verdict: REQUEST CHANGES', 'Verdict: REQUEST CHANGES'),
+    ('## Verdict: APPROVE', 'Verdict: APPROVE'),
+    ('### Issues', 'Issues'),
+    ('### Minor notes', 'Minor notes'),
+    ('### Evidence', 'Evidence'),
+    ('VERDICT: APPROVE', 'VERDICT'),
+    ('VERDICT: APPROVE_WITH_FINDINGS', 'VERDICT'),
+    ('ANALYSIS:', 'ANALYSIS'),
+    ('#', None),
+    ('  #', None),
+    ('##', '#'),
+    ('#######', '#'),
+    ('# ', ' '),
+    ('#   ', ' '),
+    ('##  ', ' '),
+    ('\t# x', 'x'),
+    ('# Title', 'Title'),
+    ('#Title', 'Title'),
+    ('## Title ##', 'Title'),
+    ('## Title##', 'Title'),
+    ('## a # b', 'a # b'),
+    ('## a #', 'a'),
+    ('## a# ##', 'a#'),
+    ('# # #', '#'),
+    ('###### x', 'x'),
+    ('####### x', '# x'),
+    ('# a\t#\t', 'a'),
+    ('**ISSUES**', 'ISSUES'),
+    ('**ISSUES**:', 'ISSUES'),
+    ('ISSUES: none', 'ISSUES'),
+    ('  minor notes  ', 'minor notes'),
+    ('Findings', 'Findings'),
+    ('#\n', None),
+    ('#\r\n', '\r'),
+    ('##\n', '#'),
+    ('FINDINGS: x\n  ', 'FINDINGS'),
+    ('FINDINGS: x\n  y', None),
+    ('FINDINGS x', None),
+    ('Issue: x', None),
+    ('- ## x', None),
+    ('', None),
+    (' ', None),
+    ('x', None),
+]
+
+
+@pytest.mark.parametrize(
+    ("line", "title"), HEADING_FORMS, ids=[repr(line) for line, _ in HEADING_FORMS]
+)
+def test_heading_forms_keep_main_titles(line, title):
+    matched = review_phase._HEADING.match(line)
+    got = None if matched is None else review_phase._heading_title(matched)
+    assert got == title
+
+
+# --- the verdict lines stay linear on a long whitespace run ------------------
+#
+# The verdict label reader runs on every line of a review. A colon, a long
+# space run, an optional `[` or `*` mark and a second space run once let two
+# adjacent whitespace sub-patterns split the first run every way, which is
+# quadratic; the reader must stay linear on each of those shapes.
+
+
+VERDICT_SHORT_LENGTH = 3000
+VERDICT_LONG_LENGTH = 4 * VERDICT_SHORT_LENGTH
+
+
+VERDICT_GROWTH_CASES = [
+    ("heading", "colon-spaces-x", lambda n: "## Verdict:" + " " * n + "x"),
+    (
+        "heading",
+        "colon-spaces-bracket-spaces-x",
+        lambda n: "## Verdict:" + " " * n + "[" + " " * n + "x",
+    ),
+    ("label", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
+    (
+        "label",
+        "colon-spaces-stars-spaces-x",
+        lambda n: "VERDICT:" + " " * n + "**" + " " * n + "x",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "shape", "build"),
+    VERDICT_GROWTH_CASES,
+    ids=[f"{name}-{shape}" for name, shape, _ in VERDICT_GROWTH_CASES],
+)
+def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
+    def match(line):
+        return review_phase._verdict_labels([line])
+
+    shorter = _fastest_call_seconds(match, build(VERDICT_SHORT_LENGTH))
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"{name} took {shorter:.2f}s on the {VERDICT_SHORT_LENGTH}-space {shape} line"
+    )
+    longer = _fastest_call_seconds(match, build(VERDICT_LONG_LENGTH))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"{name} on a {shape} line: quadrupling {VERDICT_SHORT_LENGTH} to "
+        f"{VERDICT_LONG_LENGTH} spaces took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
+    )
+
+
+# --- INTERVAL line and body patterns stay linear and keep their grammar ------
+#
+# `_INTERVAL_LINE` runs on the trailing lines of every successfully parsed
+# review. `_INTERVAL_PARTS` runs on each measured body, always one line. A
+# body of `from a,` plus n spaces plus `b` used to backtrack about cubically;
+# a line of `INTERVAL: a`, n spaces and `b` was quadratic. The cases below are
+# every fixture INTERVAL line plus the edge forms, each checked against the
+# backtracking patterns that define the grammar. The body grammar is the lazy
+# one throughout except that the end source runs to the last `=`, so an end
+# source may itself hold `=`.
+
+OLD_INTERVAL_LINE = re.compile(
+    r"^[ \t]*INTERVAL[ \t]*:[ \t]*(.*?)[ \t]*$",
+    re.IGNORECASE,
+)
+LAST_EQUALS_INTERVAL_PARTS = re.compile(
+    r"^from\s+(?P<start_event>.*?),\s*"
+    r"(?P<start_source>.*?)\s*to\s+"
+    r"(?P<end_event>.*?),\s*"
+    r"(?P<end_source>.*?)\s*=(?!.*=)\s*"
+    r"(?P<duration>.*)$",
+    re.IGNORECASE,
+)
+
+INTERVAL_PARTS_LIMIT_SECONDS = 1.0
+INTERVAL_LINE_LIMIT_SECONDS = 0.05
+INTERVAL_INTERNAL_WS_LIMIT_SECONDS = 0.05
+INTERVAL_NEWLINE_FREE_OUTER_LIMIT_SECONDS = 0.001
+INTERVAL_NEWLINE_FREE_TO_LIMIT_SECONDS = 0.01
+INTERVAL_NEWLINE_FREE_COMMA_LIMIT_SECONDS = 0.01
+REPEATED_TO_OUTER_PARTS = "from a, " + "to x, " * 4000 + "y"
+REPEATED_TO_LEVEL_PARTS = "from a, src " + "to x " * 40000 + "y"
+REPEATED_COMMA_LEVEL_PARTS = "from a, src to end, " + "x, " * 40000 + "y"
+TEN_THOUSAND_SPACE_PARTS = "from a," + " " * 10_000 + "b"
+TEN_THOUSAND_SPACE_LINE = "INTERVAL: a" + " " * 10_000 + "b"
+TEN_THOUSAND_INTERNAL_WS_PARTS = (
+    "from a, foo" + " " * 10_000 + "x to end, bar" + " " * 10_000 + "y = 1s"
+)
+_INTERVAL_FUZZ_ALPHABET = ("a", ",", " ", "t", "o", "=", "F")
+_INTERVAL_S_TRAILING = re.compile(r"\s+$")
+
+
+def _fixture_interval_lines() -> list[str]:
+    found = []
+    for path in sorted(FIXTURES.glob("*.md")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "INTERVAL" in line.upper():
+                found.append(line)
+    return found
+
+
+def _interval_line_cases() -> list[str]:
+    return _fixture_interval_lines() + [
+        "INTERVAL:",
+        "INTERVAL:   ",
+        "  INTERVAL: x",
+        "\tINTERVAL\t:\tfoo\t",
+        "interval: from a, b to c, d = 1s",
+        "Interval : from a, b to c, d = 1s",
+        "INTERVAL: a" + (" " * 20) + "b",
+        "INTERVAL: a" + (" " * 20) + "b   ",
+        "INTERVAL:" + (" " * 20),
+        "INTERVAL:" + ("\t" * 5) + "x" + ("\t" * 3),
+        "INTERVAL:from a, b to c, d = 1s",
+        "INTERVAL  :  body  ",
+        " INTERVAL : body",
+        "XINTERVAL: x",
+        "INTERVALS: x",
+        "INTERVAL x",
+        "INTERVAL",
+        "# INTERVAL: x",
+        "INTERVAL :",
+        "interval:",
+        "InTeRvAl: z",
+        "INTERVAL:\ta\tb\t",
+        "INTERVAL: three\n",
+        "INTERVAL:\n",
+        "INTERVAL: x \n",
+        "",
+        "   ",
+        TEN_THOUSAND_SPACE_LINE,
+    ]
+
+
+def _interval_parts_cases() -> list[str]:
+    bodies = []
+    for line in _fixture_interval_lines():
+        matched = OLD_INTERVAL_LINE.match(line)
+        if matched is not None:
+            bodies.append(matched.group(1))
+            bodies.append(matched.group(1).strip())
+    return bodies + [
+        "from a, b to c, d = e",
+        "from request start, events.tsv:14 to result write, result.md mtime = 41m",
+        "FROM A, B TO C, D = E",
+        "from  a,  b  to  c,  d  =  e",
+        "from\ta,\tb\tto\tc,\td\t=\te",
+        "from a, b to c, d =",
+        "from , b to c, d = e",
+        "from a,  to c, d = e",
+        "from a, b to , d = e",
+        "from a, b to c,  = e",
+        "from a, b to c, d = e  ",
+        "from a, b to c, d =  e",
+        "from a,b to c,d =e",
+        "from a, xto y to c, d = e",
+        "from a, total time to c, d = e",
+        "from a, b to c, d = e, extra",
+        "from a, b, extra to c, d = e",
+        "from , , to x, y = 1",
+        "from a," + (" " * 50) + "b",
+        "from a, b to c, d=e",
+        "from a, b to c,d= e",
+        "not from a, b to c, d = e",
+        "fromage a, b to c, d = e",
+        "from a, b toward c, d = e",
+        "from a, b to c, d == e",
+        "from a b to c, d = e",
+        "from a, b to c d = e",
+        "from a, b to c, d",
+        "froma, b to c, d = e",
+        " from a, b to c, d = e",
+        "from a, photo to album, x = 1s",
+        "from a , b to c, d = e",
+        "from a, b to c , d = e",
+        "from a,to b, c = d",
+        "from a, to b, c = d",
+        "from to x, y to z, w = 1",
+        "from a, x to y to z, w = 1",
+        "from a  a, b  b to c  c, d  d = e  e",
+        "from a, b to c, d = e f g",
+        "",
+        "from",
+        "from ",
+        "from event,ignored, source to end, result = 1s",
+        "from a, b to foo to end, x = 1s",
+        "from a, b to c, d = e = 1s",
+        "from a, b to c, worker log status=done = 41m",
+        "from a, k=v to c, d = 1s",
+        "from a=b, c to d, e = 1s",
+        "from a, b to c, d = = 1s",
+        "from a, b to c, d ==",
+        "from a, b to c, =",
+        "from a, b to c, == 1s",
+    ]
+
+
+def _line_groups(matched):
+    if matched is None:
+        return None
+    return matched.groups()
+
+
+def _parts_groups(matched):
+    if matched is None:
+        return None
+    return tuple(matched.group(name) for name in review_phase._INTERVAL_FIELDS)
+
+
+def test_interval_patterns_accept_the_line_grammar_and_split_on_the_last_equals():
+    mismatches = []
+    for text in _interval_line_cases():
+        old = _line_groups(OLD_INTERVAL_LINE.match(text))
+        new = _line_groups(review_phase._INTERVAL_LINE.match(text))
+        if old != new:
+            mismatches.append(("line", text, old, new))
+    for text in _interval_parts_cases():
+        old = _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(text))
+        new = _parts_groups(review_phase._INTERVAL_PARTS.match(text))
+        if old != new:
+            mismatches.append(("parts", text, old, new))
+    assert mismatches == [], mismatches
+
+
+def test_interval_parts_match_finishes_10000_spaces_well_under_a_second():
+    code = (
+        "import time, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import review_phase\n"
+        "body = sys.stdin.buffer.read().decode('utf-8')\n"
+        "start = time.perf_counter()\n"
+        "matched = review_phase._INTERVAL_PARTS.match(body)\n"
+        "elapsed = time.perf_counter() - start\n"
+        "print('matched' if matched else 'none')\n"
+        "print(elapsed)\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(SKILL_DIR)],
+            input=TEN_THOUSAND_SPACE_PARTS,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=INTERVAL_PARTS_LIMIT_SECONDS,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"_INTERVAL_PARTS still running after {INTERVAL_PARTS_LIMIT_SECONDS:.0f}s "
+            "on a 10,000-space body"
+        )
+    status, elapsed_s = proc.stdout.strip().splitlines()
+    assert status == "none"
+    elapsed = float(elapsed_s)
+    assert elapsed <= INTERVAL_PARTS_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.2f}s on a 10,000-space body"
+    )
+
+
+def test_interval_line_match_finishes_10000_spaces_well_under_a_second():
+    start = time.perf_counter()
+    matched = review_phase._INTERVAL_LINE.match(TEN_THOUSAND_SPACE_LINE)
+    elapsed = time.perf_counter() - start
+    assert matched is not None
+    assert matched.group(1) == "a" + " " * 10_000 + "b"
+    assert elapsed <= INTERVAL_LINE_LIMIT_SECONDS, (
+        f"_INTERVAL_LINE took {elapsed:.2f}s on a 10,000-space line"
+    )
+
+
+def _interval_parts_fuzz_bodies() -> list[str]:
+    bodies = []
+    for n in range(0, 5):
+        for prod in itertools.product(_INTERVAL_FUZZ_ALPHABET, repeat=n):
+            tail = "".join(prod)
+            bodies.append(tail)
+            bodies.append("from " + tail)
+    rng = random.Random(35)
+    for _ in range(400):
+        n = rng.randint(5, 12)
+        tail = "".join(rng.choice(_INTERVAL_FUZZ_ALPHABET) for _ in range(n))
+        bodies.append(tail)
+        bodies.append("from " + tail)
+    return bodies
+
+
+def test_interval_parts_match_the_last_equals_grammar_on_fuzz():
+    mismatches = []
+    for text in _interval_parts_fuzz_bodies():
+        old = _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(text))
+        new = _parts_groups(review_phase._INTERVAL_PARTS.match(text))
+        if old != new:
+            mismatches.append((text, old, new))
+    assert mismatches == [], mismatches[:5]
+
+
+def _s_whitespace_code_points() -> list[str]:
+    return [chr(cp) for cp in range(0x110000) if _INTERVAL_S_TRAILING.match(chr(cp))]
+
+
+def test_interval_parts_rstrip_strips_every_s_whitespace_code_point():
+    chars = _s_whitespace_code_points()
+    named = {"\u0085", "\u00a0", "\u2028", "\u3000"}
+    assert named <= set(chars)
+    for ch in chars:
+        assert ("keep" + ch).rstrip() == "keep"
+        body = "from a, src" + ch + " to end, dst" + ch + " = 1s"
+        old = _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(body))
+        new = _parts_groups(review_phase._INTERVAL_PARTS.match(body))
+        assert new == old
+        assert new == ("a", "src", "end", "dst", "1s")
+
+
+def test_interval_parts_match_finishes_10000_internal_spaces_well_under_a_second():
+    code = (
+        "import time, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import review_phase\n"
+        "body = sys.stdin.buffer.read().decode('utf-8')\n"
+        "start = time.perf_counter()\n"
+        "matched = review_phase._INTERVAL_PARTS.match(body)\n"
+        "elapsed = time.perf_counter() - start\n"
+        "print('matched' if matched else 'none')\n"
+        "print(elapsed)\n"
+        "if matched:\n"
+        "    print(matched.group('start_source'))\n"
+        "    print(matched.group('end_source'))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(SKILL_DIR)],
+            input=TEN_THOUSAND_INTERNAL_WS_PARTS,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=INTERVAL_PARTS_LIMIT_SECONDS,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"_INTERVAL_PARTS still running after {INTERVAL_PARTS_LIMIT_SECONDS:.0f}s "
+            "on a 10,000-internal-space body"
+        )
+    lines = proc.stdout.strip().splitlines()
+    status, elapsed_s = lines[0], lines[1]
+    assert status == "matched"
+    elapsed = float(elapsed_s)
+    assert elapsed <= INTERVAL_INTERNAL_WS_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.2f}s on a 10,000-internal-space body"
+    )
+    assert lines[2] == "foo" + " " * 10_000 + "x"
+    assert lines[3] == "bar" + " " * 10_000 + "y"
+
+
+def _interval_parts_timed_match(body: str) -> tuple[str, float]:
+    code = (
+        "import time, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import review_phase\n"
+        "body = sys.stdin.buffer.read().decode('utf-8')\n"
+        "start = time.perf_counter()\n"
+        "matched = review_phase._INTERVAL_PARTS.match(body)\n"
+        "elapsed = time.perf_counter() - start\n"
+        "print('matched' if matched else 'none')\n"
+        "print(elapsed)\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(SKILL_DIR)],
+            input=body,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=INTERVAL_PARTS_LIMIT_SECONDS,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"_INTERVAL_PARTS still running after "
+            f"{INTERVAL_PARTS_LIMIT_SECONDS:.0f}s on a newline-free interval body"
+        )
+    status, elapsed_s = proc.stdout.strip().splitlines()
+    return status, float(elapsed_s)
+
+
+def test_interval_parts_match_finishes_repeated_to_x_well_under_bound():
+    small = "from a, " + "to x, " * 3 + "y"
+    assert _parts_groups(review_phase._INTERVAL_PARTS.match(small)) == (
+        _parts_groups(LAST_EQUALS_INTERVAL_PARTS.match(small))
+    )
+    assert "\n" not in REPEATED_TO_OUTER_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_TO_OUTER_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_OUTER_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated-to-x body"
+    )
+
+
+def test_interval_parts_match_finishes_repeated_to_without_comma_well_under_bound():
+    assert "\n" not in REPEATED_TO_LEVEL_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_TO_LEVEL_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_TO_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated-to body"
+    )
+
+
+def test_interval_parts_match_finishes_repeated_end_event_comma_well_under_bound():
+    assert "\n" not in REPEATED_COMMA_LEVEL_PARTS
+    status, elapsed = _interval_parts_timed_match(REPEATED_COMMA_LEVEL_PARTS)
+    assert status == "none"
+    assert elapsed <= INTERVAL_NEWLINE_FREE_COMMA_LIMIT_SECONDS, (
+        f"_INTERVAL_PARTS took {elapsed:.4f}s on a repeated end-event-comma body"
+    )

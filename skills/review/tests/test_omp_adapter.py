@@ -24,6 +24,9 @@ OMP_NO_RECORD = (FIXTURES / "omp-no-verdict.md").read_text()
 MODEL = "example-model"
 THINKING = "medium"
 HEAD = "a" * 40
+# Every return ends with the INTERVAL record run_phase checks before any
+# adapter reads it; each case here is about the omp record, so it adds none.
+INTERVAL_NONE = "\nINTERVAL: none\n"
 
 
 def _record(
@@ -50,7 +53,7 @@ def _envelope(return_text: str | None, **params) -> dict:
         "target": "example/invoice-cli#7",
         "backend": "omp",
         "brief": "Review the pull request for correctness and safety.",
-        "return_text": return_text,
+        "return_text": return_text + INTERVAL_NONE,
         "model": MODEL,
         "thinking": THINKING,
     }
@@ -86,7 +89,7 @@ def test_request_changes_record_parses_into_the_findings_schema():
     result = review_phase.run_phase(_envelope(OMP_REQUEST_CHANGES))
     assert result["status"] == "success", result["reason"]
     assert result["reason"] == "omp: changes_requested, 3 finding(s)"
-    assert result["artifacts"]["review.md"] == OMP_REQUEST_CHANGES
+    assert result["artifacts"]["review.md"] == OMP_REQUEST_CHANGES + INTERVAL_NONE
     findings = result["artifacts"]["findings.json"]
     assert review_phase.validate_findings(findings) == []
     assert findings["schema"] == "review-findings/v1"
@@ -569,7 +572,7 @@ def test_every_omp_thinking_level_is_accepted(thinking):
 
 def test_from_text_passes_model_and_thinking_through(tmp_path: Path):
     reply = tmp_path / "reply.md"
-    reply.write_text(OMP_REQUEST_CHANGES, encoding="utf-8")
+    reply.write_text(OMP_REQUEST_CHANGES + INTERVAL_NONE, encoding="utf-8")
     result = _run_cli(
         "--from-text",
         str(reply),
@@ -592,7 +595,7 @@ def test_from_text_passes_model_and_thinking_through(tmp_path: Path):
 
 def test_from_text_without_model_is_blocked(tmp_path: Path):
     reply = tmp_path / "reply.md"
-    reply.write_text(OMP_REQUEST_CHANGES, encoding="utf-8")
+    reply.write_text(OMP_REQUEST_CHANGES + INTERVAL_NONE, encoding="utf-8")
     result = _run_cli(
         "--from-text", str(reply), "--backend", "omp", "--thinking", "low"
     )
@@ -603,7 +606,7 @@ def test_from_text_without_model_is_blocked(tmp_path: Path):
 def test_jev_fallback_does_not_rescue_a_missing_record(monkeypatch):
     consulted = []
 
-    def fake_consult(backend, reply):
+    def fake_consult(backend, reply, intervals):
         consulted.append((backend, reply))
         return review_phase._finish(
             backend, review_phase.APPROVED, [], reply, source="jev"

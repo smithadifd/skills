@@ -116,7 +116,9 @@ def test_flag_absent_success_is_byte_identical_to_today():
         "artifacts",
         "reason",
         "resume_token",
+        "intervals",
     }
+    assert result["intervals"] == []
     assert result["status"] == "success"
     assert result["artifacts"]["findings.json"]["verdict"] == "changes_requested"
 
@@ -252,7 +254,8 @@ def _claude_two_verdicts(first: str, second: str) -> str:
         f"## Verdict: {first}\n\n"
         "### Issues\n"
         "- `src/report.py:14` — the total skips the last row; include it in the sum.\n\n"
-        f"## Verdict: {second}\n"
+        f"## Verdict: {second}\n\n"
+        "INTERVAL: none\n"
     )
 
 
@@ -261,7 +264,8 @@ def _grok_two_verdicts(first: str, second: str) -> str:
         "## FINDINGS\n"
         "- `src/report.py:14` — the total skips the last row.\n\n"
         f"## VERDICT\n{first} — the first reading.\n\n"
-        f"## VERDICT\n{second} — the second reading.\n"
+        f"## VERDICT\n{second} — the second reading.\n\n"
+        "INTERVAL: none\n"
     )
 
 
@@ -337,7 +341,7 @@ def _claude_failure_with_grok_verdict(reverse: bool) -> str:
     ]
     if reverse:
         blocks.reverse()
-    return "\n".join(blocks)
+    return "\n".join(blocks) + "\nINTERVAL: none\n"
 
 
 def _grok_failure_with_claude_verdict(reverse: bool) -> str:
@@ -347,7 +351,7 @@ def _grok_failure_with_claude_verdict(reverse: bool) -> str:
     ]
     if reverse:
         labels.reverse()
-    return "\n\n".join(labels) + "\n"
+    return "\n\n".join(labels) + "\n\nINTERVAL: none\n"
 
 
 @pytest.mark.parametrize(
@@ -428,7 +432,7 @@ def test_fallback_refuses_decorated_conflict(monkeypatch, decorated, reverse):
     labels = [decorated, "## Verdict: APPROVE"]
     if reverse:
         labels.reverse()
-    text = "\n\n".join(labels) + "\n"
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     monkeypatch.setattr(
         review_phase,
         "_consult_jev",
@@ -455,7 +459,7 @@ def test_fallback_does_not_mask_a_conflict_with_an_unknown_verdict(
         *conflicting,
         "VERDICT: MAYBE",
     ]
-    text = "\n\n".join(labels) + "\n"
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     monkeypatch.setattr(
         review_phase,
         "_consult_jev",
@@ -477,7 +481,7 @@ def test_fallback_refuses_inline_grok_heading_conflict(monkeypatch, reverse):
     ]
     if reverse:
         labels.reverse()
-    text = "## FINDINGS\n- none\n\n" + "\n\n".join(labels) + "\n"
+    text = "## FINDINGS\n- none\n\n" + "\n\n".join(labels) + "\n\nINTERVAL: none\n"
     monkeypatch.setattr(
         review_phase,
         "_consult_jev",

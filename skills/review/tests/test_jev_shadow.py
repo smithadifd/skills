@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,7 @@ def test_shadow_parse_success_sends_only_trimmed_payload_and_regex_stays_authori
         "review preamble that must not leave the harness\n\n"
         + GROK_FLAGGED
         + "\n## NOTES\nprivate appendix that must not leave the harness\n"
+        + "\nINTERVAL: none\n"
     )
 
     result = review_phase.run_phase(_envelope(return_text))
@@ -259,3 +261,41 @@ def test_shadow_reason_never_carries_secret_or_response_body(monkeypatch):
     assert secret not in result["jev_reason"]
     assert result["status"] == "success"
     assert result["artifacts"]["findings.json"]["verdict"] == "changes_requested"
+
+
+# --- the shared heading matcher stays linear in shadow mode -----------------
+#
+# The Jev payload trim reads every line of the return with the same heading
+# pattern as the regex adapters, after the regex parse has already succeeded.
+# One line of `# a`, 3,000 spaces and `b` used to take over ten seconds there.
+
+SHADOW_LIMIT_SECONDS = 1.0
+THREE_THOUSAND_SPACE_LINE = "# a" + " " * 3000 + "b"
+
+
+def test_trim_and_regex_adapters_share_one_heading_matcher():
+    assert review_phase._HEADING is jev_client._ANY_HEADING
+
+
+def test_shadow_run_on_a_return_holding_the_3000_space_heading_finishes_within_a_second(
+    monkeypatch,
+):
+    monkeypatch.setenv("REVIEW_PHASE_JEV_SHADOW", "1")
+    client = StubClient(("changes_requested", 0.88))
+    monkeypatch.setattr(review_phase, "JevClient", client.factory)
+    return_text = GROK_FLAGGED + "\n" + THREE_THOUSAND_SPACE_LINE + "\n\nINTERVAL: none\n"
+
+    start = time.perf_counter()
+    result = review_phase.run_phase(_envelope(return_text))
+    elapsed = time.perf_counter() - start
+
+    assert elapsed <= SHADOW_LIMIT_SECONDS, (
+        f"run_phase in shadow mode took {elapsed:.2f}s on a return holding a "
+        "line of `# a`, 3,000 spaces and `b`"
+    )
+    assert result["status"] == "success"
+    assert result["artifacts"]["findings.json"]["verdict"] == "changes_requested"
+    assert result["jev_verdict"] == "changes_requested"
+    assert result["agrees_with_regex"] is True
+    assert client.payloads == [jev_client.trim_payload(return_text)]
+    assert THREE_THOUSAND_SPACE_LINE not in client.payloads[0]

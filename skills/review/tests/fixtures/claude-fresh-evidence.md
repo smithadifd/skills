@@ -14,3 +14,5 @@ The change redacts tokens from the request log before it is written.
 - Sinks checked: request log, error log, stdout
 - Trust boundary: the token arrives in the request header and is redacted at `skills/sample-logger/logger.py:41`
 - Earlier findings (round 2+): `skills/sample-logger/logger.py:41` — fixed; the header token is now redacted before the first write
+
+INTERVAL: none

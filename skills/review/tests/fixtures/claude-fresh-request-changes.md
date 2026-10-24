@@ -8,3 +8,5 @@ The change sizes the weekly chain timeout and gates the worker step behind a met
 
 ### Minor notes
 - `skills/sample-monitor/tests/test_sample_monitor_run.py:41` — the timeout assertion reads the stub's env dump rather than proving the chain honors it.
+
+INTERVAL: none

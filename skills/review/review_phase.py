@@ -20,6 +20,15 @@ closed (`additionalProperties: false`) with a complete `required` list, and
 each finding carries exactly `file`, `line`, `rule`, `description`,
 `severity`.
 
+Every return ends with an INTERVAL record: its last non-blank line is
+`INTERVAL: none`, or one `INTERVAL: from <start event>, <start source> to
+<end event>, <end source> = <duration>` line per measured interval the verdict
+relies on. That record is the only place this phase reads for time; the
+adapters never see it, and on success the phase result carries `intervals`
+(`[]` for `none`). A return whose record is missing, malformed, missing an
+endpoint, contradictory or duplicated is `failure`, with a reason naming the
+line (references/structured-interval.md).
+
 With `REVIEW_PHASE_JEV_SHADOW=1`, a successful regex parse also sends
 `jev_client.trim_payload(review.md)` through the existing `JevClient` and adds
 advisory `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason`
@@ -85,7 +94,7 @@ import sys
 import unicodedata
 from pathlib import Path
 
-from jev_client import JevClient, JevClosed, trim_payload
+from jev_client import _ANY_HEADING, JevClient, JevClosed, trim_payload
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "findings.schema.json"
 SCHEMA_ID = "review-findings/v1"
@@ -322,20 +331,22 @@ def _extract_verdict(lines: list[str], vocabulary: str) -> str | None:
 # --- text helpers shared by the adapters -------------------------------------
 
 # A markdown heading, or a bare section label (`FINDINGS:`, `VERDICT: …`) in
-# the headless shape that writes no `#` at all.
-_HEADING = re.compile(
-    r"^\s*(?:#{1,6}\s*(.+?)\s*#*"
-    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**\s*:.*"
-    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**"
-    r")\s*$",
-    re.IGNORECASE,
-)
+# the headless shape that writes no `#` at all. This is the same compiled
+# pattern the Jev payload trim uses, so the two can never drift apart; its
+# grammar, and why it stays linear on any line, is described in jev_client.py.
+_HEADING = _ANY_HEADING
 
 
 def _heading_title(match: re.Match[str]) -> str:
     return next(group for group in match.groups() if group is not None)
 _BULLET = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$")
-_NONE_BULLET = re.compile(r"^`?none`?\.?$", re.IGNORECASE)
+# The clean markers under an Issues heading: `none`, `None.`, `None blocking.`,
+# `No issues`, `No issues.`, `Nothing to report.`, with an optional leading `- `.
+# Each is the whole line; `Nothing to report, but see below.` is prose.
+_NONE_BULLET = re.compile(
+    r"^(?:[-*]\s+)?`?(?:none(?:\s+blocking)?|no\s+issues|nothing\s+to\s+report)`?\.?$",
+    re.IGNORECASE,
+)
 _CLEAN_SENTINEL = re.compile(r"^\W*No bugs or security issues found\.?\W*$", re.IGNORECASE)
 
 
@@ -377,10 +388,13 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
     """Bullets from `start` until the next heading.
 
     Returns `(real_bullets, unparsed, index)`. `unparsed` is true when the
-    section held at least one non-blank line but none of it survived as a
-    real finding and the section was not an explicit clean sentinel
-    (`- none` or `No bugs or security issues found.`) — the caller should
-    treat that as a parse failure, never a silent zero.
+    section held foreign prose (a non-blank line that is not a bullet, not an
+    indented continuation of one, and not exactly a clean marker), whether or
+    not real findings sit beside it; or when it held at least one non-blank
+    line but none of it survived as a real finding and the section was not an
+    explicit clean sentinel (`- none` or `No bugs or security issues found.`).
+    The caller should treat that as a parse failure, never a silent zero and
+    never a silently dropped paragraph.
     """
     bullets: list[str] = []
     had_content = False
@@ -398,21 +412,24 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
             bullets.append(matched.group(1))
         elif bullets and line.startswith((" ", "\t")) and line.strip():
             bullets[-1] = bullets[-1] + " " + line.strip()
-        elif line.strip() and not bullets:
+        elif line.strip():
+            # Any other non-bullet line, before or after a bullet, is prose: a
+            # clean marker, or foreign prose that refuses the section (`- none`
+            # then a paragraph, or a finding then a paragraph).
             if _is_clean_marker(line):
                 saw_clean = True
             else:
                 saw_foreign_prose = True
-            i += 1
-            continue
         i += 1
-    legit_empty = (saw_clean and not saw_foreign_prose) or (
-        bool(bullets) and all(_is_clean_marker(b) for b in bullets)
+    legit_empty = not saw_foreign_prose and (
+        saw_clean or (bool(bullets) and all(_is_clean_marker(b) for b in bullets))
     )
     real = [
         b for b in bullets if not (_is_clean_marker(b) or _PLACEHOLDER_BULLET.match(b))
     ]
-    unparsed = had_content and not real and not legit_empty
+    # Foreign prose refuses the section even beside a real finding: accepting
+    # the findings would drop that paragraph without a word.
+    unparsed = had_content and (saw_foreign_prose or (not real and not legit_empty))
     return real, unparsed, i
 
 
@@ -457,7 +474,7 @@ def _finding(text: str, rule: str, severity: str) -> dict:
 
 def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     """`## FINDINGS` bullets + `## VERDICT <cleared|flagged> — <sentence>`."""
-    lines = text.splitlines()
+    lines = _review_lines(text)
     verdict = _extract_verdict(lines, "grok")
     bullets: list[str] | None = None
     unparsed = False
@@ -496,7 +513,7 @@ _CLAUDE_SECTIONS = (
 def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     """The reviewer agent's block, the headless `VERDICT:` shape, or the
     `review` skill's tagged bullets."""
-    lines = text.splitlines()
+    lines = _review_lines(text)
     # The clean sentinel only stands in when there is no verdict label at all.
     verdict = _extract_verdict(lines, "claude")
     if verdict is None and any(_CLEAN_SENTINEL.match(line) for line in lines):
@@ -914,105 +931,191 @@ def _check(value: object, schema: dict, path: str, errors: list[str]) -> None:
             _check(item, schema["items"], f"{path}[{index}]", errors)
 
 
-# --- measured-interval records ----------------------------------------------
+# --- the INTERVAL record ------------------------------------------------------
 
-# A review verdict that relies on a measured interval must name both physical
-# endpoints. `review-findings/v1` is closed, so parsed records live on the
-# phase result as `intervals`, not inside findings.json.
+# Every review ends with an INTERVAL record. Its last non-blank line is
+# `INTERVAL: none`, or one `INTERVAL: from <start event>, <start source> to
+# <end event>, <end source> = <duration>` line per measured interval the
+# verdict relies on, consecutive. The record block is the run of INTERVAL
+# lines that ends at the last non-blank line; a blank line ends the run.
+# Nothing else in the review is read for a time or for the word INTERVAL, so
+# a duration, a commit sha or a quoted INTERVAL example anywhere else never
+# matters. `review-findings/v1` is closed, so parsed records live on the
+# phase result as `intervals`, not inside findings.json. The grammar and the
+# refusals are written out in references/structured-interval.md.
+INTERVAL_MISSING = "review_interval_missing"
+INTERVAL_MALFORMED = "review_interval_malformed"
 INTERVAL_ENDPOINTS_MISSING = "review_interval_endpoints_missing"
+INTERVAL_CONTRADICTORY = "review_interval_contradictory"
+INTERVAL_DUPLICATE = "review_interval_duplicate"
 _INTERVAL_FIELDS = ("start_event", "start_source", "end_event", "end_source", "duration")
-_INTERVAL_LINE = re.compile(r"^[ \t]*INTERVAL[ \t]*:[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
-_INTERVAL_PARTS = re.compile(
-    r"^from\s+(?P<start_event>.*?),\s*"
-    r"(?P<start_source>.*?)\s*to\s+"
-    r"(?P<end_event>.*?),\s*"
-    r"(?P<end_source>.*?)\s*=\s*"
-    r"(?P<duration>.*)$",
+# One line. The body ends on a non-space/tab (or is empty), so the trailing
+# `[ \t]*` never shares a whitespace run with the body group (the lazy
+# `(.*?)[ \t]*$` form it replaces was quadratic on `INTERVAL: a` + n spaces +
+# `b`).
+_INTERVAL_LINE = re.compile(
+    r"^[ \t]*INTERVAL[ \t]*:[ \t]*((?:[^\n]*[^ \t\n])?)[ \t]*$",
     re.IGNORECASE,
 )
-# Conservative detector: a number followed by a time unit, word-bounded.
-# Compact attached units omit `s` so a code timeout like `900s` is not a
-# measured-interval claim; `41m` / `2h` / `3d` / `500ms` still are. Spaced
-# `min` is omitted for the same reason (`15 min` in a finding about a bound).
-_DURATION_CLAIM = re.compile(
-    r"(?<![\w.])(?:"
-    r"\d+(?:\.\d+)?(?:ms|[mhd])"
-    r"|"
-    r"\d+(?:\.\d+)?\s+(?:milliseconds|seconds|second|minutes|minute|"
-    r"hours|hour|days|day|ms|secs|sec|mins|hrs|hr|[smhd])"
-    r")\b",
-    re.IGNORECASE,
-)
+_INTERVAL_FROM = re.compile(r"^from\s+", re.IGNORECASE)
+_INTERVAL_TO = re.compile(r"to\s+", re.IGNORECASE)
+_INTERVAL_WS = re.compile(r"\s*")
+_INTERVAL_DURATION = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d)")
+_REFUSAL_LINE_MAX = 200
 
 
-def _text_for_duration_scan(text: str) -> str:
-    return "\n".join(
-        line for line in text.splitlines() if not _INTERVAL_LINE.match(line)
-    )
+class _IntervalPartsMatch:
+    def __init__(self, groups: dict[str, str]) -> None:
+        self._groups = groups
+
+    def group(self, name: str) -> str:
+        return self._groups[name]
 
 
-def _has_duration_claim(text: str) -> bool:
-    return _DURATION_CLAIM.search(_text_for_duration_scan(text)) is not None
+class _IntervalParts:
+    """INTERVAL body grammar on one line: from <e>, <s> to <e>, <s> = <d>.
+
+    The first `,` ends the start event, the first `to` plus whitespace after
+    it ends the start source, the next `,` ends the end event, and the last
+    `=` ends the end source, so an end source may itself hold `=`
+    (`a log line k=v`). Each separator is found once, left to right (the last
+    `=` from the right), so the walk is linear in the line. Whitespace after
+    a separator is skipped; trailing whitespace on the two sources is
+    stripped with `str.rstrip()`, the same Unicode set as `\\s`.
+    """
+
+    def match(self, text: str) -> _IntervalPartsMatch | None:
+        headed = _INTERVAL_FROM.match(text)
+        if headed is None:
+            return None
+        start_comma = text.find(",", headed.end())
+        if start_comma < 0:
+            return None
+        start_source_at = _INTERVAL_WS.match(text, start_comma + 1).end()
+        to = _INTERVAL_TO.search(text, start_source_at)
+        if to is None:
+            return None
+        end_comma = text.find(",", to.end())
+        if end_comma < 0:
+            return None
+        end_source_at = _INTERVAL_WS.match(text, end_comma + 1).end()
+        equals = text.rfind("=", end_source_at)
+        if equals < 0:
+            return None
+        return _IntervalPartsMatch(
+            {
+                "start_event": text[headed.end() : start_comma],
+                "start_source": text[start_source_at : to.start()].rstrip(),
+                "end_event": text[to.end() : end_comma],
+                "end_source": text[end_source_at:equals].rstrip(),
+                "duration": text[_INTERVAL_WS.match(text, equals + 1).end() :],
+            }
+        )
+
+
+_INTERVAL_PARTS = _IntervalParts()
+
+
+def _named_refusal(rule: str, line_number: int, line: str, detail: str = "") -> str:
+    shown = line if len(line) <= _REFUSAL_LINE_MAX else line[:_REFUSAL_LINE_MAX]
+    refusal = f"{rule}: line {line_number}: {shown}"
+    return f"{refusal} ({detail})" if detail else refusal
 
 
 def _parse_interval_body(body: str) -> tuple[dict | None, list[str]]:
     matched = _INTERVAL_PARTS.match(body.strip())
     if not matched:
         return None, list(_INTERVAL_FIELDS)
-    start_event = matched.group("start_event").strip()
-    start_source = matched.group("start_source").strip()
-    end_event = matched.group("end_event").strip()
-    end_source = matched.group("end_source").strip()
-    duration = matched.group("duration").strip()
-    missing: list[str] = []
-    if not start_event:
-        missing.append("start_event")
-    if not start_source:
-        missing.append("start_source")
-    if not end_event:
-        missing.append("end_event")
-    if not end_source:
-        missing.append("end_source")
-    if not duration:
-        missing.append("duration")
+    record = {name: matched.group(name).strip() for name in _INTERVAL_FIELDS}
+    missing = [name for name in _INTERVAL_FIELDS if not record[name]]
     if missing:
         return None, missing
-    return {
-        "start_event": start_event,
-        "start_source": start_source,
-        "end_event": end_event,
-        "end_source": end_source,
-        "duration": duration,
-    }, []
+    return record, []
 
 
-def _collect_intervals(text: str) -> tuple[list[dict], list[list[str]]]:
-    complete: list[dict] = []
-    incomplete: list[list[str]] = []
-    for match in _INTERVAL_LINE.finditer(text):
-        record, missing = _parse_interval_body(match.group(1))
-        if missing:
-            incomplete.append(missing)
-        else:
-            complete.append(record)
-    return complete, incomplete
+def _record_block(lines: list[str]) -> tuple[int, int]:
+    """Where the INTERVAL record sits in `lines`, as `(start, end)` indexes.
+
+    `end` is one past the last non-blank line and `start` is the first line
+    of the run of INTERVAL lines that ends there, so `start == end` when the
+    last non-blank line is not an INTERVAL line.
+    """
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    start = end
+    while start and _INTERVAL_LINE.match(lines[start - 1]):
+        start -= 1
+    return start, end
+
+
+def _review_lines(text: str) -> list[str]:
+    """The lines an adapter reads: `text` without its INTERVAL record.
+
+    The record follows the verdict block, so without this a review whose last
+    section is Issues or FINDINGS would read the record as prose in that
+    section. Only the trailing record is removed; an INTERVAL line anywhere
+    else stays and is read like any other line.
+    """
+    lines = text.splitlines()
+    start, end = _record_block(lines)
+    return lines[:start] + lines[end:]
 
 
 def _require_intervals(text: str) -> list[dict]:
-    complete, incomplete = _collect_intervals(text)
-    if not _has_duration_claim(text):
-        return complete
-    if complete:
-        return complete
-    if incomplete:
-        raise ParseError(
-            f"{INTERVAL_ENDPOINTS_MISSING}: missing {', '.join(incomplete[0])}"
-        )
-    raise ParseError(f"{INTERVAL_ENDPOINTS_MISSING}: no INTERVAL record")
+    """The measured records of `text`'s INTERVAL record, in order.
+
+    `[]` for `INTERVAL: none`. Raises ParseError naming the first line that
+    fails, in text order, when the record is missing, malformed, missing an
+    endpoint, contradictory or duplicated.
+    """
+    lines = text.splitlines()
+    start, end = _record_block(lines)
+    if start == end:
+        last = lines[end - 1] if end else ""
+        raise ParseError(_named_refusal(INTERVAL_MISSING, end, last))
+    records: list[dict] = []
+    seen: set[str] = set()
+    saw_none = False
+    for index in range(start, end):
+        line = lines[index]
+        number = index + 1
+        body = _INTERVAL_LINE.match(line).group(1)
+        if body.lower() == "none":
+            if saw_none or records:
+                raise ParseError(_named_refusal(INTERVAL_CONTRADICTORY, number, line))
+            saw_none = True
+            continue
+        if not _INTERVAL_FROM.match(body):
+            raise ParseError(_named_refusal(INTERVAL_MALFORMED, number, line))
+        record, missing = _parse_interval_body(body)
+        if missing:
+            raise ParseError(
+                _named_refusal(
+                    INTERVAL_ENDPOINTS_MISSING, number, line, "missing " + ", ".join(missing)
+                )
+            )
+        if not _INTERVAL_DURATION.fullmatch(record["duration"]):
+            raise ParseError(
+                _named_refusal(
+                    INTERVAL_MALFORMED,
+                    number,
+                    line,
+                    "duration is not a number then ms, s, m, h or d",
+                )
+            )
+        if saw_none:
+            raise ParseError(_named_refusal(INTERVAL_CONTRADICTORY, number, line))
+        key = line.strip()
+        if key in seen:
+            raise ParseError(_named_refusal(INTERVAL_DUPLICATE, number, line))
+        seen.add(key)
+        records.append(record)
+    return records
 
 
 def _attach_intervals(result: dict, intervals: list[dict]) -> dict:
-    if result["status"] == "success" and intervals:
+    if result["status"] == "success":
         result["intervals"] = intervals
     return result
 
@@ -1074,13 +1177,24 @@ def run_phase(envelope: object) -> dict:
             None,
             None,
         )
-    result = _parse_return(envelope, backend, text)
+    # The record is checked before any adapter reads the return. A return
+    # whose last line is not a record would otherwise reach an adapter with
+    # that line still in its last section and fail as an unparsed section, and
+    # with the fallback on it would reach the other adapters and Jev first.
+    try:
+        intervals = _require_intervals(text)
+    except ParseError as exc:
+        result = _result("failure", f"{backend}: {exc}", text, None)
+    else:
+        result = _parse_return(envelope, backend, text, intervals)
     if attribution is not None:
         result["attribution"] = attribution
     return result
 
 
-def _parse_return(envelope: dict, backend: str, text: str) -> dict:
+def _parse_return(
+    envelope: dict, backend: str, text: str, intervals: list[dict]
+) -> dict:
     selected = ADAPTERS[backend]
     try:
         verdict, findings = selected(text)
@@ -1100,12 +1214,8 @@ def _parse_return(envelope: dict, backend: str, text: str) -> dict:
         except VerdictConflict as exc:
             return _result("failure", f"{backend}: {exc}", text, None)
         if parsed is None:
-            return _consult_jev(backend, text)
+            return _consult_jev(backend, text, intervals)
         verdict, findings = parsed
-    try:
-        intervals = _require_intervals(text)
-    except ParseError as exc:
-        return _result("failure", f"{backend}: {exc}", text, None)
     source = "regex" if _jev_fallback_enabled(envelope) else None
     result = _finish(backend, verdict, findings, text, source=source)
     _attach_intervals(result, intervals)
@@ -1209,7 +1319,8 @@ def _record_jev_shadow(result: dict, regex_verdict: str, text: str) -> None:
     result["jev_reason"] = jev_reason
 
 
-def _consult_jev(backend: str, text: str) -> dict:
+def _consult_jev(backend: str, text: str, intervals: list[dict]) -> dict:
+    """Ask Jev for the verdict; `intervals` is the record run_phase checked."""
     try:
         client = JevClient()
         verdict, confidence = client.decide(text)
@@ -1217,10 +1328,6 @@ def _consult_jev(backend: str, text: str) -> dict:
         return _result("failure", str(exc), text, None)
     except Exception:
         return _result("failure", "jev: request failed", text, None)
-    try:
-        intervals = _require_intervals(text)
-    except ParseError as exc:
-        return _result("failure", f"{backend}: {exc}", text, None)
     result = _finish(backend, verdict, [], text, source="jev", confidence=confidence)
     return _attach_intervals(result, intervals)
 
