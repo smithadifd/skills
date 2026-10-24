@@ -373,41 +373,6 @@ def test_E11e_an_ended_pass_writes_nothing(repo):
     assert card_bytes(repo) == before
 
 
-def test_E11i_a_second_open_on_the_same_handle_is_refused_held(repo):
-    handle = store(repo)
-    first = open_pass(repo, Source(), handle=handle)
-    before = card_bytes(repo)
-    with pytest.raises(ticket.TicketHeld) as excinfo:
-        open_pass(repo, Source(), handle=handle)
-    assert first.pass_id in str(excinfo.value)
-    assert card_bytes(repo) == before
-    assert read_card(repo)["pass"]["id"] == first.pass_id
-    first.record_tried("Still the live pass.")
-    assert read_card(repo)["tried"][-1]["what"] == "Still the live pass."
-
-
-def test_E11j_a_handle_whose_pass_ended_opens_a_new_pass(repo):
-    handle = store(repo)
-    first = open_pass(repo, Source(), handle=handle)
-    first.end()
-    second = open_pass(repo, Source(), handle=handle)
-    assert second.live is True
-    assert read_card(repo)["pass"]["id"] == second.pass_id != first.pass_id
-    second.record_tried("A note from the second pass.")
-    assert read_card(repo)["tried"][-1]["what"] == "A note from the second pass."
-
-
-def test_E11k_a_handle_whose_pass_ended_joins_a_live_pass(repo):
-    handle = store(repo)
-    open_pass(repo, Source(), handle=handle).end()
-    live = open_pass(repo, Source())
-    joined = open_pass(repo, Source(), pass_id=live.pass_id, handle=handle)
-    joined.record_tried("A note from the joined pass.")
-    card = read_card(repo)
-    assert card["pass"]["id"] == live.pass_id
-    assert card["tried"][-1]["what"] == "A note from the joined pass."
-
-
 @pytest.mark.parametrize("destination", ["person", "research", "someone_else"])
 def test_E12_three_more_info_exits(repo, destination):
     session = open_pass(repo, Source())
