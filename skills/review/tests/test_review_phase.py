@@ -1614,6 +1614,85 @@ def test_run_phase_accepts_bullets_continuations_and_exact_clean_markers(issues,
     assert [f["description"] for f in findings] == descriptions
 
 
+# --- the growth tests share one timing helper --------------------------------
+#
+# The growth tests below time spans of a few milliseconds or less, where runner
+# noise alone can triple a timing. A pattern that was once quadratic or cubic
+# cannot be fed an input long enough to take 5 ms in one call (the old heading
+# form took seconds on 2,000 spaces), so the tests keep their inputs short and
+# repeat the call until one timed span lasts GROWTH_WINDOW_SECONDS. Each size is
+# timed several times and the fastest per-call time is kept, since noise only
+# ever adds time. The longer input is four times the shorter, so a linear scan
+# grows about four times and a quadratic one about sixteen; the bound of eight
+# sits between them.
+GROWTH_REPETITIONS = 9
+GROWTH_RATIO_BOUND = 8
+GROWTH_WINDOW_SECONDS = 0.005
+
+
+def _span_seconds(scan, text: str, calls: int, clock=time.perf_counter) -> float:
+    start = clock()
+    for _ in range(calls):
+        scan(text)
+    return clock() - start
+
+
+def _fastest_call_seconds(scan, text: str, clock=time.perf_counter) -> float:
+    """The fastest per-call time over several timed spans.
+
+    A span repeats the call until it lasts GROWTH_WINDOW_SECONDS (a single call
+    when one already does). The spans that find that call count are discarded,
+    since they are shorter than the window and so the noisiest samples. A first
+    call over HEADING_LIMIT_SECONDS ends it, so a pattern that is far too slow
+    is not timed again. `clock` is a seam for the helper's own test.
+    """
+    calls = 1
+    span = _span_seconds(scan, text, calls, clock)
+    while span < GROWTH_WINDOW_SECONDS:
+        calls *= 2
+        span = _span_seconds(scan, text, calls, clock)
+    if calls == 1 and span > HEADING_LIMIT_SECONDS:
+        return span
+    best = span / calls
+    for _ in range(GROWTH_REPETITIONS - 1):
+        best = min(best, _span_seconds(scan, text, calls, clock) / calls)
+    return best
+
+
+class _VirtualClock:
+    """A clock that moves only when a scan spends time on it."""
+
+    def __init__(self, costs):
+        self.now = 0.0
+        self.costs = costs
+        self.calls = 0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def scan(self, text: str) -> None:
+        self.now += self.costs(self.calls)
+        self.calls += 1
+
+
+def test_fastest_call_ignores_the_spans_shorter_than_the_window():
+    # The first four calls are cheap (a warm-up or a coarse timer reading), so
+    # every calibration span reads as fast. Only spans that reach the window
+    # count, and those measure the steady 1 ms per call.
+    clock = _VirtualClock(lambda index: 0.0002 if index < 4 else 0.001)
+    fastest = _fastest_call_seconds(clock.scan, "", clock)
+    assert fastest >= 0.0007, (
+        f"the fastest per-call time was {fastest * 1e3:.3f}ms, "
+        "a span shorter than the window was counted"
+    )
+
+
+def test_fastest_call_returns_a_first_call_over_the_limit_without_timing_again():
+    clock = _VirtualClock(lambda index: 2 * HEADING_LIMIT_SECONDS)
+    assert _fastest_call_seconds(clock.scan, "", clock) == 2 * HEADING_LIMIT_SECONDS
+    assert clock.calls == 1
+
+
 # --- the heading pattern stays linear and keeps its grammar ------------------
 #
 # `_HEADING` runs on every line of every review. One line of `# a`, 3,000
@@ -1629,19 +1708,6 @@ def _timed_heading_match(line: str):
     start = time.perf_counter()
     matched = review_phase._HEADING.match(line)
     return matched, time.perf_counter() - start
-
-
-def _best_heading_seconds(line: str, trials: int = 7, calls: int = 50) -> float:
-    """The fastest per-call time over several trials; one slow call ends it."""
-    best = float("inf")
-    for _ in range(trials):
-        start = time.perf_counter()
-        for _ in range(calls):
-            _, call = _timed_heading_match(line)
-            if call > HEADING_LIMIT_SECONDS:
-                return call
-        best = min(best, (time.perf_counter() - start) / calls)
-    return best
 
 
 def test_heading_match_finishes_the_3000_space_line_within_a_second():
@@ -1680,16 +1746,24 @@ HEADING_GROWTH_SHAPES = {
 }
 
 
+# The earlier heading pattern took seconds on 2,000 spaces, so these lengths
+# stay small enough for that form to finish and fail the growth bound.
+HEADING_SHORT_LENGTH = 500
+HEADING_LONG_LENGTH = 4 * HEADING_SHORT_LENGTH
+
+
 @pytest.mark.parametrize("shape", list(HEADING_GROWTH_SHAPES))
 def test_heading_match_time_grows_linearly_with_line_length(shape):
-    shorter = _best_heading_seconds(HEADING_GROWTH_SHAPES[shape](3000))
+    match = review_phase._HEADING.match
+    shorter = _fastest_call_seconds(match, HEADING_GROWTH_SHAPES[shape](HEADING_SHORT_LENGTH))
     assert shorter <= HEADING_LIMIT_SECONDS, (
-        f"_HEADING took {shorter:.2f}s on the 3000-space {shape} line"
+        f"_HEADING took {shorter:.2f}s on the {HEADING_SHORT_LENGTH}-space {shape} line"
     )
-    longer = _best_heading_seconds(HEADING_GROWTH_SHAPES[shape](6000))
-    assert longer <= 3 * shorter, (
-        f"_HEADING on a {shape} line: doubling 3000 to 6000 spaces took "
-        f"{shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than three times"
+    longer = _fastest_call_seconds(match, HEADING_GROWTH_SHAPES[shape](HEADING_LONG_LENGTH))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"_HEADING on a {shape} line: quadrupling {HEADING_SHORT_LENGTH} to "
+        f"{HEADING_LONG_LENGTH} spaces took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
     )
 
 
@@ -1762,19 +1836,8 @@ def test_heading_forms_keep_main_titles(line, title):
 # patterns gave.
 
 
-def _best_match_seconds(pattern, line: str, trials: int = 7, calls: int = 50) -> float:
-    """The fastest per-call time over several trials; one slow call ends it."""
-    best = float("inf")
-    for _ in range(trials):
-        start = time.perf_counter()
-        for _ in range(calls):
-            call_start = time.perf_counter()
-            pattern.match(line)
-            call = time.perf_counter() - call_start
-            if call > HEADING_LIMIT_SECONDS:
-                return call
-        best = min(best, (time.perf_counter() - start) / calls)
-    return best
+VERDICT_SHORT_LENGTH = 3000
+VERDICT_LONG_LENGTH = 4 * VERDICT_SHORT_LENGTH
 
 
 VERDICT_GROWTH_CASES = [
@@ -1805,15 +1868,16 @@ VERDICT_GROWTH_CASES = [
     ids=[f"{name}-{shape}" for name, shape, _ in VERDICT_GROWTH_CASES],
 )
 def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
-    pattern = getattr(review_phase, name)
-    shorter = _best_match_seconds(pattern, build(3000))
+    match = getattr(review_phase, name).match
+    shorter = _fastest_call_seconds(match, build(VERDICT_SHORT_LENGTH))
     assert shorter <= HEADING_LIMIT_SECONDS, (
-        f"{name} took {shorter:.2f}s on the 3000-space {shape} line"
+        f"{name} took {shorter:.2f}s on the {VERDICT_SHORT_LENGTH}-space {shape} line"
     )
-    longer = _best_match_seconds(pattern, build(6000))
-    assert longer <= 3 * shorter, (
-        f"{name} on a {shape} line: doubling 3000 to 6000 spaces took "
-        f"{shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than three times"
+    longer = _fastest_call_seconds(match, build(VERDICT_LONG_LENGTH))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"{name} on a {shape} line: quadrupling {VERDICT_SHORT_LENGTH} to "
+        f"{VERDICT_LONG_LENGTH} spaces took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
     )
 
 
