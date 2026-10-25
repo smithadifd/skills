@@ -289,6 +289,14 @@ def test_reviewer_agent_issues_shape_carries_the_group():
         + RUBRIC_TAG_GROUP
     ) in text
     required_rules = (
+        "A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.",
+        "Every Issue ends with exactly one tag group in the fixed order `reach`, `breaks`, `evidence`.",
+        "The parenthesized reach reason is one clause, never one word.",
+        "Never list an earlier finding about data loss, a check that fails open, or a bypassed guard as hardened unless the delta shows the fix holds.",
+        "| reach \\ breaks | gate | data | avail | docs | evidence |",
+        "| lane, concurrent, user | block | block | harden | nit | harden |",
+        "| owner | block | harden | harden | nit | harden |",
+        "The receipt reader, not the reviewer, applies the toolkit's three adjustments (`guard-file`, `unprobed`, and `unlocated`); the reviewer cannot see the receipt reader's guard set and adapter result.",
         "A finding must be caused by the change, not merely located in code the change touched.",
         "Do not tag a BUG: an already-privileged actor (a human with the account or repo write, or an unsandboxed same-user process) with no gate effect; an ordering gap with no bypass; behaviour the base already had.",
         "Only evidence: probed (a reproducing command) or evidence: quoted (a quoted file fact such as a pattern list or a config line) can block; a finding read without either is hardened, not blocked.",

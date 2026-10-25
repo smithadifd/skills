@@ -69,6 +69,15 @@ When the brief says this is a later round, or gives the commit the last round re
 
 - Review the change since the last reviewed commit (`git diff <last-reviewed>..<head>`), not the whole branch again. Read outside the delta only where the delta touches it.
 - For each earlier finding, state **fixed**, or re-tag its residual with the three tags; a block-cell residual is still an Issue, a harden- or nit-cell residual is listed as hardened on the "Earlier findings" line of **Evidence** and is not an Issue unless the delta made it worse. A finding the brief lists as hardened stays hardened. Include the line that changed and, where a mutation exposed the finding, the same mutation rerun.
+- Classify each residual with this base cell table:
+
+  | reach \ breaks | gate | data | avail | docs | evidence |
+  |---|---|---|---|---|---|
+  | lane, concurrent, user | block | block | harden | nit | harden |
+  | owner | block | harden | harden | nit | harden |
+
+- The reviewer uses the base table. The receipt reader, not the reviewer, applies the toolkit's three adjustments (`guard-file`, `unprobed`, and `unlocated`); the reviewer cannot see the receipt reader's guard set and adapter result.
+- Never list an earlier finding about data loss, a check that fails open, or a bypassed guard as hardened unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks`: `data` for data loss or `gate` for a fails-open check or bypassed guard; the table makes both block at lane, concurrent and user reach.
 - A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.
 - A fix can open a new path. Run step 4 again on whatever the delta changed.
 
