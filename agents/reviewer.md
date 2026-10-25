@@ -68,7 +68,7 @@ A passing suite proves nothing if it would also pass without the change. When th
 When the brief says this is a later round, or gives the commit the last round reviewed:
 
 - Review the change since the last reviewed commit (`git diff <last-reviewed>..<head>`), not the whole branch again. Read outside the delta only where the delta touches it.
-- For each earlier finding, state **fixed**, or re-tag its residual with the three tags; a block-cell residual is still an Issue, a harden- or nit-cell residual is listed as hardened on the "Earlier findings" line of **Evidence** and is not an Issue unless the delta made it worse. A finding the brief lists as hardened stays hardened. Include the line that changed and, where a mutation exposed the finding, the same mutation rerun.
+- For each earlier finding, state **fixed**, or re-tag its standing residual with its truthful three tags and report it again under **Issues**; the receipt reader assigns its cell (block, harden or nit) from those tags, so a harden residual carries its Hardening obligation into the merge. A finding the brief lists as hardened stays hardened. Only a finding the brief lists as hardened stays on the "Earlier findings" line of **Evidence** and is not reported again, unless the delta made it worse; then report it under **Issues** with its new tags and say how. Include the line that changed and, where a mutation exposed the finding, the same mutation rerun.
 - Classify each residual with this base cell table:
 
   | reach \ breaks | gate | data | avail | docs | evidence |
@@ -77,7 +77,7 @@ When the brief says this is a later round, or gives the commit the last round re
   | owner | block | harden | harden | nit | harden |
 
 - The reviewer uses the base table. The receipt reader, not the reviewer, applies the toolkit's three adjustments (`guard-file`, `unprobed`, and `unlocated`); the reviewer cannot see the receipt reader's guard set and adapter result.
-- Never list an earlier finding about data loss, a check that fails open, or a bypassed guard as hardened unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks`: `data` for data loss or `gate` for a fails-open check or bypassed guard; the table makes both block at lane, concurrent and user reach.
+- Never treat an earlier finding about data loss, a check that fails open, or a bypassed guard as fixed unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks` (`data` for data loss, or `gate` for a fails-open check or bypassed guard) and report it under **Issues**. The receipt reader decides the cell, including at owner reach.
 - A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.
 - A fix can open a new path. Run step 4 again on whatever the delta changed.
 
@@ -100,7 +100,7 @@ When the brief says this is a later round, or gives the commit the last round re
 - Mutation: [`path:line` reverted] — [test that failed, or "all green" (which is an issue above)], or "not run: [reason]"
 - Sinks checked: [list], or "n/a: [reason]"
 - Trust boundary: [where untrusted input enters and where it is checked], or "n/a: [reason]"
-- Earlier findings (round 2+): [each one — fixed, or residual with its three tags; list a harden- or nit-cell residual as hardened, with the line]
+- Earlier findings (round 2+): [each one — fixed, reported again under **Issues** with its three tags, or still hardened only when the brief lists it as hardened; include the line]
 
 INTERVAL: none
 ```
@@ -121,7 +121,7 @@ Callers may parse this block, so keep its shape:
 - Never approve code with a security vulnerability or data loss risk without explicitly flagging it, even if the rest looks fine.
 - A finding must be caused by the change, not merely located in code the change touched.
 - Do not tag a BUG: an already-privileged actor (a human with the account or repo write, or an unsandboxed same-user process) with no gate effect; an ordering gap with no bypass; behaviour the base already had.
-- Only evidence: probed (a reproducing command) or evidence: quoted (a quoted file fact such as a pattern list or a config line) can block; a finding read without either is hardened, not blocked.
+- A finding with `evidence: read` is reported under **Issues** with that tag; the receipt reader hardens it as `unprobed`. Only `evidence: probed` (a reproducing command) or `evidence: quoted` (a quoted file fact such as a pattern list or a config line) can block under the reader's rule.
 - Mark a harden finding if-minor only when its fix is about one line; never a one-word reason.
 - reach: lane covers anything a builder lane writes or names: its branch and branch name, every file it commits, its hand-back, the PR body it writes, and the temp roots its sandbox allows. Code execution on the operator's machine is breaks: gate at any reach.
 - reach: concurrent covers another seat, thread or process following the protocol at the same time; reach: user covers an operator flow or input; reach: owner covers only a human with the account or repo write, or an unsandboxed same-user process.
