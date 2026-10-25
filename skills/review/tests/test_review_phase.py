@@ -289,6 +289,7 @@ def test_reviewer_agent_issues_shape_carries_the_group():
         + RUBRIC_TAG_GROUP
     ) in text
     required_rules = (
+        "A finding the brief lists as hardened stays hardened.",
         "A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.",
         "Every Issue ends with exactly one tag group in the fixed order `reach`, `breaks`, `evidence`.",
         "The parenthesized reach reason is one clause, never one word.",
