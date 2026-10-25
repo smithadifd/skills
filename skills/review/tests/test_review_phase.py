@@ -47,6 +47,10 @@ CLEAN_APPROVE = (FIXTURES / "clean-approve.md").read_text()
 NO_VERDICT = (FIXTURES / "no-verdict.md").read_text()
 CLAUDE_EVIDENCE = (FIXTURES / "claude-fresh-evidence.md").read_text()
 REVIEWER_AGENT = SKILL_DIR.parent.parent / "agents" / "reviewer.md"
+RUBRIC_TAG_GROUP = (
+    "[reach: <lane|concurrent|user|owner> (<one-clause reason>); "
+    "breaks: <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]"
+)
 
 ENVELOPE_KEYS = ("repo/ref", "inputs", "constraints", "harness_root", "adapters", "budget")
 
@@ -276,6 +280,98 @@ def test_claude_adapter_parses_the_reviewer_agent_block():
     assert minor["rule"] == "minor"
     assert minor["severity"] == "info"
     assert minor["line"] == 41
+
+
+def test_reviewer_agent_issues_shape_carries_the_group():
+    text = REVIEWER_AGENT.read_text()
+    assert (
+        "- `path/to/file.js:42` — [specific issue and why it matters] "
+        + RUBRIC_TAG_GROUP
+    ) in text
+    required_rules = (
+        "A finding the brief lists as hardened stays hardened.",
+        "A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.",
+        "Every Issue ends with exactly one tag group in the fixed order `reach`, `breaks`, `evidence`.",
+        "The parenthesized reach reason is one clause, never one word.",
+        "For each earlier finding, state **fixed**, or re-tag its standing residual with its truthful three tags and report it again under **Issues**; the receipt reader assigns its cell (block, harden or nit) from those tags, so a harden residual carries its Hardening obligation into the merge.",
+        'Only a finding the brief lists as hardened stays on the "Earlier findings" line of **Evidence** and is not reported again, unless the delta made it worse; then report it under **Issues** with its new tags and say how.',
+        "Never treat an earlier finding about data loss, a check that fails open, or a bypassed guard as fixed unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks` (`data` for data loss, or `gate` for a fails-open check or bypassed guard) and report it under **Issues**. The receipt reader decides the cell, including at owner reach.",
+        "| reach \\ breaks | gate | data | avail | docs | evidence |",
+        "| lane, concurrent, user | block | block | harden | nit | harden |",
+        "| owner | block | harden | harden | nit | harden |",
+        "The receipt reader, not the reviewer, applies the toolkit's three adjustments (`guard-file`, `unprobed`, and `unlocated`); the reviewer cannot see the receipt reader's guard set and adapter result.",
+        "Earlier findings (round 2+): [each one — fixed, reported again under **Issues** with its three tags, or still hardened only when the brief lists it as hardened; include the line]",
+        "A finding must be caused by the change, not merely located in code the change touched.",
+        "Do not tag a BUG: an already-privileged actor (a human with the account or repo write, or an unsandboxed same-user process) with no gate effect; an ordering gap with no bypass; behaviour the base already had.",
+        "A finding with `evidence: read` is reported under **Issues** with that tag; the receipt reader hardens it as `unprobed`. Only `evidence: probed` (a reproducing command) or `evidence: quoted` (a quoted file fact such as a pattern list or a config line) can block under the reader's rule.",
+        "Mark a harden finding if-minor only when its fix is about one line; never a one-word reason.",
+        "reach: lane covers anything a builder lane writes or names: its branch and branch name, every file it commits, its hand-back, the PR body it writes, and the temp roots its sandbox allows. Code execution on the operator's machine is breaks: gate at any reach.",
+        "reach: concurrent covers another seat, thread or process following the protocol at the same time; reach: user covers an operator flow or input; reach: owner covers only a human with the account or repo write, or an unsandboxed same-user process.",
+        "breaks: avail covers wrong output that neither refuses nor loses data; breaks: evidence is a mutation that stayed green with no current bypass, fixed in the same round.",
+    )
+    for rule in required_rules:
+        assert rule in text
+    assert "is listed as hardened on the" not in text
+    assert "Never downgrade or drop an earlier finding" not in text
+    assert "fixed / partly fixed / not fixed" not in text
+
+
+def test_review_skill_bug_shape_carries_the_group():
+    skill_md = (SKILL_DIR / "SKILL.md").read_text()
+    match = re.search(r"e\.g\.\s*`- (\[BUG\][^`]*)`", skill_md, re.DOTALL)
+    assert match, "SKILL.md's Output format section no longer carries a worked example"
+    example = re.sub(r"\s+", " ", match.group(1)).strip()
+    assert example.endswith(RUBRIC_TAG_GROUP)
+
+
+def test_adapter_leaves_the_tag_group_in_the_description():
+    description = "the writer loses the previous value"
+    group = (
+        "[reach: owner (same-user process writes settings); "
+        "breaks: data; evidence: probed]"
+    )
+    prefix = "## Verdict: REQUEST CHANGES\n\n### Issues\n"
+    _, plain_findings = review_phase.parse_claude_fresh(
+        f"{prefix}- `scripts/x.py:41` — {description}\n"
+    )
+    verdict, tagged_findings = review_phase.parse_claude_fresh(
+        f"{prefix}- `scripts/x.py:41` — {description} {group}\n"
+    )
+    assert verdict == "changes_requested"
+    assert len(tagged_findings) == 1
+    finding = tagged_findings[0]
+    assert set(finding) == set(plain_findings[0])
+    assert {key: value for key, value in finding.items() if key != "description"} == {
+        key: value for key, value in plain_findings[0].items() if key != "description"
+    }
+    assert finding == {
+        "file": "scripts/x.py",
+        "line": 41,
+        "rule": "issue",
+        "description": f"{description} {group}",
+        "severity": "error",
+    }
+    document = {
+        "schema": "review-findings/v1",
+        "backend": "claude-fresh",
+        "verdict": verdict,
+        "findings": tagged_findings,
+    }
+    assert review_phase.validate_findings(document) == []
+
+
+def test_severity_word_reason_is_the_known_residual():
+    text = (
+        "## Verdict: REQUEST CHANGES\n\n"
+        "### Issues\n"
+        "- `scripts/x.py:41` — first issue "
+        "[reach: owner (minor); breaks: data; evidence: probed]\n"
+        "- `scripts/x.py:42` — second issue "
+        "[reach: owner (same-user process writes settings); "
+        "breaks: data; evidence: probed]\n"
+    )
+    _, findings = review_phase.parse_claude_fresh(text)
+    assert [finding["severity"] for finding in findings] == ["info", "error"]
 
 
 def test_claude_adapter_parses_an_approve_block():
