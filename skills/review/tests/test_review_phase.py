@@ -461,6 +461,378 @@ def test_claude_adapter_raises_when_a_section_does_not_parse_as_findings():
         review_phase.parse_claude_fresh(text)
 
 
+# --- a return that states two different verdicts is refused ------------------
+
+
+def _claude_two_verdicts(first: str, second: str) -> str:
+    return (
+        f"{first}\n\n"
+        "### Issues\n"
+        "- `src/report.py:14` — the total skips the last row; include it in the sum.\n\n"
+        f"{second}\n\n"
+        "INTERVAL: none\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        pytest.param(
+            "## Verdict: REQUEST CHANGES", "## Verdict: APPROVE",
+            id="request-changes-then-approve",
+        ),
+        pytest.param(
+            "## Verdict: APPROVE", "## Verdict: REQUEST CHANGES",
+            id="approve-then-request-changes",
+        ),
+        pytest.param(
+            "VERDICT: REQUEST CHANGES", "VERDICT: APPROVE",
+            id="label-request-changes-then-approve",
+        ),
+        pytest.param(
+            "VERDICT: APPROVE", "VERDICT: REQUEST CHANGES",
+            id="label-approve-then-request-changes",
+        ),
+        pytest.param(
+            "VERDICT: REQUEST CHANGES", "## Verdict: APPROVE WITH FINDINGS",
+            id="label-request-changes-then-heading-approve",
+        ),
+    ],
+)
+def test_claude_adapter_refuses_two_different_verdicts(first, second):
+    text = _claude_two_verdicts(first, second)
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        review_phase.parse_claude_fresh(text)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith("claude-fresh: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize(
+    "first, second, expected",
+    [
+        pytest.param("## Verdict: APPROVE", "VERDICT: APPROVE", "approved", id="approve-heading-and-label"),
+        pytest.param(
+            "## Verdict: APPROVE", "## Verdict: APPROVE WITH FINDINGS", "approved",
+            id="approve-and-approve-with-findings",
+        ),
+        pytest.param(
+            "## Verdict: REQUEST CHANGES", "## Verdict: REQUEST CHANGES", "changes_requested",
+            id="request-changes-twice",
+        ),
+    ],
+)
+def test_claude_adapter_accepts_the_same_verdict_twice(first, second, expected):
+    verdict, findings = review_phase.parse_claude_fresh(_claude_two_verdicts(first, second))
+    assert verdict == expected
+    assert [(f["file"], f["line"]) for f in findings] == [("src/report.py", 14)]
+
+
+_DECORATED_REQUEST_CHANGES = [
+    pytest.param("## Verdict: **REQUEST CHANGES**", id="bold-value-heading"),
+    pytest.param("## **Verdict**: **REQUEST CHANGES**", id="bold-key-and-value-heading"),
+    pytest.param("## **Verdict:** REQUEST CHANGES", id="bold-key-with-colon-heading"),
+    pytest.param("VERDICT: [REQUEST CHANGES]", id="bracketed-value-label"),
+    pytest.param("VERDICT: `REQUEST CHANGES`", id="backticked-value-label"),
+    pytest.param("## `Verdict`: `REQUEST CHANGES`", id="backticked-key-and-value-heading"),
+    pytest.param("## [Verdict]: [REQUEST CHANGES]", id="bracketed-key-and-value-heading"),
+    pytest.param("## _Verdict_: _REQUEST CHANGES_", id="underscored-key-and-value-heading"),
+    pytest.param(
+        "## **[Verdict]**: **[REQUEST CHANGES]**",
+        id="composed-key-and-value-heading",
+    ),
+]
+
+
+_FULL_SPAN_REQUEST_CHANGES = [
+    pytest.param("**Verdict: REQUEST CHANGES**", id="bold-full-label"),
+    pytest.param("## **Verdict: REQUEST CHANGES**", id="bold-full-heading"),
+    pytest.param("*Verdict: REQUEST CHANGES*", id="italic-full-label"),
+    pytest.param("`VERDICT: REQUEST CHANGES`", id="backticked-full-label"),
+]
+
+
+_ISSUE = "- `src/report.py:14` — the total skips the last row.\n"
+
+
+def _adapter_envelope(backend: str, text: str) -> dict:
+    extras = (
+        {"model": "example-model", "thinking": "medium"}
+        if backend == "omp"
+        else {}
+    )
+    return _envelope(backend, text, **extras)
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+    ],
+)
+@pytest.mark.parametrize("decorated", _FULL_SPAN_REQUEST_CHANGES)
+@pytest.mark.parametrize("reverse", [False, True], ids=["changes-first", "approve-first"])
+def test_every_adapter_refuses_full_span_conflicting_verdicts(
+    backend, parser, decorated, reverse
+):
+    labels = [decorated, "## Verdict: APPROVE"]
+    if reverse:
+        labels.reverse()
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted full-span conflicting verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+    ],
+)
+@pytest.mark.parametrize("decorated", _DECORATED_REQUEST_CHANGES)
+@pytest.mark.parametrize("reverse", [False, True], ids=["changes-first", "approve-first"])
+def test_every_adapter_refuses_decorated_conflicting_verdicts(
+    backend, parser, decorated, reverse
+):
+    labels = [decorated, "## Verdict: APPROVE"]
+    if reverse:
+        labels.reverse()
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted decorated conflicting verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "approve-first"])
+def test_every_adapter_refuses_cross_vocabulary_conflict(backend, parser, reverse):
+    labels = [
+        "VERDICT: flagged — the total omits the last row.",
+        "## Verdict: APPROVE",
+    ]
+    if reverse:
+        labels.reverse()
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted cross-vocabulary verdicts: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True], ids=["flagged-first", "cleared-first"])
+def test_every_adapter_refuses_inline_grok_heading_conflict(backend, parser, reverse):
+    labels = [
+        "## VERDICT: flagged — the total omits the last row.",
+        "## VERDICT\ncleared — the total is complete.",
+    ]
+    if reverse:
+        labels.reverse()
+    text = "## FINDINGS\n- none\n\n" + "\n\n".join(labels) + "\n\nINTERVAL: none\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} accepted conflicting verdict headings: {result['reason']}"
+    )
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+    ],
+)
+def test_every_adapter_rejects_an_unknown_verdict_value(backend, parser):
+    text = "## Verdict: APPROVE\n\nVERDICT: MAYBE\n\nINTERVAL: none\n"
+    with pytest.raises(review_phase.ParseError, match="unrecognized verdict"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", (
+        f"{backend} ignored an unknown verdict value: {result['reason']}"
+    )
+    assert "unrecognized verdict" in result["reason"]
+@pytest.mark.parametrize(
+    "label, following, expected",
+    [
+        pytest.param(
+            "**Verdict: REQUEST CHANGES**",
+            "### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="bold-request-changes",
+        ),
+        pytest.param(
+            "## **Verdict: REQUEST CHANGES**",
+            "### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="heading-bold-request-changes",
+        ),
+        pytest.param(
+            "**VERDICT: REQUEST CHANGES**",
+            "FINDINGS:\n" + _ISSUE,
+            "changes_requested",
+            id="uppercase-bold-request-changes",
+        ),
+        pytest.param(
+            "*Verdict: REQUEST CHANGES*",
+            "### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="italic-request-changes",
+        ),
+        pytest.param(
+            "`VERDICT: REQUEST CHANGES`",
+            "FINDINGS:\n" + _ISSUE,
+            "changes_requested",
+            id="backticked-request-changes",
+        ),
+        pytest.param(
+            "**Verdict: APPROVE**",
+            "No bugs or security issues found.\n",
+            "approved",
+            id="bold-approve",
+        ),
+        pytest.param(
+            "**Verdict: REQUEST CHANGES**",
+            "Approve once the fix below lands.\n\n### Issues\n" + _ISSUE,
+            "changes_requested",
+            id="request-changes-before-approve-prose",
+        ),
+        pytest.param(
+            "**Verdict: APPROVE**",
+            "Flagged nothing blocking; one note below.\n\n### Minor notes\n" + _ISSUE,
+            "approved",
+            id="approve-before-flagged-prose",
+        ),
+        pytest.param(
+            "## **Verdict: REQUEST CHANGES**",
+            "Cleared the earlier concern, but one bug remains.\n\n## FINDINGS\n" + _ISSUE,
+            "changes_requested",
+            id="request-changes-before-cleared-prose",
+        ),
+    ],
+)
+def test_claude_adapter_uses_the_value_inside_a_full_span_label(
+    label, following, expected
+):
+    verdict, _ = review_phase.parse_claude_fresh(f"{label}\n\n{following}")
+    assert verdict == expected
+
+
+
+
+def test_findings_bullet_named_verdict_is_not_a_label():
+    text = (
+        "## Verdict: APPROVE\n\n"
+        "### Minor notes\n"
+        "* Verdict: the earlier note still stands\n"
+        "* `src/report.py:14` — rename the total.\n"
+    )
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert len(findings) == 2
+
+
+@pytest.mark.parametrize(
+    "backend, parser",
+    [
+        pytest.param("claude-fresh", review_phase.parse_claude_fresh, id="claude-fresh"),
+        pytest.param("grok-notools", review_phase.parse_grok_notools, id="grok-notools"),
+    ],
+)
+@pytest.mark.parametrize("unknown_first", [True, False], ids=["unknown-first", "unknown-last"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["approve-first", "changes-first"])
+def test_mappable_conflict_precedes_an_unknown_verdict_error(
+    backend, parser, unknown_first, reverse
+):
+    conflicting = ["## Verdict: APPROVE", "## Verdict: REQUEST CHANGES"]
+    if reverse:
+        conflicting.reverse()
+    labels = ["VERDICT: MAYBE", *conflicting] if unknown_first else [
+        *conflicting,
+        "VERDICT: MAYBE",
+    ]
+    text = "\n\n".join(labels) + "\n\nINTERVAL: none\n"
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        parser(text)
+    result = review_phase.run_phase(_adapter_envelope(backend, text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith(f"{backend}: conflicting verdicts")
+
+
+
+def test_claude_clean_sentinel_does_not_conflict_with_a_request_changes_label():
+    text = "No bugs or security issues found.\n\nVERDICT: REQUEST CHANGES\n"
+    verdict, _ = review_phase.parse_claude_fresh(text)
+    assert verdict == "changes_requested"
+
+
+def _grok_two_verdicts(first: str, second: str) -> str:
+    return (
+        "## FINDINGS\n"
+        "- `src/report.py:14` — the total skips the last row.\n\n"
+        f"## VERDICT\n{first} — the first reading.\n\n"
+        f"## VERDICT\n{second} — the second reading.\n\n"
+        "INTERVAL: none\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(_grok_two_verdicts("flagged", "cleared"), id="flagged-then-cleared"),
+        pytest.param(_grok_two_verdicts("cleared", "flagged"), id="cleared-then-flagged"),
+        pytest.param(
+            "FINDINGS:\n- none\nVERDICT: flagged — one.\nVERDICT: cleared — two.\n"
+            "\nINTERVAL: none\n",
+            id="label-flagged-then-cleared",
+        ),
+    ],
+)
+def test_grok_adapter_refuses_two_different_verdicts(text):
+    with pytest.raises(review_phase.VerdictConflict, match="conflicting verdicts"):
+        review_phase.parse_grok_notools(text)
+    result = review_phase.run_phase(_envelope("grok-notools", text))
+    assert result["status"] == "failure", result["reason"]
+    assert result["reason"].startswith("grok-notools: conflicting verdicts")
+    assert result["artifacts"]["findings.json"] is None
+
+
+@pytest.mark.parametrize("token, expected", [("cleared", "approved"), ("flagged", "changes_requested")])
+def test_grok_adapter_accepts_the_same_verdict_twice(token, expected):
+    verdict, findings = review_phase.parse_grok_notools(_grok_two_verdicts(token, token))
+    assert verdict == expected
+    assert len(findings) == 1
+
+
 def test_run_phase_accepts_claude_clean_sentinel_inside_issues():
     result = review_phase.run_phase(_envelope("claude-fresh", CLAUDE_ISSUES_CLEAN))
     assert result["status"] == "success", result["reason"]
@@ -1829,11 +2201,10 @@ def test_heading_forms_keep_main_titles(line, title):
 
 # --- the verdict lines stay linear on a long whitespace run ------------------
 #
-# The verdict heading and label patterns run on every line of a review. A
-# colon, a long space run, an optional `[` or `*` mark and a second space run
-# used to let two adjacent whitespace sub-patterns split the first run every
-# way, which is quadratic. Each form below keeps the verdict word the earlier
-# patterns gave.
+# The verdict label reader runs on every line of a review. A colon, a long
+# space run, an optional `[` or `*` mark and a second space run once let two
+# adjacent whitespace sub-patterns split the first run every way, which is
+# quadratic; the reader must stay linear on each of those shapes.
 
 
 VERDICT_SHORT_LENGTH = 3000
@@ -1841,21 +2212,15 @@ VERDICT_LONG_LENGTH = 4 * VERDICT_SHORT_LENGTH
 
 
 VERDICT_GROWTH_CASES = [
-    ("_CLAUDE_VERDICT_HEADING", "colon-spaces-x", lambda n: "## Verdict:" + " " * n + "x"),
+    ("heading", "colon-spaces-x", lambda n: "## Verdict:" + " " * n + "x"),
     (
-        "_CLAUDE_VERDICT_HEADING",
+        "heading",
         "colon-spaces-bracket-spaces-x",
         lambda n: "## Verdict:" + " " * n + "[" + " " * n + "x",
     ),
-    ("_CLAUDE_VERDICT_LABEL", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
+    ("label", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
     (
-        "_CLAUDE_VERDICT_LABEL",
-        "colon-spaces-stars-spaces-x",
-        lambda n: "VERDICT:" + " " * n + "**" + " " * n + "x",
-    ),
-    ("_GROK_VERDICT_LABEL", "colon-spaces-x", lambda n: "VERDICT:" + " " * n + "x"),
-    (
-        "_GROK_VERDICT_LABEL",
+        "label",
         "colon-spaces-stars-spaces-x",
         lambda n: "VERDICT:" + " " * n + "**" + " " * n + "x",
     ),
@@ -1868,7 +2233,9 @@ VERDICT_GROWTH_CASES = [
     ids=[f"{name}-{shape}" for name, shape, _ in VERDICT_GROWTH_CASES],
 )
 def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
-    match = getattr(review_phase, name).match
+    def match(line):
+        return review_phase._verdict_labels([line])
+
     shorter = _fastest_call_seconds(match, build(VERDICT_SHORT_LENGTH))
     assert shorter <= HEADING_LIMIT_SECONDS, (
         f"{name} took {shorter:.2f}s on the {VERDICT_SHORT_LENGTH}-space {shape} line"
@@ -1881,38 +2248,68 @@ def test_verdict_match_time_grows_linearly_with_line_length(name, shape, build):
     )
 
 
-VERDICT_FORMS = [
-    ("_CLAUDE_VERDICT_HEADING", "## Verdict: APPROVE", "APPROVE"),
-    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [APPROVE_WITH_FINDINGS]", "APPROVE_WITH_FINDINGS"),
-    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [ REQUEST CHANGES ]", "REQUEST CHANGES"),
-    ("_CLAUDE_VERDICT_HEADING", "### **Verdict**:REQUEST-CHANGES", "REQUEST-CHANGES"),
-    ("_CLAUDE_VERDICT_HEADING", "## Verdict:\t[\tapprove", "approve"),
-    ("_CLAUDE_VERDICT_HEADING", "## Verdict: [[APPROVE", None),
-    ("_CLAUDE_VERDICT_HEADING", "## Verdict: * APPROVE", None),
-    ("_CLAUDE_VERDICT_HEADING", "####### Verdict: APPROVE", None),
-    ("_CLAUDE_VERDICT_LABEL", "VERDICT: APPROVE", "APPROVE"),
-    ("_CLAUDE_VERDICT_LABEL", "**VERDICT:** REQUEST_CHANGES", "REQUEST_CHANGES"),
-    ("_CLAUDE_VERDICT_LABEL", "VERDICT: ** APPROVE", "APPROVE"),
-    ("_CLAUDE_VERDICT_LABEL", "VERDICT:**APPROVE**", "APPROVE"),
-    ("_CLAUDE_VERDICT_LABEL", "VERDICT: * * APPROVE", None),
-    ("_CLAUDE_VERDICT_LABEL", "VERDICT: [APPROVE", None),
-    ("_CLAUDE_VERDICT_LABEL", "VERDICT: APPROVED", None),
-    ("_GROK_VERDICT_LABEL", "VERDICT: flagged — the retry logic needs work.", "flagged"),
-    ("_GROK_VERDICT_LABEL", "**VERDICT**: **cleared**", "cleared"),
-    ("_GROK_VERDICT_LABEL", "VERDICT:\tcleared", "cleared"),
-    ("_GROK_VERDICT_LABEL", "VERDICT: * * cleared", None),
-    ("_GROK_VERDICT_LABEL", "VERDICT: clearedx", None),
+# --- the omp prose checks stay linear on long lines --------------------------
+#
+# The omp prose checks read each line once, as written, and refuse raw HTML.
+# A refused line still costs the character checks and the fold, so a line of
+# comment openers is timed whole. A line of `<a ` openers that is not refused
+# at its start is searched for a tag once; searching on from every `<` would
+# be quadratic. A letter followed by a long run of non-letters is where a
+# value token pattern with overlapping repeats would backtrack.
+
+OMP_COMMENT_SHORT_COUNT = 16000
+OMP_COMMENT_LONG_COUNT = 4 * OMP_COMMENT_SHORT_COUNT
+OMP_TAG_SHORT_COUNT = 4000
+OMP_TAG_LONG_COUNT = 4 * OMP_TAG_SHORT_COUNT
+OMP_RUN_SHORT_LENGTH = 3000
+OMP_RUN_LONG_LENGTH = 4 * OMP_RUN_SHORT_LENGTH
+
+
+def _omp_prose_check(line):
+    try:
+        return review_phase._omp_prose_verdicts([line])
+    except review_phase.ParseError:
+        return None
+
+
+def test_omp_prose_check_time_grows_linearly_on_a_line_of_comment_openers():
+    check = _omp_prose_check
+
+    shorter = _fastest_call_seconds(check, "<!--" * OMP_COMMENT_SHORT_COUNT)
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"the omp prose checks took {shorter:.2f}s on "
+        f"{OMP_COMMENT_SHORT_COUNT} comment openers"
+    )
+    longer = _fastest_call_seconds(check, "<!--" * OMP_COMMENT_LONG_COUNT)
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"the omp prose checks: quadrupling {OMP_COMMENT_SHORT_COUNT} to "
+        f"{OMP_COMMENT_LONG_COUNT} comment openers took {shorter * 1e3:.4f}ms to "
+        f"{longer * 1e3:.4f}ms, more than {GROWTH_RATIO_BOUND} times"
+    )
+
+
+OMP_GROWTH_CASES = [
+    ("tag-openers", lambda n: "x " + "<a " * n, OMP_TAG_SHORT_COUNT, OMP_TAG_LONG_COUNT),
+    ("value-letter-run", lambda n: "a" + "." * n, OMP_RUN_SHORT_LENGTH, OMP_RUN_LONG_LENGTH),
 ]
 
 
 @pytest.mark.parametrize(
-    ("name", "line", "word"),
-    VERDICT_FORMS,
-    ids=[f"{name}-{line!r}" for name, line, _ in VERDICT_FORMS],
+    ("shape", "build", "short", "long"),
+    OMP_GROWTH_CASES,
+    ids=[shape for shape, _, _, _ in OMP_GROWTH_CASES],
 )
-def test_verdict_forms_keep_main_words(name, line, word):
-    matched = getattr(review_phase, name).match(line)
-    assert (None if matched is None else matched.group(1)) == word
+def test_omp_prose_check_time_grows_linearly(shape, build, short, long):
+    shorter = _fastest_call_seconds(_omp_prose_check, build(short))
+    assert shorter <= HEADING_LIMIT_SECONDS, (
+        f"the omp prose checks took {shorter:.2f}s on the {short}-unit {shape} line"
+    )
+    longer = _fastest_call_seconds(_omp_prose_check, build(long))
+    assert longer <= GROWTH_RATIO_BOUND * shorter, (
+        f"the omp prose checks on a {shape} line: quadrupling {short} to {long} "
+        f"units took {shorter * 1e3:.4f}ms to {longer * 1e3:.4f}ms, more than "
+        f"{GROWTH_RATIO_BOUND} times"
+    )
 
 
 # --- INTERVAL line and body patterns stay linear and keep their grammar ------

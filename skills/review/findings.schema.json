@@ -13,7 +13,7 @@
     },
     "backend": {
       "type": "string",
-      "enum": ["claude-fresh", "grok-notools"]
+      "enum": ["claude-fresh", "grok-notools", "omp"]
     },
     "verdict": {
       "type": "string",

@@ -1,6 +1,8 @@
 review/review_phase.py 3 # run-envelope field name; standalone use sets it to null
 review/tests/test_jev_fallback.py 1 # run-envelope fixture field set to null
 review/tests/test_jev_shadow.py 1 # run-envelope fixture field set to null
+review/tests/test_omp_adapter.py 1 # run-envelope fixture field set to null
+review/tests/test_omp_prose_grammar.py 1 # run-envelope fixture field set to null
 review/tests/test_review_phase.py 2 # run-envelope contract and fixture field
 review/tests/test_standalone.py 4 # assertions reject configured project-specific paths
 sharpen/SKILL.md 7 # standalone and opt-in path-resolution contract terminology

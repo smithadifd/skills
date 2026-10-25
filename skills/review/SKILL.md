@@ -42,14 +42,78 @@ tag and `file:line` exact, is what its `claude-fresh` adapter parses — the
 worked example above is the shape it expects, verbatim. The closing
 `INTERVAL:` line is required there too: a review without it fails with
 `review_interval_missing`. The grammar and every refusal are in
-`references/structured-interval.md`.
+`references/structured-interval.md`. A return that states
+two different verdicts, in either order, is a failure for the `claude-fresh`
+and `grok-notools` backends, even with `adapters.jev_fallback` on.
+
+For a review run through `omp -p --model <id> --thinking=<level>`, append this
+output contract to the reviewer prompt. Parse the reply with `--backend omp`,
+`--model <id>`, and `--thinking <level>`; in an envelope, use `inputs.model`
+and `inputs.thinking`.
+
+````text
+Return exactly one fenced `review-result` JSON block. `verdict` is exactly
+`APPROVE` or `REQUEST CHANGES`. `bugs` and `nits` contain one
+`path:line — description` string per finding. `reviewed_head` is the full
+lowercase 40-character commit hash you reviewed. After the block, end the
+reply with one `INTERVAL:` line, `INTERVAL: none` unless the verdict relies
+on a measured interval.
+
+The block is the only verdict. Outside it, do not write the word `verdict`;
+the words `approve` or `request changes` in any case (`APPROVE`,
+`REQUEST CHANGES`); raw HTML (`<name>`, `</name>`, `<!--`, or a line
+starting with `<`); Markdown links or images; HTML character references; or
+a non-ASCII letter inside an otherwise-ASCII word. Write generics as
+`Vec[T]` or in words. Raw HTML, a link or image, a character reference, or a
+word mixing ASCII and non-ASCII letters is refused as `ReviewProseUnsafe`;
+an `approve` or `request changes` that differs from the block, or a
+`verdict` with no value, is refused as `VerdictConflict`. The
+block itself is refused as `ReviewRecordMissing`, `ReviewRecordMultiple`,
+`ReviewRecordUnterminated`, `ReviewRecordInvalidJSON` or
+`ReviewRecordSchema` when it is absent, repeated, unclosed, not JSON, or off
+this schema.
+
+```review-result
+{
+  "verdict": "APPROVE",
+  "bugs": [],
+  "nits": [],
+  "reviewed_head": "0123456789abcdef0123456789abcdef01234567"
+}
+```
+````
+
+The block is the OMP verdict's only source: zero or multiple blocks, invalid
+JSON, unknown or incorrectly typed fields, malformed `reviewed_head`, and an
+`APPROVE` record with non-empty `bugs` fail closed as record errors; a clean
+sentence never substitutes for a missing or invalid record. Outside the record
+fence, prose is read as written and nothing is deleted from it. Category
+Cf/Mn/Me/Zl/Zp/Co/Cn/Cs characters, bidi controls, Hangul or Braille fillers,
+and HTML character references fail as `ReviewProseUnsafe`, and so do raw HTML
+(a tag, a `<!` or `<?` start, or a line that starts an HTML block) and
+Markdown links and images, which are refused rather than stripped. Prose is
+then folded (NFKC, then a Latin fold read from each letter's Unicode name); a
+word mixing ASCII and non-ASCII letters fails as `ReviewProseUnsafe`, so a
+lookalike key is refused rather than matched. Each paragraph (ended by the
+record, a blank line or a fence line) is read for value tokens: the letters of
+`approve` or `request changes` in any case, split only by non-letters. Every
+value token must agree with the record, or the reply fails as
+`VerdictConflict`. The key is the ASCII word `verdict` (letters may be split
+by non-letters, camel-case prefixes such as `FinalVerdict` count); a line
+holding a key must also hold a value token, or the reply fails as
+`VerdictConflict`.
+A key-only line takes the next non-blank line, or the record after it, as its
+value.
+The model and thinking level are required caller inputs. The level is one of `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `auto`. The result
+records both, with the lane name, as `attribution`.
 
 `REVIEW_PHASE_JEV_SHADOW=1` enables an advisory TypeSafe pass on parse-success
 returns. It sends only `jev_client.trim_payload`'s FINDINGS/VERDICT payload and
 records `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason` on
 the phase result. `jev_reason` is a secret-free failure classification when
-Jev is unavailable and null otherwise; the regex verdict and verbatim
-`review.md` remain authoritative. Absent/unset is the exact base path.
+Jev is unavailable and null otherwise; the selected adapter's verdict and
+verbatim `review.md` remain authoritative. Absent/unset is the exact base path.
 
 Do NOT comment on:
 - Style, formatting, naming conventions

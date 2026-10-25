@@ -33,9 +33,9 @@ With `REVIEW_PHASE_JEV_SHADOW=1`, a successful regex parse also sends
 `jev_client.trim_payload(review.md)` through the existing `JevClient` and adds
 advisory `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason`
 fields to the phase result. `jev_reason` classifies an unavailable outcome and
-is null otherwise. The regex verdict remains authoritative. The flag is off by
-default; any shadow failure cannot change review status, artifacts, reason, or
-verdict.
+is null otherwise. The selected adapter's verdict remains authoritative. The
+flag is off by default; any shadow failure cannot change review status,
+artifacts, reason, or verdict.
 
 Backends (one adapter each, chosen by the envelope's `inputs.backend`):
     claude-fresh   the reviewer agent's `## Verdict:` block with `### Issues`
@@ -45,15 +45,34 @@ Backends (one adapter each, chosen by the envelope's `inputs.backend`):
                    bullets (or its "No bugs or security issues found." line)
     grok-notools   `## FINDINGS` bullets (`none` when clean) + `## VERDICT`
                    `<cleared|flagged> — <sentence>`
+    omp            exactly one fenced `review-result` JSON record with a
+                   verdict, bugs, nits, and reviewed_head. The envelope's
+                   `inputs.model` and `inputs.thinking` name the served model
+                   and thinking level; both are required, and the phase
+                   result carries them as `attribution` with the lane name
+
+The OMP verdict comes only from that record, compared byte-exact; missing,
+multiple, unterminated, invalid-JSON, and schema-invalid records have distinct
+refusals. Prose outside the record never supplies a verdict. It is folded to
+ASCII where Unicode itself says how (NFKC, then a Latin fold read from each
+letter's name), a word mixing ASCII and non-ASCII letters is refused as
+`ReviewProseUnsafe`, and only the ASCII word `verdict` is a key: a prose
+verdict that differs from the record, or that the grammar cannot read, is
+`VerdictConflict`, and an uppercase `APPROVE` or `REQUEST CHANGES` on a line
+with no key is `ReviewProseUnsafe`. The claude-fresh and grok-notools adapters
+retain their text contracts.
 
 The adapters normalise a return that a runner already obtained; dispatching
 the model (credentials, tools, pools) stays runner-owned, so an envelope
-whose `inputs` carry no `return_text` / `return_file` is `blocked`.
+whose `inputs` carry no `return_text` / `return_file` is `blocked`. The
+same holds for the omp model and thinking level: the runner chose them, so
+they arrive as envelope parameters and are only echoed back here.
 
 USAGE:
     python3 review_phase.py --envelope <envelope.json> [--out <result.json>]
     python3 review_phase.py --from-text <return.md> --backend <name>
                             [--target <what was reviewed>] [--out <result.json>]
+                            [--model <id> --thinking <level>]   (omp only)
     python3 review_phase.py --validate <findings.json>
 
 The envelope is a JSON object with exactly the six run-envelope keys
@@ -72,12 +91,15 @@ EXIT:
 from __future__ import annotations
 
 import argparse
+import bisect
 import copy
+import html.entities
 import json
 import math
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 from jev_client import _ANY_HEADING, JevClient, JevClosed, trim_payload
@@ -98,6 +120,220 @@ CHANGES_REQUESTED = "changes_requested"
 
 class ParseError(ValueError):
     """The return text does not carry the shape this backend promises."""
+
+
+class VerdictConflict(ParseError):
+    """The return states two different verdicts, so neither one can be taken.
+
+    A failure even with `adapters.jev_fallback` on: another adapter or Jev
+    would pick one of two verdicts the reviewer wrote.
+    """
+
+class ReviewProseUnsafe(ParseError):
+    """The OMP reply contains machine-unsafe prose outside its record."""
+
+
+class ReviewRecordMissing(ParseError):
+    """The OMP reply contains no fenced review-result record."""
+
+
+class ReviewRecordMultiple(ParseError):
+    """The OMP reply contains more than one fenced review-result record."""
+
+
+class ReviewRecordUnterminated(ParseError):
+    """The OMP reply contains an unclosed review-result record."""
+
+
+class ReviewRecordInvalidJSON(ParseError):
+    """The OMP review-result record is not valid JSON."""
+
+
+class ReviewRecordSchema(ParseError):
+    """The OMP review-result record does not conform to its closed schema."""
+
+
+def _single_verdict(verdicts: list[str]) -> str | None:
+    """The one verdict a return's verdict labels state, or None when it has none.
+
+    Every label counts, not the first or the last, so a later label never
+    overrides an earlier one: two labels that disagree raise VerdictConflict
+    whichever comes first. The same verdict repeated is still that verdict.
+    """
+    if len(set(verdicts)) > 1:
+        other = next(v for v in verdicts if v != verdicts[0])
+        raise VerdictConflict(
+            f"conflicting verdicts in the return: {verdicts[0]} and {other}"
+        )
+    return verdicts[0] if verdicts else None
+
+
+_VERDICT_HEADING = re.compile(r"^#{1,6}\s*")
+_VERDICT_WRAPPERS = (
+    ("**", "**"),
+    ("__", "__"),
+    ("*", "*"),
+    ("_", "_"),
+    ("`", "`"),
+    ("[", "]"),
+)
+_VERDICT_VALUE = re.compile(
+    r"(APPROVE(?:[ _-]+WITH[ _-]+FINDINGS)?|APPROVED|"
+    r"REQUEST[ _-]+CHANGES|cleared|flagged)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _peel_verdict_wrapper_prefix(text: str) -> tuple[str, list[str]]:
+    """Peel every adjacent wrapper prefix and return its closing sequence."""
+    closings: list[str] = []
+    while True:
+        wrapped = next(
+            (
+                (opening, closing)
+                for opening, closing in _VERDICT_WRAPPERS
+                if text.startswith(opening)
+                and len(text) > len(opening)
+                and not text[len(opening)].isspace()
+            ),
+            None,
+        )
+        if wrapped is None:
+            return text, closings
+        opening, closing = wrapped
+        text = text[len(opening):]
+        closings.append(closing)
+
+
+def _peel_leading_verdict_closings(
+    text: str, closings: list[str]
+) -> str | None:
+    for closing in reversed(closings):
+        text = text.lstrip()
+        if not text.startswith(closing):
+            return None
+        text = text[len(closing):]
+    return text.lstrip()
+
+
+def _peel_trailing_verdict_closings(
+    text: str, closings: list[str]
+) -> str | None:
+    for closing in closings:
+        text = text.rstrip()
+        if not text.endswith(closing):
+            return None
+        text = text[:-len(closing)]
+    return text.rstrip()
+
+
+def _verdict_label_value(line: str) -> tuple[str, bool] | None:
+    """Return a verdict label's raw value and whether it is a Markdown heading."""
+    text = line.strip()
+    heading = _VERDICT_HEADING.match(text)
+    if heading:
+        text = text[heading.end():].lstrip()
+
+    text, closings = _peel_verdict_wrapper_prefix(text)
+    if text[:7].casefold() != "verdict":
+        return None
+    text = text[7:]
+    if text and (text[0].isalnum() or text[0] == "-"):
+        return None
+    text = text.lstrip()
+
+    if closings:
+        after_key = _peel_leading_verdict_closings(text, closings)
+        if after_key is not None:
+            text = after_key
+            if text.startswith(":"):
+                text = text[1:].lstrip()
+            elif text:
+                return None
+        elif text.startswith(":"):
+            text = text[1:].lstrip()
+            after_colon = _peel_leading_verdict_closings(text, closings)
+            if after_colon is not None:
+                text = after_colon
+            else:
+                full_span = _peel_trailing_verdict_closings(text, closings)
+                if full_span is None:
+                    return None
+                text = full_span
+        else:
+            return None
+    elif text.startswith(":"):
+        text = text[1:].lstrip()
+    elif text:
+        return None
+
+    return text, bool(heading)
+
+
+def _normalize_verdict_value(
+    value: str, *, heading: bool
+) -> tuple[str, str] | None:
+    text = value.strip()
+    if heading and re.fullmatch(
+        r"\[\s*APPROVE\s*\|\s*REQUEST[ _-]+CHANGES\s*\]", text, re.IGNORECASE
+    ):
+        return APPROVED, "claude"
+
+    text, closings = _peel_verdict_wrapper_prefix(text)
+    matched = _VERDICT_VALUE.match(text)
+    if not matched:
+        return None
+    remainder = text[matched.end():]
+    if closings:
+        remainder = _peel_leading_verdict_closings(remainder, closings)
+        if remainder is None:
+            return None
+    elif remainder.startswith("_"):
+        return None
+
+    token = re.sub(r"[ _-]+", " ", matched.group(1).upper())
+    if token == "APPROVED" and not heading:
+        return None
+    if token in ("APPROVE", "APPROVE WITH FINDINGS", "APPROVED"):
+        return APPROVED, "claude"
+    if token == "CLEARED":
+        return APPROVED, "grok"
+    if token == "FLAGGED":
+        return CHANGES_REQUESTED, "grok"
+    return CHANGES_REQUESTED, "claude"
+
+
+def _verdict_labels(
+    lines: list[str],
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Collect normalized labels and the values that cannot be normalized."""
+    labels: list[tuple[str, str]] = []
+    unrecognized: list[str] = []
+    for index, line in enumerate(lines):
+        labeled = _verdict_label_value(line)
+        if labeled is None:
+            continue
+        value, heading = labeled
+        if not value:
+            value = next(
+                (item.strip() for item in lines[index + 1:] if item.strip()), ""
+            )
+        normalized = _normalize_verdict_value(value, heading=heading)
+        if normalized is None:
+            unrecognized.append(value or line.strip())
+        else:
+            labels.append(normalized)
+    return labels, unrecognized
+
+
+def _extract_verdict(lines: list[str], vocabulary: str) -> str | None:
+    labels, unrecognized = _verdict_labels(lines)
+    _single_verdict([outcome for outcome, _ in labels])
+    if unrecognized:
+        raise ParseError(f"unrecognized verdict value: {unrecognized[0]!r}")
+    return next(
+        (outcome for outcome, family in labels if family == vocabulary), None
+    )
 
 
 # --- text helpers shared by the adapters -------------------------------------
@@ -244,23 +480,12 @@ def _finding(text: str, rule: str, severity: str) -> dict:
 
 # --- backend adapters --------------------------------------------------------
 
-_GROK_VERDICT = re.compile(r"^`?\*{0,2}(cleared|flagged)\b", re.IGNORECASE)
-# The bare `VERDICT: flagged — …` shape carries the value on the heading's
-# own line, not the next one — the generic `_HEADING` match discards it.
-# The whitespace after the colon and the whitespace after optional `*` marks
-# are two runs only when a `*` sits between them, so one long space run is
-# never split two ways (the `\s*\**\s*` form it replaces was quadratic).
-_GROK_VERDICT_LABEL = re.compile(
-    r"^\s*\**VERDICT\**\s*:\s*(?:\*+\s*)?(cleared|flagged)\b", re.IGNORECASE
-)
-
-
 def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
     """`## FINDINGS` bullets + `## VERDICT <cleared|flagged> — <sentence>`."""
     lines = _review_lines(text)
+    verdict = _extract_verdict(lines, "grok")
     bullets: list[str] | None = None
     unparsed = False
-    verdict: str | None = None
     i = 0
     while i < len(lines):
         heading = _HEADING.match(lines[i])
@@ -271,17 +496,6 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
         if title.startswith("FINDINGS"):
             bullets, unparsed, i = _bullets(lines, i + 1)
             continue
-        if title.startswith("VERDICT"):
-            inline = _GROK_VERDICT_LABEL.match(lines[i])
-            if inline:
-                verdict = inline.group(1).lower()
-            else:
-                for candidate in lines[i + 1:]:
-                    if candidate.strip():
-                        matched = _GROK_VERDICT.match(candidate.strip())
-                        if matched:
-                            verdict = matched.group(1).lower()
-                        break
         i += 1
     if bullets is None:
         raise ParseError("no `## FINDINGS` section in the return")
@@ -292,23 +506,10 @@ def parse_grok_notools(text: str) -> tuple[str, list[dict]]:
         )
     if verdict is None:
         raise ParseError("no `## VERDICT` line reading cleared or flagged")
-    outcome = CHANGES_REQUESTED if verdict == "flagged" else APPROVED
-    severity = "error" if outcome == CHANGES_REQUESTED else "warning"
-    return outcome, [_finding(b, "finding", severity) for b in bullets]
+    severity = "error" if verdict == CHANGES_REQUESTED else "warning"
+    return verdict, [_finding(b, "finding", severity) for b in bullets]
 
 
-# These run on every line of a review. The whitespace after the colon and the
-# whitespace after an optional `[` or run of `*` marks are two runs only when
-# a mark sits between them, so one long space run is never split two ways (the
-# `\s*\[?\s*` and `\s*\**\s*` forms they replace were quadratic).
-_CLAUDE_VERDICT_HEADING = re.compile(
-    r"^\s*#{1,6}\s*\**Verdict\**\s*:\s*(?:\[\s*)?(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)",
-    re.IGNORECASE,
-)
-_CLAUDE_VERDICT_LABEL = re.compile(
-    r"^\s*\**VERDICT\**\s*:\s*(?:\*+\s*)?(APPROVE(?:[ _-]WITH[ _-]FINDINGS)?|REQUEST[ _-]CHANGES)\b",
-    re.IGNORECASE,
-)
 _CLAUDE_SECTIONS = (
     ("ISSUES", "issue"),
     ("MINOR NOTES", "minor"),
@@ -321,14 +522,10 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     """The reviewer agent's block, the headless `VERDICT:` shape, or the
     `review` skill's tagged bullets."""
     lines = _review_lines(text)
-    verdict: str | None = None
-    for line in lines:
-        matched = _CLAUDE_VERDICT_HEADING.match(line) or _CLAUDE_VERDICT_LABEL.match(line)
-        if matched:
-            token = matched.group(1).upper()
-            verdict = CHANGES_REQUESTED if token.startswith("REQUEST") else APPROVED
-        elif _CLEAN_SENTINEL.match(line):
-            verdict = verdict or APPROVED
+    # The clean sentinel only stands in when there is no verdict label at all.
+    verdict = _extract_verdict(lines, "claude")
+    if verdict is None and any(_CLEAN_SENTINEL.match(line) for line in lines):
+        verdict = APPROVED
 
     collected: list[tuple[str, str]] = []  # (rule, bullet text)
     unparsed_sections: list[str] = []
@@ -387,10 +584,574 @@ def parse_claude_fresh(text: str) -> tuple[str, list[dict]]:
     return verdict, shaped
 
 
+_OMP_REVIEW_RECORD_FIELDS = {"verdict", "bugs", "nits", "reviewed_head"}
+_OMP_REVIEWED_HEAD = re.compile(r"[0-9a-f]{40}")
+# A CommonMark raw HTML tag: an open tag (a tag name directly after `<`, its
+# attributes, an optional `/`) or a closing tag (a tag name directly after
+# `</`). Its attribute whitespace may hold a line break, so it is searched on
+# a whole paragraph. That whitespace is the renderer's: space, tab, line feed,
+# vertical tab, form feed and carriage return. Prose holding one is refused,
+# never stripped. Any other `<` is text a reader sees (`n < 0`, `Map<K, V>`,
+# `a <- b`).
+_OMP_HTML_TAG = re.compile(
+    r"<(?:[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t\n\v\f\r]+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:[ \t\n\v\f\r]*=[ \t\n\v\f\r]*(?:[^ \t\n\v\f\r\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t\n\v\f\r]*/?|/[A-Za-z][A-Za-z0-9-]*[ \t\n\v\f\r]*)>"
+)
+# Raw HTML whose letters a reader does not see: a tag, or a `<!` or `<?`
+# start (a comment, declaration, CDATA section or processing instruction).
+_OMP_RAW_HTML = re.compile(r"<[!?]|" + _OMP_HTML_TAG.pattern)
+# A CommonMark HTML block start: a line beginning, after up to three spaces,
+# with `<` and a letter, `/`, `!` or `?`. It can interrupt a paragraph and
+# runs to the next blank line, so every prose line is checked for one.
+_OMP_HTML_BLOCK_START = re.compile(r" {0,3}<[A-Za-z/!?]")
+# A fence opening, which ends a paragraph for the renderer and so for the
+# reading: up to three spaces, then three or more backticks whose info string
+# holds no backtick, or three or more tildes. It is matched on the raw line.
+_OMP_FENCE_LINE = re.compile(r" {0,3}(?:`{3,}(?![^`]*`)|~{3,})")
+# A line that starts like a backtick fence. One that is not a fence opening
+# (its info string holds a backtick) is refused: the renderer keeps it inside
+# the paragraph, but a record fence would open on it.
+_OMP_BACKTICK_RUN = re.compile(r" {0,3}`{3,}")
+# Every character reference an HTML5 decoder consumes: any `&...;`, a numeric
+# or hex reference with or without its semicolon (`&#101`, `&#x65`), and the
+# legacy named references HTML5 decodes without one (`&shy`, `&amp`).
+_OMP_HTML_REFERENCE = re.compile(
+    r"&(?:[#A-Za-z0-9]+;|#[0-9]|#[xX][0-9A-Fa-f]|"
+    + "|".join(
+        sorted(name for name in html.entities.html5 if not name.endswith(";"))
+    )
+    + ")"
+)
+_OMP_UNSAFE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Zl", "Zp", "Co", "Cn", "Cs"})
+_OMP_UNSAFE_FILLERS = frozenset({"\u115f", "\u1160", "\u2800", "\u3164", "\uffa0"})
+# The Latin fold reads a letter's own Unicode name; there is no lookalike
+# table. A name with one letter after `LETTER` (or `LETTER DOTLESS`), or a
+# small capital, folds to that letter; every other letter stays as it is.
+_OMP_LATIN_LETTER_NAME = re.compile(
+    r"LATIN (SMALL|CAPITAL) LETTER (?:DOTLESS )?([A-Z])(?: WITH [A-Z ]+)?"
+)
+_OMP_LATIN_SMALL_CAPITAL_NAME = re.compile(r"LATIN LETTER SMALL CAPITAL ([A-Z])")
+_OMP_LETTER = re.compile(r"[^\W\d_]")
+# A word: a maximal run of letters, digits, `_`, `-` and `'`.
+_OMP_WORD = re.compile(r"[\w'-]+")
+# The key is the ASCII word `verdict` on a folded, casefolded line; any run of
+# non-letters may separate its letters. The leading bound is checked in
+# `_omp_verdict_keys`, since its camel-case rule reads the uncasefolded line.
+_OMP_VERDICT_KEY = re.compile(
+    r"[\W\d_]*".join("verdict") + r"s?(?![^\W\d_])"
+)
+# A key candidate: the key's grammar with each letter widened to that ASCII
+# letter or any non-ASCII letter, read at every start on the casefolded line.
+# Its letters may stand apart (`V/Ε/R/D/I/C/T`), so the mixed-word rule reads
+# it as one word.
+_OMP_VERDICT_KEY_CANDIDATE = re.compile(
+    "(?=("
+    + r"[\W\d_]*".join(rf"(?:{letter}|[^\W\d_A-Za-z])" for letter in "verdict")
+    + r")s?(?![^\W\d_]))"
+)
+# A value token: the letters of `approve`, or of `request changes`, with any
+# run of non-letters (a line break included) between consecutive letters and
+# no letter adjoining it on either side. It is read on a casefolded paragraph,
+# with or without a key, so no text between a key and its value matters. It
+# is read both after NFKC and as written, since NFKC turns some symbols that
+# are not letters into letters (`™` into `TM`), which would adjoin a token
+# that is whole as written.
+_OMP_VALUE_TOKEN = re.compile(
+    r"(?<![^\W\d_])(?:"
+    + r"[\W\d_]*".join("approve")
+    + "|"
+    + r"[\W\d_]*".join("request")
+    + r"[\W\d_]*"
+    + r"[\W\d_]*".join("changes")
+    + r")(?![^\W\d_])"
+)
+# An inline link or image, a full or collapsed reference link, or an image in
+# any form: the inline constructs besides raw HTML whose letters a reader
+# does not see.
+_OMP_LINK = re.compile(r"\]\(|\]\[|!\[")
+_OMP_LINE_ENDINGS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+# A CommonMark line with its ending, which is `\n`, `\r\n` or `\r` and nothing
+# else. `str.splitlines` also breaks at `\v`, `\f`, `\x1c`-`\x1e`, `\x85`,
+# U+2028 and U+2029, which the renderer keeps inside a line.
+_OMP_COMMONMARK_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+
+
+def _latin_fold(character: str) -> str:
+    """One non-ASCII Latin letter as the ASCII letter Unicode says it is.
+
+    A letter whose name begins `LATIN ` folds when its NFKD decomposition
+    begins with an ASCII letter (é, ü, İ), or when its name is one letter
+    with an optional `DOTLESS` and `WITH ...` (ı, ø) or a small capital (ᴠ,
+    ʀ), keeping the case the name states. Anything else is returned as is.
+    """
+    if character.isascii() or not character.isalpha():
+        return character
+    name = unicodedata.name(character, "")
+    if not name.startswith("LATIN "):
+        return character
+    first = unicodedata.normalize("NFKD", character)[:1]
+    if first.isascii() and first.isalpha():
+        return first
+    named = _OMP_LATIN_LETTER_NAME.fullmatch(name)
+    if named:
+        letter = named.group(2)
+        return letter if named.group(1) == "CAPITAL" else letter.lower()
+    small_capital = _OMP_LATIN_SMALL_CAPITAL_NAME.fullmatch(name)
+    if small_capital:
+        return small_capital.group(1).lower()
+    return character
+
+
+def _canonicalize_omp_prose(text: str) -> tuple[str, str]:
+    """A line as written, NFKC, then the Latin fold: `(cased, cased.casefold())`.
+
+    Nothing is deleted: every character maps to itself or to its fold. The
+    cased copy keeps letter case for the camel-case key bound and is what the
+    markup checks read; the casefolded copy is what keys and values match.
+    """
+    return _fold_omp_prose_as_written(unicodedata.normalize("NFKC", text))
+
+
+def _fold_omp_prose_as_written(text: str) -> tuple[str, str]:
+    """A line with the Latin fold and no NFKC: `(cased, cased.casefold())`.
+
+    Keys and value tokens are also read on this copy, so a symbol NFKC turns
+    into a letter cannot hide a token that is whole as written. It can only
+    add a value or a refusal.
+    """
+    cased = "".join(_latin_fold(character) for character in text)
+    return cased, cased.casefold()
+
+
+def _validate_omp_prose(lines: list[str | None]) -> None:
+    """Refuse characters that make machine-addressed prose ambiguous."""
+    for line in lines:
+        if line is None:
+            continue
+        if _OMP_HTML_REFERENCE.search(line):
+            raise ReviewProseUnsafe(
+                "ReviewProseUnsafe: HTML character reference outside review record"
+            )
+        for character in line:
+            category = unicodedata.category(character)
+            if category in _OMP_UNSAFE_CATEGORIES:
+                raise ReviewProseUnsafe(
+                    "ReviewProseUnsafe: "
+                    f"U+{ord(character):04X} category {category} outside review record"
+                )
+            if character in _OMP_UNSAFE_FILLERS:
+                raise ReviewProseUnsafe(
+                    "ReviewProseUnsafe: "
+                    f"filler U+{ord(character):04X} outside review record"
+                )
+
+
+def _omp_commonmark_lines(lines: list[str | None]) -> list[str | None]:
+    """The prose split where the renderer splits lines; a record stays `None`.
+
+    The prose arrives split by `str.splitlines` with its line endings kept, so
+    each run between records is joined back as written and split again.
+    """
+    split: list[str | None] = []
+    run: list[str] = []
+    for line in lines + [None]:
+        if line is not None:
+            run.append(line)
+            continue
+        split.extend(_OMP_COMMONMARK_LINE.findall("".join(run)))
+        split.append(None)
+        run = []
+    return split[:-1]
+
+
+def _omp_blank(line: str) -> bool:
+    """A CommonMark blank line: only spaces and tabs before its line ending."""
+    return not line.rstrip("\r\n").strip(" \t")
+
+
+def _omp_prose_segments(
+    lines: list[str | None], canonical: list[tuple[str, str] | None]
+) -> list[list[int]]:
+    """The prose paragraphs, as runs of line indexes.
+
+    A record, a blank line or a fence line ends a paragraph, which is where
+    the renderer ends one too. Both are decided on the line as written, never
+    after NFKC, which turns a no-break space into a space and a fullwidth
+    backtick or tilde into a fence character.
+    """
+    segments: list[list[int]] = []
+    current: list[int] = []
+    for index, item in enumerate(canonical):
+        if item is None or _omp_blank(lines[index]) or _OMP_FENCE_LINE.match(lines[index]):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(index)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _refuse_omp_markup(
+    lines: list[str | None],
+    canonical: list[tuple[str, str] | None],
+    segments: list[list[int]],
+) -> None:
+    """Refuse raw HTML, links and images, whose letters a reader does not see.
+
+    An HTML block start is refused on any line, since it can interrupt a
+    paragraph. A tag or a `<!` or `<?` start, and then a link or an image, are
+    refused on each whole paragraph, since a tag's attributes may span lines.
+    Each is decided on the text as written, which is what the renderer reads:
+    NFKC turns a fullwidth quote inside an attribute value into a real one and
+    so would hide the tag. The NFKC text is searched too, and can only add a
+    refusal. A line that starts with three or more backticks but is not a
+    fence opening is refused first, as written.
+    """
+    for line in lines:
+        if (
+            line is not None
+            and _OMP_BACKTICK_RUN.match(line)
+            and not _OMP_FENCE_LINE.match(line)
+        ):
+            raise ReviewProseUnsafe(
+                "ReviewProseUnsafe: backtick line that is not a fence outside review record"
+            )
+    readings = [
+        lines,
+        [None if item is None else item[0] for item in canonical],
+    ]
+    for reading in readings:
+        for line in reading:
+            if line is not None and _OMP_HTML_BLOCK_START.match(line):
+                raise ReviewProseUnsafe(
+                    "ReviewProseUnsafe: raw HTML outside review record"
+                )
+    paragraphs = [
+        "".join(reading[index] for index in segment)
+        for reading in readings
+        for segment in segments
+    ]
+    for paragraph in paragraphs:
+        if _OMP_RAW_HTML.search(paragraph):
+            raise ReviewProseUnsafe("ReviewProseUnsafe: raw HTML outside review record")
+    for paragraph in paragraphs:
+        if _OMP_LINK.search(paragraph):
+            raise ReviewProseUnsafe(
+                "ReviewProseUnsafe: Markdown link outside review record"
+            )
+
+
+def _refuse_mixed_words(canonical: list[tuple[str, str] | None]) -> None:
+    """Refuse a word holding both ASCII and non-ASCII letters, reply-wide.
+
+    The ASCII letters around a lookalike are the tell, so a homoglyph key is
+    refused here rather than matched or missed. A key candidate counts as one
+    word, however its letters are separated.
+    """
+    for item in canonical:
+        if item is None:
+            continue
+        words = _OMP_WORD.findall(item[0]) + [
+            match.group(1) for match in _OMP_VERDICT_KEY_CANDIDATE.finditer(item[1])
+        ]
+        for word in words:
+            letters = [character for character in word if character.isalpha()]
+            if any(character.isascii() for character in letters) and not all(
+                character.isascii() for character in letters
+            ):
+                raise ReviewProseUnsafe(
+                    f"ReviewProseUnsafe: mixed-script word {word!r}"
+                )
+
+
+def _fenced_review_records(
+    text: str,
+) -> tuple[list[tuple[str, bool]], list[str | None]]:
+    """Return review-result bodies and prose, marking each record opening."""
+    raw_lines = text.splitlines(keepends=True)
+    lines = [line.rstrip(_OMP_LINE_ENDINGS) for line in raw_lines]
+    records: list[tuple[str, bool]] = []
+    prose: list[str | None] = []
+    index = 0
+    while index < len(lines):
+        opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", lines[index])
+        if opening is None:
+            prose.append(raw_lines[index])
+            index += 1
+            continue
+        marker = opening.group(1)
+        info = opening.group(2).strip()
+        closing = re.compile(
+            rf" {{0,3}}{re.escape(marker[0])}{{{len(marker)},}}[ \t]*"
+        )
+        end = index + 1
+        while end < len(lines) and closing.fullmatch(lines[end]) is None:
+            end += 1
+        closed = end < len(lines)
+        content_end = end if closed else len(lines)
+        if info == "review-result":
+            records.append(("".join(raw_lines[index + 1:content_end]), closed))
+            prose.append(None)
+        else:
+            prose.extend(raw_lines[index:(end + 1 if closed else len(lines))])
+        if not closed:
+            break
+        index = end + 1
+    return records, prose
+
+
+def _omp_verdict_keys(cased: str, folded: str) -> list[re.Match[str]]:
+    """Every `verdict` key on a line, with its leading bound applied.
+
+    A key starts the line, follows a non-letter, or follows an ASCII
+    lowercase letter as an uppercase `V` (`FinalVerdict`); a key after any
+    other letter is part of a longer word (`never dictate`, `SERVER_DICT`).
+    """
+    origin = [
+        index for index, character in enumerate(cased) for _ in character.casefold()
+    ]
+    keys = []
+    for match in _OMP_VERDICT_KEY.finditer(folded):
+        start = match.start()
+        if start and _OMP_LETTER.match(folded[start - 1]):
+            at = origin[start]
+            if not (cased[at] == "V" and at and "a" <= cased[at - 1] <= "z"):
+                continue
+        keys.append(match)
+    return keys
+
+
+def _omp_prose_verdicts(lines: list[str | None]) -> list[str]:
+    """Every value token in the prose, read as written; nothing is deleted.
+
+    Unsafe characters, then backtick lines that are not fences, raw HTML,
+    links and images, then mixed-script words are refused before anything is
+    matched. Every CommonMark structure test reads the line as written; the
+    NFKC text feeds token matching and can only add a markup refusal. A
+    value token is read on each paragraph and belongs to the line it starts
+    on. A line with a key
+    must hold a value token, unless it is key-only and the next non-blank item
+    is the record or a line that holds one; it never looks back. Keys and
+    tokens are read after NFKC and again as written (the Latin fold, no
+    NFKC); the values are the union of both readings, and a key found as
+    written must find a value in that union. The NFKC reading's key check is
+    unchanged, so the second reading can only add a value or a refusal.
+    """
+    lines = _omp_commonmark_lines(lines)
+    _validate_omp_prose(lines)
+    canonical = [
+        None if line is None else _canonicalize_omp_prose(line)
+        for line in lines
+    ]
+    segments = _omp_prose_segments(lines, canonical)
+    _refuse_omp_markup(lines, canonical, segments)
+    _refuse_mixed_words(canonical)
+    as_written = [
+        None if line is None else _fold_omp_prose_as_written(line)
+        for line in lines
+    ]
+    found: list[dict[int, list[str]]] = []
+    for reading in (canonical, as_written):
+        reading_values: dict[int, list[str]] = {
+            index: [] for index, item in enumerate(reading) if item is not None
+        }
+        for segment in segments:
+            # Casefold maps each code point on its own, so a paragraph's
+            # casefold is its lines' casefolds joined, and a token's offset
+            # finds its line.
+            starts = []
+            offset = 0
+            for index in segment:
+                starts.append(offset)
+                offset += len(reading[index][1])
+            paragraph = "".join(reading[index][1] for index in segment)
+            for token in _OMP_VALUE_TOKEN.finditer(paragraph):
+                line = segment[bisect.bisect_right(starts, token.start()) - 1]
+                reading_values[line].append(
+                    APPROVED if token.group().startswith("a") else CHANGES_REQUESTED
+                )
+        found.append(reading_values)
+    nfkc_values, written_values = found
+    values = {
+        index: nfkc_values[index]
+        + [value for value in written_values[index] if value not in nfkc_values[index]]
+        for index in nfkc_values
+    }
+    verdicts = []
+    for index, item in enumerate(canonical):
+        if item is None:
+            continue
+        for reading, key_values in ((canonical, nfkc_values), (as_written, values)):
+            cased, folded = reading[index]
+            keys = _omp_verdict_keys(cased, folded)
+            if not keys or key_values[index]:
+                continue
+            key_only = _OMP_LETTER.search(folded, keys[-1].end()) is None
+            following = next(
+                (
+                    later
+                    for later in range(index + 1, len(canonical))
+                    if canonical[later] is None or not _omp_blank(lines[later])
+                ),
+                None,
+            )
+            if following is None:
+                # Nothing follows a key-only line at the end of the reply.
+                confirmed = False
+            else:
+                confirmed = canonical[following] is None or bool(key_values[following])
+            if not key_only or not confirmed:
+                raise VerdictConflict(
+                    "VerdictConflict: verdict key without a verdict value"
+                )
+        verdicts.extend(values[index])
+    return verdicts
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    record = {}
+    for key, value in pairs:
+        if key in record:
+            raise ReviewRecordSchema(
+                f"ReviewRecordSchema: duplicate field {key!r}"
+            )
+        record[key] = value
+    return record
+
+
+def _omp_review_record(text: str) -> tuple[dict, list[str | None]]:
+    records, prose = _fenced_review_records(text)
+    if not records:
+        raise ReviewRecordMissing(
+            "ReviewRecordMissing: expected exactly one fenced `review-result` record"
+        )
+    if len(records) > 1:
+        raise ReviewRecordMultiple(
+            f"ReviewRecordMultiple: found {len(records)} fenced `review-result` records"
+        )
+    body, closed = records[0]
+    if not closed:
+        raise ReviewRecordUnterminated(
+            "ReviewRecordUnterminated: fenced `review-result` record is not closed"
+        )
+    try:
+        record = json.loads(body, object_pairs_hook=_unique_json_object)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ReviewRecordInvalidJSON(
+            f"ReviewRecordInvalidJSON: {exc.msg}"
+        ) from exc
+    if not isinstance(record, dict):
+        raise ReviewRecordSchema("ReviewRecordSchema: record must be a JSON object")
+    missing = sorted(_OMP_REVIEW_RECORD_FIELDS - record.keys())
+    extra = sorted(record.keys() - _OMP_REVIEW_RECORD_FIELDS)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing {missing}")
+        if extra:
+            details.append(f"unexpected {extra}")
+        raise ReviewRecordSchema("ReviewRecordSchema: " + ", ".join(details))
+    verdict = record["verdict"]
+    if not isinstance(verdict, str):
+        raise ReviewRecordSchema("ReviewRecordSchema: verdict must be a string")
+    if verdict not in ("APPROVE", "REQUEST CHANGES"):
+        raise ReviewRecordSchema(f"ReviewRecordSchema: unknown verdict {verdict!r}")
+    for field in ("bugs", "nits"):
+        values = record[field]
+        if not isinstance(values, list):
+            raise ReviewRecordSchema(f"ReviewRecordSchema: {field} must be a list")
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ReviewRecordSchema(
+                f"ReviewRecordSchema: {field} entries must be non-empty strings"
+            )
+        # A JSON-escaped lone surrogate survives json.loads but cannot be
+        # written as UTF-8, so the phase result could never be emitted.
+        if any("\ud800" <= character <= "\udfff" for value in values for character in value):
+            raise ReviewRecordSchema(
+                f"ReviewRecordSchema: {field} entries must not contain surrogate code points"
+            )
+    if verdict == "APPROVE" and record["bugs"]:
+        raise ReviewRecordSchema(
+            "ReviewRecordSchema: APPROVE record must have an empty bugs list"
+        )
+    reviewed_head = record["reviewed_head"]
+    if (
+        not isinstance(reviewed_head, str)
+        or _OMP_REVIEWED_HEAD.fullmatch(reviewed_head) is None
+    ):
+        raise ReviewRecordSchema(
+            "ReviewRecordSchema: reviewed_head must be a 40-character lowercase hex commit"
+        )
+    return record, prose
+
+
+def _without_interval_record(text: str) -> str:
+    """`text` without its trailing INTERVAL record, line endings kept."""
+    raw_lines = text.splitlines(keepends=True)
+    start, end = _record_block(text.splitlines())
+    return "".join(raw_lines[:start] + raw_lines[end:])
+
+
+def parse_omp(text: str) -> tuple[str, list[dict]]:
+    """Parse one closed OMP review record; prose can only confirm or veto it.
+
+    The trailing INTERVAL record is run_phase's, so it is not read as prose.
+    """
+    record, prose = _omp_review_record(_without_interval_record(text))
+    verdict = (
+        APPROVED if record["verdict"] == "APPROVE" else CHANGES_REQUESTED
+    )
+    for prose_verdict in _omp_prose_verdicts(prose):
+        if prose_verdict != verdict:
+            raise VerdictConflict(
+                "VerdictConflict: prose verdict "
+                f"{prose_verdict!r} disagrees with record verdict {record['verdict']!r}"
+            )
+    findings = [
+        _finding(item, "bug", "error") for item in record["bugs"]
+    ] + [
+        _finding(item, "minor", "info") for item in record["nits"]
+    ]
+    return verdict, findings
+
+
 ADAPTERS = {
     "claude-fresh": parse_claude_fresh,
     "grok-notools": parse_grok_notools,
+    "omp": parse_omp,
 }
+
+# Backends whose phase result names the lane and the served model. The values
+# are the envelope `inputs` keys that must carry them.
+OMP_LANE = "omp"
+OMP_PARAMETERS = ("model", "thinking")
+# The thinking levels `omp --thinking` accepts.
+OMP_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "auto")
+# A model id as a command-line value: one token, no spaces or line breaks.
+_OMP_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*")
+
+
+def omp_attribution(model: object, thinking: object) -> dict:
+    """The attribution an omp review carries, from the runner's own parameters.
+
+    Raises ValueError when the model is missing or not a single token, or the
+    thinking level is not one omp accepts; nothing here supplies a default, so
+    the record always names what the runner actually asked for.
+    """
+    if not isinstance(model, str) or not _OMP_MODEL.fullmatch(model):
+        raise ValueError(
+            f"omp needs inputs.model as a single non-empty token, got {model!r}"
+        )
+    if not isinstance(thinking, str) or thinking not in OMP_THINKING_LEVELS:
+        raise ValueError(
+            "omp needs inputs.thinking as one of "
+            f"{', '.join(OMP_THINKING_LEVELS)}, got {thinking!r}"
+        )
+    return {"lane": OMP_LANE, "model": model, "thinking": thinking}
 
 
 # --- the schema validator ----------------------------------------------------
@@ -689,6 +1450,12 @@ def run_phase(envelope: object) -> dict:
             None,
             None,
         )
+    attribution = None
+    if backend == OMP_LANE:
+        try:
+            attribution = omp_attribution(*(inputs.get(k) for k in OMP_PARAMETERS))
+        except ValueError as exc:
+            return _result("blocked", str(exc), None, None)
     text = inputs.get("return_text")
     if text is None and inputs.get("return_file"):
         try:
@@ -710,14 +1477,35 @@ def run_phase(envelope: object) -> dict:
     try:
         intervals = _require_intervals(text)
     except ParseError as exc:
-        return _result("failure", f"{backend}: {exc}", text, None)
+        result = _result("failure", f"{backend}: {exc}", text, None)
+    else:
+        result = _parse_return(envelope, backend, text, intervals)
+    if attribution is not None:
+        result["attribution"] = attribution
+    return result
+
+
+def _parse_return(
+    envelope: dict, backend: str, text: str, intervals: list[dict]
+) -> dict:
     selected = ADAPTERS[backend]
     try:
         verdict, findings = selected(text)
     except ParseError as exc:
-        if not _jev_fallback_enabled(envelope):
+        # OMP's structured review record is mandatory even with fallback on:
+        # another adapter or Jev would reintroduce a text-derived verdict.
+        # A conflict in any backend likewise cannot be resolved by choosing
+        # one of the verdicts the reviewer wrote.
+        if (
+            backend == OMP_LANE
+            or isinstance(exc, VerdictConflict)
+            or not _jev_fallback_enabled(envelope)
+        ):
             return _result("failure", f"{backend}: {exc}", text, None)
-        parsed = _try_other_adapters(backend, text)
+        try:
+            parsed = _try_other_adapters(backend, text)
+        except VerdictConflict as exc:
+            return _result("failure", f"{backend}: {exc}", text, None)
         if parsed is None:
             return _consult_jev(backend, text, intervals)
         verdict, findings = parsed
@@ -740,6 +1528,8 @@ def _try_other_adapters(backend: str, text: str) -> tuple[str, list[dict]] | Non
             continue
         try:
             return adapter(text)
+        except VerdictConflict:
+            raise
         except ParseError:
             continue
     return None
@@ -898,6 +1688,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", choices=sorted(ADAPTERS), help="adapter for --from-text")
     parser.add_argument("--target", default="", help="what was reviewed, for --from-text")
     parser.add_argument("--out", metavar="FILE", help="also write the phase result here")
+    parser.add_argument("--model", help="for --backend omp: the model id the runner served")
+    parser.add_argument("--thinking", help="for --backend omp: the thinking level the runner set")
     args = parser.parse_args(argv)
 
     if args.validate:
@@ -925,6 +1717,9 @@ def main(argv: list[str] | None = None) -> int:
             "adapters": {},
             "budget": {},
         }
+        if args.backend == OMP_LANE:
+            envelope["inputs"]["model"] = args.model
+            envelope["inputs"]["thinking"] = args.thinking
         return _emit(run_phase(envelope), args.out)
 
     try:
