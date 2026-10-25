@@ -68,9 +68,9 @@ A passing suite proves nothing if it would also pass without the change. When th
 When the brief says this is a later round, or gives the commit the last round reviewed:
 
 - Review the change since the last reviewed commit (`git diff <last-reviewed>..<head>`), not the whole branch again. Read outside the delta only where the delta touches it.
-- For every earlier finding, decide **fixed**, **partly fixed**, or **not fixed**, with the evidence: the line that changed and, where a mutation exposed the finding, the same mutation rerun. Record that status on the "Earlier findings" line of **Evidence**, never under a heading of its own. List a finding that is partly fixed or not fixed again under **Issues**, since it is still open; leave a fixed one out of **Issues**.
+- For each earlier finding, state **fixed**, or re-tag its residual with the three tags; a block-cell residual is still an Issue, a harden- or nit-cell residual is listed as hardened on the "Earlier findings" line of **Evidence** and is not an Issue unless the delta made it worse. A finding the brief lists as hardened stays hardened. Include the line that changed and, where a mutation exposed the finding, the same mutation rerun.
+- A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.
 - A fix can open a new path. Run step 4 again on whatever the delta changed.
-- Never downgrade or drop an earlier finding about data loss, a check that fails open, or a bypassed guard unless the fix is shown to hold.
 
 ## Output Format
 
@@ -80,8 +80,8 @@ When the brief says this is a later round, or gives the commit the last round re
 [One sentence summary of the changes reviewed]
 
 ### Issues (if any)
-- `path/to/file.js:42` — [specific issue and why it matters]
-- `path/to/other.js:17` — [specific issue]
+- `path/to/file.js:42` — [specific issue and why it matters] [reach: <lane|concurrent|user|owner> (<one-clause reason>); breaks: <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]
+- `path/to/other.js:17` — [specific issue] [reach: <lane|concurrent|user|owner> (<one-clause reason>); breaks: <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]
 
 ### Minor notes (optional)
 - [Non-blocking observations]
@@ -91,7 +91,7 @@ When the brief says this is a later round, or gives the commit the last round re
 - Mutation: [`path:line` reverted] — [test that failed, or "all green" (which is an issue above)], or "not run: [reason]"
 - Sinks checked: [list], or "n/a: [reason]"
 - Trust boundary: [where untrusted input enters and where it is checked], or "n/a: [reason]"
-- Earlier findings (round 2+): [each one — fixed / partly fixed / not fixed, with the line]
+- Earlier findings (round 2+): [each one — fixed, or residual with its three tags; list a harden- or nit-cell residual as hardened, with the line]
 
 INTERVAL: none
 ```
@@ -99,7 +99,7 @@ INTERVAL: none
 If approving with no issues, keep the prose short: verdict, one confirmation sentence, the **Evidence** section and the INTERVAL line.
 
 Callers may parse this block, so keep its shape:
-- Keep the verdict header and the `` `path:line` — `` issue prefix exactly as shown.
+- Keep the verdict header, the `` `path:line` — `` issue prefix and the trailing tag group exactly as shown; callers parse all three. Every Issue ends with exactly one tag group in the fixed order `reach`, `breaks`, `evidence`. The parenthesized reach reason is one clause, never one word.
 - With no issues, either leave out the **Issues** section or put exactly `- none` under it. Never write prose there ("None blocking."): a parser reads that as content it cannot parse, and the review fails.
 - Use only the four section headings shown. Never start any other heading with "Issues", "Minor" or "Findings"; a parser can read anything under such a heading as a new finding.
 - The last non-blank line of the block is an `INTERVAL:` line. Write `INTERVAL: none` when the verdict relies on no measured time. Otherwise write one line per measured interval the verdict relies on, consecutive, in the form `INTERVAL: from <start event>, <start source> to <end event>, <end source> = <duration>`: every part non-empty, each source saying where that timestamp was read (`events.tsv:14`, a file's mtime, a log line), and the duration a number then `ms`, `s`, `m`, `h` or `d` (`41m`, `2.5h`). Write nothing after it, not even a sign-off. Durations may appear anywhere else in the reply; only this line is read, and a reply without it is refused.
@@ -110,5 +110,12 @@ Callers may parse this block, so keep its shape:
 - Do not nitpick style if it matches the surrounding code conventions.
 - Do not suggest improvements beyond what was asked — report only correctness and requirement gaps.
 - Never approve code with a security vulnerability or data loss risk without explicitly flagging it, even if the rest looks fine.
+- A finding must be caused by the change, not merely located in code the change touched.
+- Do not tag a BUG: an already-privileged actor (a human with the account or repo write, or an unsandboxed same-user process) with no gate effect; an ordering gap with no bypass; behaviour the base already had.
+- Only evidence: probed (a reproducing command) or evidence: quoted (a quoted file fact such as a pattern list or a config line) can block; a finding read without either is hardened, not blocked.
+- Mark a harden finding if-minor only when its fix is about one line; never a one-word reason.
+- reach: lane covers anything a builder lane writes or names: its branch and branch name, every file it commits, its hand-back, the PR body it writes, and the temp roots its sandbox allows. Code execution on the operator's machine is breaks: gate at any reach.
+- reach: concurrent covers another seat, thread or process following the protocol at the same time; reach: user covers an operator flow or input; reach: owner covers only a human with the account or repo write, or an unsandboxed same-user process.
+- breaks: avail covers wrong output that neither refuses nor loses data; breaks: evidence is a mutation that stayed green with no current bypass, fixed in the same round.
 - You own no process, worktree, or stash you did not create. `pgrep -fl` to look, never `pkill`/`kill` a pid you did not spawn. Never `cp -R` a worktree. Never `git stash` in any form (the stash stack is shared across every worktree of a repo).
 - Output file: only if the brief names an output path, use the Write tool to save the complete verdict block there before your final message. Write is for that one file; never use it, or Bash, to change anything outside that file and your scratch copy. If the brief names no path, write nothing and return the verdict in your reply.

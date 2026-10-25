@@ -24,7 +24,9 @@ finding across several bullets.
 - Prefix with `[BUG]` or `[SECURITY]`, then the `file:line` the finding is
   about, then one sentence description and one sentence suggested fix, e.g.
   `- [BUG] skills/example/tool.py:41 — the retry loop drops the last item on
-  a short read. Add a length check before the final iteration.`
+  a short read. Add a length check before the final iteration. [reach:
+  <lane|concurrent|user|owner> (<one-clause reason>); breaks:
+  <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]`
 - If nothing found: "No bugs or security issues found."
 - End the review with an `INTERVAL:` line, the last line of the reply:
   `INTERVAL: none`, or one measured record per interval the verdict relies on
