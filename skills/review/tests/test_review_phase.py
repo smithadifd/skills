@@ -2425,7 +2425,7 @@ OLD_INTERVAL_LINE = re.compile(
 )
 LAST_EQUALS_INTERVAL_PARTS = re.compile(
     r"^from\s+(?P<start_event>.*?),\s*"
-    r"(?P<start_source>.*?)\s*to\s+"
+    r"(?P<start_source>.*?)\s*(?<!\S)to\s+"
     r"(?P<end_event>.*?),\s*"
     r"(?P<end_source>.*?)\s*=(?!.*=)\s*"
     r"(?P<duration>.*)$",
@@ -2580,6 +2580,34 @@ def test_interval_patterns_accept_the_line_grammar_and_split_on_the_last_equals(
         if old != new:
             mismatches.append(("parts", text, old, new))
     assert mismatches == [], mismatches
+
+
+@pytest.mark.parametrize(
+    ("body", "start_source", "end_event"),
+    [
+        ("from e, photo log:3 to finished, s = 2s", "photo log:3", "finished"),
+        ("from e, Toronto to finished, s = 2s", "Toronto", "finished"),
+        ("from e, Toronto log to finished, s = 2s", "Toronto log", "finished"),
+        ("from e, log:3 auto to finished, s = 2s", "log:3 auto", "finished"),
+        ("from e, TO.log to finished, s = 2s", "TO.log", "finished"),
+        ("from e, a to b to c, s = 2s", "a", "b to c"),
+        ("from e, a\tto\tb, s = 2s", "a", "b"),
+    ],
+)
+def test_interval_start_source_splits_only_at_a_whole_word_to(body, start_source, end_event):
+    matched = review_phase._INTERVAL_PARTS.match(body)
+    assert matched is not None
+    assert matched.group("start_source") == start_source
+    assert matched.group("end_event") == end_event
+    assert matched.group("duration") == "2s"
+
+
+def test_interval_start_source_ending_in_to_without_a_delimiter_is_malformed():
+    assert review_phase._INTERVAL_PARTS.match("from e, photo, s = 2s") is None
+    assert review_phase._INTERVAL_PARTS.match("from e, log to") is None
+    assert review_phase._INTERVAL_PARTS.match("from e, photo to") is None
+    record, _ = review_phase._parse_interval_body("from e, auto to finished, s = 2s")
+    assert record["start_source"] == "auto"
 
 
 def test_interval_parts_match_finishes_10000_spaces_well_under_a_second():
