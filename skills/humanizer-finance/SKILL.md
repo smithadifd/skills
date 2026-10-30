@@ -16,8 +16,9 @@ description: >
 
 # Humanizer — finance overlay
 
-This is a thin overlay, not a standalone skill. Read and apply the CORE skill in full
-first — `skills/humanizer/SKILL.md`: its hard constraints, its editing/generation/
+This is a thin overlay on the `humanizer` skill, which must be installed too
+(`./install.sh humanizer`, then `./install.sh humanizer-finance`). Read and apply that skill in full
+first: its hard constraints, its editing/generation/
 detect-only modes, the pattern catalog, "what human sounds like," and "what not to
 flag" all apply unchanged. This file does not restate any of that. It adds exactly
 three things on top, scoped to financial/market-analytical prose: a concrete

@@ -51,7 +51,7 @@ If the task is ambiguous, make a reasonable call and note your assumption in the
 
 ## Output format
 
-Return the brief in **~500 words or fewer** (code snippets and file paths don't count toward the limit). Structure:
+Return a tight brief a writer can draft from without re-reading the source. Structure:
 
 ```
 ## Target

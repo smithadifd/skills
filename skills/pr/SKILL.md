@@ -12,7 +12,7 @@ description: >
 Create a pull request for the current branch following the project's conventional style.
 
 Steps:
-1. Run `git status`, `git diff main...HEAD`, and `git log main...HEAD` in parallel to understand all changes since branching from main
+1. Find the default branch (`git symbolic-ref --short refs/remotes/origin/HEAD`, which prints `origin/<branch>`), then run `git status`, `git diff <default-branch>...HEAD`, and `git log <default-branch>...HEAD` in parallel to understand all changes since branching from it
 2. Check if current branch tracks a remote and whether it needs to be pushed
 3. Push to remote with `-u` if needed
 4. Draft a PR title (under 70 characters, imperative mood) and body using this template:

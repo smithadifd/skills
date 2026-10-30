@@ -24,7 +24,7 @@ Distill what you found into a direct answer. The person asking has a task to com
 
 ## Output Format
 
-Answer the question **directly and concisely** (200 words or fewer for most questions; more only if the question genuinely requires it):
+Answer the question **directly and concisely**, at the length the question needs:
 
 - Lead with the answer, not the exploration
 - Back it up with 1-3 specific file:line references or code snippets

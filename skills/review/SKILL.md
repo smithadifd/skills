@@ -12,7 +12,7 @@ description: >
 
 Review the current changes for bugs and security issues only.
 
-Run `git diff` (or `git diff main...HEAD` for a full branch review) to see the changes, then analyze them.
+Run `git diff` (or `git diff <default-branch>...HEAD` for a full branch review, where the default branch is the one `git symbolic-ref --short refs/remotes/origin/HEAD` names) to see the changes, then analyze them.
 
 Focus areas (in priority order):
 1. **Bugs**: Logic errors, off-by-one errors, missing error handling for failure paths, incorrect type assumptions, race conditions

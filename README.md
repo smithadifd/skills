@@ -68,7 +68,7 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 
 ## Install
 
-You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables above say so. The repository is private: clone it with the URL that came with your access, then, from the clone, install the `sdlc` plugin, which carries every skill and agent:
+You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables above say so. Clone the repository, then, from the clone, install the `sdlc` plugin, which carries every skill and agent:
 
 ```sh
 claude plugin marketplace add .
