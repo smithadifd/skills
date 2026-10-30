@@ -47,7 +47,7 @@ canonically in another note, set that note's `supersedes: [this-one]`, rewrite
 this one to a concise stub that points at the canonical note, and stamp
 `status: superseded`. **Check `description` against the new body** — it's the
 field the harness reads for recall, so a rewrite that leaves it describing the
-retired state (issue #177) makes the note misleading or unfindable
+retired state makes the note misleading or unfindable
 even though its body is now correct. Set `frontmatter.description` in the plan
 entry ONLY when it actually needs correcting; don't rewrite it reflexively.
 *Real shape — superseded saga:* an infra-diagnosis note carried "CORRECTION to

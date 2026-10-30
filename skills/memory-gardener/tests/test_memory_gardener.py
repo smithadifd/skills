@@ -26,7 +26,7 @@ PLAN = os.path.join(HERE, "fixtures", "plan.json")
 # on disk but has NO pointer line in the core index, used to prove the
 # in_index fix only trusts a shard that is actually reachable from the core.
 SHARDED_FIXTURE = os.path.join(HERE, "fixtures", "memory_sharded")
-# Also already-sharded, but shaped for `shard --extend` (issue #175):
+# Also already-sharded, but shaped for `shard --extend`:
 # MEMORY.md carries JIT pointers to MEMORY.watering.md / MEMORY.tools.md (each
 # already holding one note) PLUS two bullets still sitting directly in the
 # core: sprinkler-timer.md (genuine OVERFLOW — classifies to the EXISTING
@@ -87,7 +87,7 @@ def test_apply_frontmatter_is_additive_and_preserves_existing():
 
 
 def test_apply_frontmatter_rejects_non_writable_keys():
-    # description is DELIBERATELY absent here — issue #177 made it a
+    # description is DELIBERATELY absent here — it is a
     # fourth writable key; see the dedicated description tests below.
     for bad in ("name", "metadata", "type"):
         with pytest.raises(ValueError):
@@ -116,7 +116,7 @@ def _fm_description(fm_lines):
     return json.loads(lines[0][len("description:"):].strip())
 
 
-# ---------------------------------------------------- description (writable, issue #177)
+# ---------------------------------------------------- description (writable)
 # `description` is the harness's recall surface: a SUPERSEDED/UPDATE body
 # rewrite previously had no mechanical way to correct a description that now
 # contradicts it. These tests cover the fourth WRITABLE_KEYS entry under the
@@ -216,7 +216,7 @@ def test_apply_frontmatter_replaces_old_block_scalar_description_without_orphani
 
 
 def test_apply_frontmatter_refuses_multiline_flow_scalar_description_rather_than_corrupt():
-    """issue #186 review finding: a description written as a YAML
+    """A description written as a YAML
     FLOW (quoted) scalar folded across multiple lines has no `>`/`|` block
     indicator, so it does NOT match the one shape apply_frontmatter can
     safely consume whole. It must FAIL LOUD rather than silently overwrite
@@ -543,7 +543,7 @@ def test_full_apply_against_fixture(tmp_path):
     assert mg.read_fm_field(fm, "supersedes") == '["sprinkler-timer"]'
 
 
-# ------------------------------------------ description byte-diff regression (issue #177)
+# ------------------------------------------ description byte-diff regression
 # The seam this row closes: "a gardener rewrite lands a corrected `description`
 # field, byte-diff-proven for every untouched field." Both tests run the FULL
 # apply_plan pipeline against a copied fixture dir (not just the isolated
@@ -590,7 +590,7 @@ def test_apply_plan_description_only_change_leaves_everything_else_byte_identica
 
 
 def test_apply_plan_superseded_rewrite_corrects_description_and_preserves_everything_else(tmp_path):
-    """The real issue #177 scenario: a SUPERSEDED rewrite that
+    """The real scenario: a SUPERSEDED rewrite that
     replaces the body ALSO corrects a description the new body no longer
     supports, in the same apply — without touching name/metadata or any
     sibling file."""
@@ -634,7 +634,7 @@ def test_apply_plan_superseded_rewrite_corrects_description_and_preserves_everyt
 
 
 def test_description_write_then_scan_round_trips_quotes_and_backslashes(tmp_path):
-    """issue #186 review finding: `_serialize_value` JSON-quotes
+    """`_serialize_value` JSON-quotes
     `description` on write, so `read_fm_field` must JSON-DECODE it on read
     (not just strip the surrounding quote characters) or a write->scan round
     trip on a description containing a quote/backslash silently returns the
@@ -1124,7 +1124,7 @@ def _dumps_garden_taxonomy():
 
 
 # =========================================================================== #
-# codex round-2 findings: no-loss preservation, taxonomy validation gaps,
+# No-loss preservation, taxonomy validation gaps,
 # non-positive budget ceilings (all must be clean refusals, never tracebacks
 # or silently-wrong accounting; the read-only/no-`--apply` posture is unchanged)
 # =========================================================================== #
@@ -1562,7 +1562,7 @@ def test_shard_pointer_line_never_classified_into_a_shard():
 
 
 # =========================================================================== #
-# issue #183 finding 2 (BP9) — _is_shard_pointer_line's second signal
+# _is_shard_pointer_line's second signal
 # (a bullet that isn't a MEMORY.<name>.md link) must key off a SENTINEL only
 # the generator itself writes, not a substring of JIT_POINTER_SUFFIX's
 # human-readable text. Before this fix, a REAL note bullet whose own summary
@@ -1635,7 +1635,7 @@ def test_check_extend_no_loss_still_catches_a_dropped_note_whose_summary_contain
 
 
 def test_is_shard_pointer_line_does_not_misclassify_a_note_with_a_stray_sentinel_mid_prose():
-    """Adversarial follow-up (post-merge review of this same fix): a bare
+    """Adversarial follow-up: a bare
     `JIT_POINTER_SENTINEL in ln` substring check is STILL a text-content
     match, just against a different string than before — a real note whose
     body legitimately contains a stray U+2063 ANYWHERE (plausible: PDF-
@@ -1693,7 +1693,7 @@ def _flaky_replace(monkeypatch, fail_after):
     monkeypatch.setattr(os, "replace", flaky)
 
 
-# issue #183 finding 1 (BM10): execute_shard/execute_extend already
+# execute_shard/execute_extend already
 # stage every output to a temp sibling before committing ANY of it, but the
 # COMMIT ORDER used to replace MEMORY.md (the core index) EARLY — before the
 # shard file(s) its own new pointer lines point at. A crash/SIGKILL landing
@@ -1824,7 +1824,7 @@ def test_shard_apply_reads_memory_md_exactly_once(tmp_path, monkeypatch):
 
 
 # =========================================================================== #
-# issue #183 finding 4 (BP9) — port execute_extend's O_EXCL|O_NOFOLLOW
+# Port execute_extend's O_EXCL|O_NOFOLLOW
 # staging opener to execute_shard's own (older) staging loop, for parity.
 # Mirrors test_extend_apply_refuses_to_follow_a_preexisting_symlink_at_tmp_path
 # / test_extend_apply_does_not_delete_a_preexisting_tmp_path_it_did_not_create
@@ -1959,7 +1959,7 @@ def test_iter_memory_files_finds_docs_and_archive_subdirs(tmp_path):
 
 
 def test_iter_memory_files_follows_symlinked_docs_dir(tmp_path):
-    """The K4 hardening finding: os.walk's default followlinks=False means a
+    """Hardening: os.walk's default followlinks=False means a
     symlinked docs/ is never descended into, so its *.md files go completely
     dark — not reported as `excluded` (counted, auditable) but silently
     invisible, contradicting the "excluded paths are always walked and
@@ -2052,7 +2052,7 @@ def test_check_file_budgets_warn_only_when_nothing_over(tmp_path):
 # --------------------------------------------------- docs/ and archive/ excl.
 
 def test_check_file_budgets_excludes_docs_and_archive_from_over_and_warn(tmp_path):
-    """The K4 finding: a naive scan flags docs/*-full.md and archive/*.md as
+    """A naive scan flags docs/*-full.md and archive/*.md as
     false positives (they're the refactor's own output / frozen backups).
     Excluded files are still walked and reported (status=excluded), just never
     counted as OVER or WARN."""
@@ -2249,7 +2249,7 @@ def test_docs_target_path_never_creates_anything(tmp_path):
 
 
 def test_docs_target_path_rejects_symlinked_docs_dir(tmp_path):
-    """The K4 adversarial-review finding: if memory_dir/docs is ITSELF a
+    """If memory_dir/docs is ITSELF a
     symlink pointing outside the memory tree, os.path.realpath() resolves
     BOTH target_real and docs_dir_real THROUGH that same symlink, so the
     commonpath escape-check is satisfied vacuously (they agree on the
@@ -2341,7 +2341,7 @@ def test_pointerize_guard_fires_end_to_end_via_apply_plan(tmp_path):
 
 
 def test_apply_plan_refuses_pointerize_through_symlinked_docs_dir(tmp_path):
-    """The K4 hardening finding, proven end-to-end through the same
+    """Hardening, proven end-to-end through the same
     apply_plan() entrypoint a real run would use (not just the isolated
     docs_target_path unit): memory_dir/docs is a REAL symlink pointing
     outside the memory tree, built with the same shape a real Syncthing peer
@@ -3138,7 +3138,7 @@ def test_scan_surfaces_a_real_hyphen_underscore_mismatch(tmp_path):
 
 
 # =========================================================================== #
-# Shard-aware scan + fact-note listing + budget reporting (issue #176)
+# Shard-aware scan + fact-note listing + budget reporting
 # =========================================================================== #
 #
 # Prior to this fix, scan()'s in_index only ever consulted MEMORY.md's OWN
@@ -3252,7 +3252,7 @@ def test_budget_never_mutates_sharded_memory_dir(tmp_path):
 
 # =========================================================================== #
 # shard --extend — sanctioned "move overflow lines into an EXISTING shard"
-# (issue #175, BK4). Distinct precondition from `shard`: `shard`
+# Distinct precondition from `shard`: `shard`
 # refuses when the core IS already sharded; `extend` refuses when it is NOT.
 # Named seams: (a) propose/dry-run — prints what would move, touches nothing;
 # (b) --apply execute — core shrinks by exactly the moved lines, target shard
@@ -3506,10 +3506,10 @@ def test_extend_apply_never_overwrites_existing_backup(tmp_path):
 
 
 def test_extend_apply_reads_memory_md_at_most_twice(tmp_path, monkeypatch):
-    """Was 'exactly once' before BQ8: guard 1's single read still builds the
+    """Was 'exactly once' earlier: guard 1's single read still builds the
     hash AND the whole plan from ONE set of bytes (no re-read between
     hashing and proposing — the original TOCTOU this test was written to
-    catch). BQ8 added a SECOND, deliberate read — guard 6's apply-time
+    catch). A later change added a SECOND, deliberate read — guard 6's apply-time
     revalidation, immediately before MEMORY.md's own os.replace in the
     commit loop — which is a new invariant (closing a different, later
     race window), not a regression of this one. Exactly 2, never more:
@@ -3534,7 +3534,7 @@ def test_extend_apply_reads_memory_md_at_most_twice(tmp_path, monkeypatch):
 
 
 # =========================================================================== #
-# BK4 codex round-2 findings — dry-run single-read parity + symlink-safe
+# Dry-run single-read parity + symlink-safe
 # staging. Both scoped to code THIS row introduced (render_extend_dryrun /
 # execute_extend's own staging loop) — execute_shard's pre-existing sibling
 # code is untouched, tracked as a separate follow-up.
@@ -3618,7 +3618,7 @@ def test_extend_apply_does_not_delete_a_preexisting_tmp_path_it_did_not_create(t
     assert core_tmp.is_symlink()
 
 
-# issue #183 finding 1 (BM10) — execute_extend's own sibling of the
+# execute_extend's own sibling of the
 # execute_shard crash-recoverability tests above (see _flaky_replace and the
 # comment beside test_shard_apply_crash_mid_commit_leaves_every_note_recoverable
 # for the shared invariant). extend's fixture touches only the watering shard,
@@ -3645,8 +3645,7 @@ def test_extend_apply_crash_mid_commit_leaves_every_note_recoverable(
         "neither fully old nor fully new" % (fail_after, orphaned))
 
 
-# issue #183 finding 1 follow-up (codex second-review of BM10, PR
-# #192): core-last ordering keeps every note REACHABLE across a mid-apply
+# Core-last ordering keeps every note REACHABLE across a mid-apply
 # crash (the test above), but a crash landing specifically between the
 # touched shard's commit and the (never-reached) core commit leaves a shape
 # that a plain retry mishandles — the shard already holds the moved bullet,
@@ -3720,8 +3719,7 @@ def test_extend_apply_is_atomic_on_midwrite_failure(tmp_path, monkeypatch):
                 if f.startswith("MEMORY.pre-shard")] == []
 
 
-# BQ8 (issue #208's own PR body — codex HIGH finding on this
-# function, confirmed unmodified by that diff): the guards above all
+# Apply-time revalidation: the guards above all
 # validate the ONE snapshot read at the very top of execute_extend, but
 # everything between that read and the commit loop — propose_extend's
 # classification, check_extend_no_loss's traversal — is a real window in
@@ -3763,7 +3761,7 @@ def test_extend_apply_racing_shard_mutation_fails_closed(tmp_path, monkeypatch):
     assert leftovers == []
     # No partial write to any DATA-bearing file: the core must never be
     # rewritten once a touched shard has drifted (backup commits first in
-    # commit order — issue #183 finding 1 — so an extra pre-change
+    # commit order — so an extra pre-change
     # backup landing under archive/ before the drift is caught is the one
     # tolerated additive artifact, same as execute_shard/execute_extend's
     # other mid-commit-failure tests above; it is a verbatim copy of the
@@ -3841,7 +3839,7 @@ def test_check_extend_no_loss_ignores_pointer_text_changes():
 
 
 # =========================================================================== #
-# issue #175 (BP8) — `budget`'s proposal on an ALREADY-SHARDED store.
+# `budget`'s proposal on an ALREADY-SHARDED store.
 # Before this fix, an over-budget already-sharded core got `propose_shards`'s
 # proposal (the plain, fresh-split one) verbatim: it does not know the shard
 # files already exist, so it MINTS a second, colliding pointer line for each
@@ -3894,7 +3892,7 @@ def test_compute_budget_under_already_sharded_store_is_clean():
 
 
 def test_render_budget_report_on_already_sharded_store_never_shows_a_duplicate_pointer():
-    """The rendered report must not reproduce issue #175's literal symptom —
+    """The rendered report must not reproduce the duplicate-pointer symptom —
     two `MEMORY.watering.md` pointer lines in the same preview, one of them
     carrying the wrong (overflow-only) note count — and must point the
     operator at `shard --extend`, not the plain `shard --apply` that
@@ -3928,7 +3926,7 @@ def test_render_budget_report_already_sharded_nothing_to_move_is_honest():
 
 
 def test_shard_extend_apply_takes_an_already_sharded_over_budget_store_to_budget_zero(tmp_path):
-    """End-to-end proof (issue #175's own ask): an already-sharded store over
+    """End-to-end proof: an already-sharded store over
     budget ONLY on the LINE axis — the axis the issue reports as having "no
     sanctioned path back under the ceiling" — via the full CLI: `budget`
     fires exit 3, `shard --extend --apply` is the sanctioned mutating path
@@ -3977,10 +3975,10 @@ def test_main_budget_json_already_sharded_carries_reshard_proposal(tmp_path, cap
 
 
 # =========================================================================== #
-# BQ9 (BP8's D3 follow-up) — `render_shard_dryrun` (plain `shard`, no
+# `render_shard_dryrun` (plain `shard`, no
 # `--extend`) on an ALREADY-SHARDED store. Before this fix it called
 # `propose_shards` unconditionally, the same broken-on-already-sharded shape
-# issue #175/BP8 already closed for `compute_budget`: no notion the
+# already handled by `compute_budget`: no notion the
 # shard files already exist, so it would preview a fresh split that
 # `--apply` (no `--extend`) refuses outright and that doesn't match what
 # `--extend --apply` actually writes. Named seam: render_shard_dryrun's own
@@ -3997,7 +3995,7 @@ def test_render_shard_dryrun_on_already_sharded_store_previews_extend_path():
     assert plain == extend
     assert "shard EXTEND dry run" in plain
     assert "topic-shard DRY RUN" not in plain      # never the broken shape
-    # Never issue #175's literal symptom: a second, colliding pointer to a
+    # Never the duplicate-pointer symptom: a second, colliding pointer to a
     # shard that already exists on disk.
     assert plain.count("(MEMORY.watering.md)") == 1
 
@@ -4031,7 +4029,7 @@ def test_render_shard_dryrun_on_not_yet_sharded_store_is_unchanged():
 
 def test_render_shard_dryrun_already_sharded_sha_matches_snapshot_not_a_race(
         tmp_path, monkeypatch):
-    """codex round-2 (BQ9 follow-up): the already-sharded branch used to build
+    """The already-sharded branch used to build
     its previewed proposal from one read of MEMORY.md but display a SEPARATE,
     later read's sha256 (`file_sha256(memory_md)`, evaluated after
     `propose_extend` had already run) — a writer landing between the two
