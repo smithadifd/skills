@@ -2085,7 +2085,7 @@ def _render_reshard_proposal_section(result):
         "`MEMORY.md` already carries JIT shard pointers, so the plain "
         "fresh-split proposal does not apply here — it would mint a SECOND, "
         "colliding pointer for each shard that already exists, with the "
-        "wrong (overflow-only) note count (issue #175). Plain "
+        "wrong (overflow-only) note count. Plain "
         "`shard --apply` (no `--extend`) refuses outright on an "
         "already-sharded core; `--force` does not override that refusal. "
         "The sanctioned path back under the ceiling is `shard --extend`: it "
