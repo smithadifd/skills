@@ -50,7 +50,7 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 | `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. | Yes (Python 3); `config.json` can point it at your own routing documents |
 | `tdd` | Applies a test-first loop when you change behavior yourself: a failing test, the smallest passing change, then a refactor, with the red-then-green evidence handed to the reviewer. | Yes |
 | `teach` | Explains how a codebase works with a system overview, component tour, and traced example. | Yes; the optional HTML output uses a separate `artifact-design` skill |
-| `ticket` | Takes one ticket from intake through a plan, review rounds and an approved outward step to close, stopping for your approval before building and before anything leaves the machine, and keeps a resume card in the repository's ignored scratch. | Yes (Python 3) with a local JSON ticket; live tickets come through your tracker's connector |
+| `ticket` | Takes one ticket from intake through a plan, review rounds and an approved outward step to close, stopping for your approval before building and before anything leaves the machine, and keeps a resume card in the repository's ignored scratch. | Needs Python 3 and the `researcher`, `builder-core` and `reviewer` agents; works with a local JSON ticket, and live tickets come through your tracker's connector |
 | `topic` | Keeps the notes for an ongoing, focused discussion in one file. | Yes (Python 3); `config.json` can set the notes directory or route topics to a ledger CLI |
 
 ## Agents
