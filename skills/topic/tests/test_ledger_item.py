@@ -71,6 +71,10 @@ def stamp(item):
         item["created_id"] = next_event()
         item["note_ids"] = [next_event() for _ in item["notes"]]
         item["rev"] = item["note_ids"][-1] if item["note_ids"] else item["created_id"]
+        # `hidden`: session events the item has recorded that `export-item`
+        # omits once it is closed. They take event ids and move the revision.
+        for _ in range(item.get("hidden", 0)):
+            item["rev"] = next_event()
     return item
 
 
@@ -130,7 +134,8 @@ if verb == "query":
     ]
     if not matched:
         finish(1, False, error_code="empty", message="no matching rows")
-    finish(0, True, data={"items": matched, "limit": 50, "truncated": False})
+    rows = [dict(stamp(item), revision=item["rev"]) for item in matched]
+    finish(0, True, data={"items": rows, "limit": 50, "truncated": False})
 if verb == "new":
     if values.get("--type") not in ITEM_TYPES or "--title" not in values:
         finish(2, False, error_code="usage", message="--type and --title are required")
@@ -329,7 +334,7 @@ def test_second_call_resumes_the_same_item_and_creates_none(rig):
     assert second.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
     state = rig.snapshot()
     assert state["items"] == after_first, "a resume must not change or duplicate the item"
-    assert state["calls"][calls_before:] == [QUERY, EXPORT], "a resume only reads the item"
+    assert state["calls"][calls_before:] == [QUERY, QUERY, EXPORT], "a resume only reads the item"
     assert [call[0] for call in state["calls"]].count("new") == 1
     assert first.stdout.split("\t")[0] == second.stdout.split("\t")[0]
     assert rig.note_files() == []
@@ -466,7 +471,7 @@ def test_argv_sent_to_the_cli_matches_the_real_verbs_and_flags(rig):
     resumed = rig.snapshot()["calls"][len(created):]
 
     assert created == [QUERY, NEW, NOTE, RAILS_NOTE]
-    assert resumed == [QUERY, EXPORT]
+    assert resumed == [QUERY, QUERY, EXPORT]
 
 
 def test_the_per_skill_override_file_turns_the_route_on(rig):
@@ -547,7 +552,7 @@ def test_a_create_that_dies_after_new_is_completed_by_the_next_call_exactly_once
     third = rig.run()
 
     assert third.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
-    assert [c[0] for c in rig.snapshot()["calls"][calls_before:]] == ["query", "export-item"]
+    assert [c[0] for c in rig.snapshot()["calls"][calls_before:]] == ["query", "query", "export-item"]
     assert rig.card_notes() == notes, "a further retry adds nothing"
 
 
@@ -605,7 +610,7 @@ def test_losing_the_create_race_resumes_the_winners_item(rig, winner_notes, extr
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
     state = rig.snapshot()
-    assert state["calls"] == [QUERY, NEW, QUERY, EXPORT, *extra_calls]
+    assert state["calls"] == [QUERY, NEW, QUERY, QUERY, EXPORT, *extra_calls]
     assert list(state["items"]) == ["topic-demo"]
     notes = rig.card_notes()
     assert len([n for n in notes if n.startswith("Ask: ")]) == 1
@@ -826,3 +831,99 @@ def test_a_resumer_interrupted_at_every_step_boundary_while_the_winner_finishes_
             break
         boundary += 1
     assert boundary >= 3, "the resumer makes at least query, export and two notes"
+
+
+def _racer_closed_with_session_events():
+    """A closed topic with no notes whose revision is above its export's newest id."""
+    return {
+        "item_id": "topic-demo", "type": "topic", "title": "demo",
+        "status": "closed", "notes": [], "links": [], "hidden": 1,
+    }
+
+
+def test_repair_of_a_closed_item_takes_its_token_from_query_not_the_export(rig):
+    # The closed item's session event takes id 2 and moves the revision to 2,
+    # but `export-item` omits it and shows only id 1. The token must be 2.
+    rig.write_config(ledger_cli=str(rig.fake))
+    rig.stage(items={"topic-demo": _racer_closed_with_session_events()})
+
+    proc = rig.run()
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
+    state = rig.snapshot()
+    assert state["items"]["topic-demo"]["notes"] == ["Ask: " + ASK, RAILS]
+    notes = [call for call in state["calls"] if call[0] == "note"]
+    assert [call[call.index("--expect-revision") + 1] for call in notes] == ["2", "3"]
+    verbs = [call[0] for call in state["calls"]]
+    assert verbs.index("export-item") > 1, "the revision is queried before the export"
+
+
+def test_each_stale_refusal_repeats_the_query_then_export_pair(rig):
+    rig.write_config(ledger_cli=str(rig.fake))
+    rig.stage(
+        items={"topic-demo": _racer_closed_with_session_events()},
+        stale_notes=[1],
+    )
+
+    proc = rig.run()
+
+    assert proc.returncode == 0, proc.stderr
+    verbs = [call[0] for call in rig.snapshot()["calls"]]
+    assert verbs == [
+        "query",  # find the item
+        "query", "export-item", "note",  # refused stale
+        "query", "export-item", "note",  # the pair is read again, then lands
+        "note",
+    ]
+
+
+@pytest.mark.skipif(
+    not os.environ.get("LEDGER_CLI"),
+    reason="set LEDGER_CLI to the real ledger executable to run this test",
+)
+def test_repair_of_a_closed_item_succeeds_against_the_real_ledger_cli(tmp_path):
+    cli = os.environ["LEDGER_CLI"]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
+    env["HOME"] = str(tmp_path / "home")
+    (tmp_path / "home").mkdir()
+    env["LEDGER_DB"] = str(tmp_path / "real.db")
+    env["LEDGER_HARNESS"] = "test"
+
+    def ledger(*argv):
+        proc = subprocess.run(
+            [cli, *argv, "--json"], env=env, capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return json.loads(proc.stdout)["data"]
+
+    ledger("new", "--type", "topic", "--title", "demo", "--id", "topic-demo")
+    ledger("state", "topic-demo", "--status", "closed")
+    ledger(
+        "append", "--kind", "item.progress", "--item", "topic-demo",
+        "--payload", json.dumps({"text": "a session event after close"}),
+    )
+    export = ledger("export-item", "topic-demo")
+    query = ledger("query", "--type", "topic", "--item", "topic-demo")
+    export_max = max(event["id"] for event in export["events"])
+    revision = query["items"][0]["revision"]
+    assert revision > export_max, "the setup must reproduce the closed-item gap"
+
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"topics_dir": str(tmp_path / "topics"), "ledger_cli": cli}),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(HELPER), "--config", str(config), "--open", "demo", "--ask", ASK],
+        env=env, capture_output=True, text=True, check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == f"topic-demo\tresumed\t{cli}\n"
+    notes = [
+        event["payload"]["text"]
+        for event in ledger("export-item", "topic-demo")["events"]
+        if event["kind"] == "item.note"
+    ]
+    assert notes == ["Ask: " + ASK, RAILS]
