@@ -23,8 +23,10 @@ either. When `new` loses a race to a concurrent open (a `conflict`), the item is
 queried again and, if it now exists, resumed the same way.
 
 Every one of those notes is appended with `--expect-revision`, the ledger's
-compare-and-set on the item's newest event id: the creator uses the id `new`
-returned, a resumer the newest id in the `export-item` it just read. When
+compare-and-set on the item's revision: the creator uses the id `new`
+returned, a resumer the `revision` of the item's `query --item` row, read just
+before its `export-item` (the export leaves out a closed item's session events,
+so its newest id is not the revision). When
 another writer got in first the append is refused as `stale_revision`, and the
 resumer reads the item again and decides again, so two openers racing cannot
 write the Ask or the rails note twice, and a rails update written in the gap
@@ -246,12 +248,39 @@ def _note(cli: str, item_id: str, text: str, revision: int) -> int:
     return _event_id(cli, "note", note)
 
 
-def _read_item(cli: str, item_id: str) -> tuple[int, list[str]]:
-    """The item's revision and every note on it, from `export-item`.
+def _revision(cli: str, item_id: str) -> int:
+    """The item's revision, from its typed `query --item` row.
 
-    The card caps its notes, so it is not used. The revision is the newest
-    event id of any kind, which is what `--expect-revision` compares.
+    This is what `--expect-revision` compares. `export-item` is not a source for
+    it: once an item closes the export leaves out its ephemeral session events,
+    so its newest id can sit below the item's real revision.
     """
+    proc = _call(cli, ["query", "--type", ITEM_TYPE, "--item", item_id, "--json"])
+    if proc.returncode != 0:
+        raise _failure(cli, "query", proc)
+    envelope = _envelope(proc)
+    data = envelope.get("data") if envelope else None
+    items = data.get("items") if isinstance(data, dict) else None
+    row = next(
+        (it for it in items if isinstance(it, dict) and it.get("item_id") == item_id),
+        None,
+    ) if isinstance(items, list) else None
+    if row is None:
+        raise LedgerError(f"ledger CLI {cli} query returned no item {item_id} and no error")
+    revision = row.get("revision")
+    if type(revision) is not int or revision < 1:
+        raise LedgerError(f"ledger CLI {cli} query returned no revision for {item_id}")
+    return revision
+
+
+def _read_item(cli: str, item_id: str) -> tuple[int, list[str]]:
+    """The item's revision and every note on it.
+
+    The revision comes from `query` (see `_revision`), read before the export so
+    a write landing in between makes the append stale rather than hidden. The
+    notes come from `export-item`; the card caps its notes, so it is not used.
+    """
+    revision = _revision(cli, item_id)
     proc = _call(cli, ["export-item", item_id, "--json"])
     if proc.returncode != 0:
         raise _failure(cli, "export-item", proc)
@@ -261,20 +290,12 @@ def _read_item(cli: str, item_id: str) -> tuple[int, list[str]]:
     if not isinstance(events, list):
         raise LedgerError(f"ledger CLI {cli} export-item returned no events for {item_id}")
     texts: list[str] = []
-    revision = 0
     for event in events:
-        if not isinstance(event, dict):
-            continue
-        event_id = event.get("id")
-        if type(event_id) is int and event_id > revision:
-            revision = event_id
-        if event.get("kind") == "item.note":
+        if isinstance(event, dict) and event.get("kind") == "item.note":
             payload = event.get("payload")
             text = payload.get("text") if isinstance(payload, dict) else None
             if isinstance(text, str):
                 texts.append(text)
-    if revision < 1:
-        raise LedgerError(f"ledger CLI {cli} export-item returned no event ids for {item_id}")
     return revision, texts
 
 
