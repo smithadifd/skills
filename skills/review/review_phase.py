@@ -1251,7 +1251,10 @@ _INTERVAL_LINE = re.compile(
     re.IGNORECASE,
 )
 _INTERVAL_FROM = re.compile(r"^from\s+", re.IGNORECASE)
-_INTERVAL_TO = re.compile(r"to\s+", re.IGNORECASE)
+# The delimiter is a whole word: the character before `to` must not be a
+# non-space, so `photo` and `Toronto` stay inside the start source. A
+# single-character lookbehind, no repeated group, so the scan stays linear.
+_INTERVAL_TO = re.compile(r"(?<!\S)to\s+", re.IGNORECASE)
 _INTERVAL_WS = re.compile(r"\s*")
 _INTERVAL_DURATION = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:ms|s|m|h|d)")
 _REFUSAL_LINE_MAX = 200
@@ -1268,8 +1271,8 @@ class _IntervalPartsMatch:
 class _IntervalParts:
     """INTERVAL body grammar on one line: from <e>, <s> to <e>, <s> = <d>.
 
-    The first `,` ends the start event, the first `to` plus whitespace after
-    it ends the start source, the next `,` ends the end event, and the last
+    The first `,` ends the start event, the first whole-word `to` (not inside a
+    word) plus whitespace after it ends the start source, the next `,` ends the end event, and the last
     `=` ends the end source, so an end source may itself hold `=`
     (`a log line k=v`). Each separator is found once, left to right (the last
     `=` from the right), so the walk is linear in the line. Whitespace after
