@@ -1148,7 +1148,6 @@ class _WrongKeySource:
 
     def pull(self, key):
         self.trace.append("pull")
-        mapping = Source().pull(key).__dict__ if False else None
         return dataclasses.replace(Source().pull(key), key=self.other)
 
 
