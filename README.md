@@ -36,7 +36,7 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 | Skill | What it does | Standalone? |
 | --- | --- | --- |
 | `debug` | Finds the cause of a bug by reproducing it, testing a hypothesis and isolating the fault, then fixes it behind a test that fails first and passes after. | Yes |
-| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder, through a guard script. | Needs the `doc-researcher`, `doc-writer` and `doc-verifier` agents. The plugin install includes them; otherwise `./install.sh --agent <name>` for each. |
+| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder, through a guard script. | Needs Python 3 and the `doc-researcher`, `doc-writer` and `doc-verifier` agents. The plugin install includes them; otherwise `./install.sh --agent <name>` for each. |
 | `handoff` | Writes one redacted, size-capped resume note so a fresh session can continue the work. | Yes (Python 3) |
 | `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. | Yes |
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. | Needs `humanizer` |
