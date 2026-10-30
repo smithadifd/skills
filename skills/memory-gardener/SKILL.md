@@ -63,7 +63,7 @@ YAML.
   `last_verified`, `supersedes`, and `description`. It **never** removes or
   renames `name` or `metadata.*` — the harness reads `name` / `description` /
   `metadata.type` for recall, and that must keep working. `description` is
-  writable (issue #177) precisely because it's part of that recall
+  writable precisely because it's part of that recall
   surface: a `SUPERSEDED`/`UPDATE` body rewrite with no way to correct a
   `description` that now contradicts it left notes retrievable under a false
   summary, or unretrievable at all. Same guardrails as the other three keys —

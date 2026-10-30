@@ -1924,6 +1924,8 @@ class TicketPass:
         if store.pass_id is not None or store.ended is not None:
             raise _handle_used(key, store.pass_id or store.ended)
         ticket = source.pull(key)
+        if ticket.key != key:
+            raise TicketError(f"the source returned ticket {ticket.key!r}, expected {key!r}")
         card, token = store.read()
         state, flags, identity = _derive(card, ticket, pass_id, key)
         session = cls(ticket, store, card, token, identity)
@@ -1931,7 +1933,7 @@ class TicketPass:
         session.reconciliation = tuple(flags)
         if session._identity is not None:
             session._plan = PlanCard.from_snapshot(card["plan"])
-            session._plan.review = _passing_final(card, session._identity) if state == "outward_go" else None
+            session._plan.review = _passing_final(card, session._identity) if state in ("outward_go", "closed") else None
         if state in ("stopped", "closed"):
             return session
         if pass_id is None:

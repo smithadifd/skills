@@ -57,7 +57,7 @@ python3 memory_gardener.py budget --taxonomy my-shards.json         # override g
   (its writing sibling), a **separate supervised sitting** (and, for the live
   memory dir, a human-reviewed one-off). `--apply` stays supervised,
   interactive-only.
-- **Already-sharded core (issue #175).** If `MEMORY.md` is over
+- **Already-sharded core.** If `MEMORY.md` is over
   budget but already carries JIT shard pointers, `budget` does NOT show the
   fresh-split proposal above — it has no notion the shard files already
   exist, so it would mint a colliding second pointer per shard with the
@@ -69,7 +69,7 @@ python3 memory_gardener.py budget --taxonomy my-shards.json         # override g
   `shard --extend`, never plain `shard --apply` (see `shard --extend` below).
 
 Scheduling it (optional, the owner's call) is a job that runs
-`budget` on a cadence and Discord-alerts on exit `3` — never `apply`.
+`budget` on a cadence and alerts on exit `3` — never `apply`.
 
 ### Executing the split (`shard` — dry-run default, `--apply` mutates)
 
@@ -105,8 +105,7 @@ python3 memory_gardener.py shard --dir … --taxonomy my-shards.json \
   `archive/MEMORY.pre-shard-*.md` backup first. To grow the shards that
   already exist instead, use `--extend` (below) — that's the sanctioned path,
   not a workaround.
-- **`--extend` — move overflow lines into an EXISTING shard
-  (issue #175).** The inverse precondition of plain `shard`: `--extend`
+- **`--extend` — move overflow lines into an EXISTING shard.** The inverse precondition of plain `shard`: `--extend`
   refuses when the core is NOT already sharded (run plain `shard --apply`
   first). It finds core bullets that classify (same taxonomy) to a shard
   file that ALREADY exists on disk and moves them in, refreshing that
