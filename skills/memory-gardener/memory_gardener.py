@@ -34,7 +34,7 @@ Hard invariants (unit-tested):
     (name, metadata.*, and description itself when the plan doesn't touch it)
     are byte-preserved because the frontmatter block is spliced as text, never
     reparsed-and-reserialized. `description` is writable because it is the
-    field the harness reads for recall (issue #177) — a `SUPERSEDED`/
+    field the harness reads for recall — a `SUPERSEDED`/
     `UPDATE` rewrite of a note's body previously had no mechanical way to
     correct a `description` that now contradicted it.
   * Nothing is ever deleted. DEAD facts are MOVED into archive/ with a tombstone
@@ -56,7 +56,7 @@ import tempfile
 from datetime import date, datetime
 
 # Additive-only frontmatter whitelist — the ONLY keys this tool will write.
-# `description` (issue #177): the harness's recall surface — the one
+# `description`: the harness's recall surface — the one
 # field a SUPERSEDED/UPDATE body rewrite previously had no mechanical way to
 # correct, leaving a note retrievable (or not) under a summary its own body no
 # longer supports. Same guardrails as the other three: report-first,
@@ -177,7 +177,7 @@ def read_fm_field(fm_lines, key):
     Minimal, read-only; strips surrounding quotes. Returns None if absent.
 
     A DOUBLE-quoted value is decoded with `json.loads`, not just quote-
-    stripped: `description` (issue #177/#186) and each `supersedes`
+    stripped: `description` and each `supersedes`
     item are WRITTEN via `json.dumps`, so a value containing an escaped
     quote, backslash, or literal-newline escape must come back as the real
     string on read, or a write->scan round trip silently returns the raw
@@ -235,7 +235,7 @@ def _serialize_value(key, value):
         return "[%s]" % inner
     if key == "description":
         # Unlike status's fixed enum or last_verified's ISO date, description
-        # is free-text model-authored prose (issue #177) that can
+        # is free-text model-authored prose that can
         # contain YAML-significant characters — ": ", leading "- "/"# ",
         # embedded quotes — that would corrupt a plain unquoted scalar or
         # silently change what a real YAML parser reads. JSON-quote it: a
@@ -269,14 +269,14 @@ def apply_frontmatter(text, additions):
     next top-level key or the closing fence) is consumed along with it. Every
     key this tool has EVER written (status/last_verified/supersedes) is always
     a single-line scalar by construction, so this path was previously
-    unreachable; `description` (issue #177) is free-text and a plan
+    unreachable; `description` is free-text and a plan
     could in principle be replacing a value some other tool or a hand-edit
     left as a block scalar.
 
     Any OTHER multi-line shape — a quoted flow scalar folded across lines
     (`key: "part one\\n  part two"`), or a plain scalar continuing by
     indentation with no delimiter at all — raises ValueError instead of being
-    guessed at (issue #186 review): a text splice cannot bound those
+    guessed at: a text splice cannot bound those
     unambiguously (escaped quotes/backslashes make even counting quote
     characters unreliable), so silently overwriting just the first line would
     orphan the rest as corrupt YAML. A plain single-line scalar (the only
@@ -339,8 +339,7 @@ def apply_frontmatter(text, additions):
                     # rules every indented-or-blank line up to the next
                     # top-level key belongs to it, full stop. Anything else
                     # that merely LOOKS multi-line — a quoted FLOW scalar
-                    # folded across lines (`key: "part one\n  part two"`,
-                    # issue #186 review), or a plain scalar
+                    # folded across lines (`key: "part one\n  part two"`), or a plain scalar
                     # continuing by indentation with no delimiter at all —
                     # has no such unambiguous boundary without a real YAML
                     # parser: escaped quotes/backslashes make even counting
@@ -969,7 +968,7 @@ def _content_lines(text):
     content loss); everything else — prose, bullets, headings, code, table rows
     — counts, because in a fact note any of them can be the fact.
 
-    LEADING whitespace is content (D6). It was previously stripped, and that
+    LEADING whitespace is content. It was previously stripped, and that
     let a whole class of loss through the invariant undetected: markdown
     indentation is meaning-bearing, so re-flowing
 
@@ -1339,7 +1338,7 @@ def _reserve_pointerize_backup_path(archive_dir, stem, today):
     `_next_backup_path`: an existing backup is NEVER overwritten (that would
     destroy the only undo path); a repeat run claims the next free name.
 
-    Reservation, not just selection (D7): the name is claimed with
+    Reservation, not just selection: the name is claimed with
     O_CREAT|O_EXCL, so it is ours from the moment we pick it. Merely testing
     `os.path.exists` and returning the name left a TOCTOU window — a same-day
     backup that appeared between the check and the `os.replace` was silently
@@ -1366,7 +1365,7 @@ def _stage_sibling(final_path, text):
     """Stage `text` in a fresh, exclusively-created sibling of `final_path`, and
     return the temp path.
 
-    `mkstemp` opens with O_CREAT|O_EXCL|O_WRONLY under a random name (D8). The
+    `mkstemp` opens with O_CREAT|O_EXCL|O_WRONLY under a random name. The
     previous fixed `final_path + ".tmp-pointerize"` name, opened with a
     truncating `open(tmp, "w")`, had three holes: it silently destroyed a stale
     temp left by a crashed run, two concurrent gardeners staged into the SAME
@@ -1423,7 +1422,7 @@ def _commit_pointerize(memory_dir, f, old, new, pz, pz_out, today):
     Commit ORDER is the safety property, because a multi-file commit cannot be
     made atomic on POSIX — `os.replace` is atomic per file, and nothing makes
     three of them one transaction. So the order is chosen to make every
-    reachable partial state safe (D10), replacing the source LAST:
+    reachable partial state safe, replacing the source LAST:
 
         backup  ->  destination  ->  source
 
@@ -1439,7 +1438,7 @@ def _commit_pointerize(memory_dir, f, old, new, pz, pz_out, today):
     (it only removes temps; it cannot un-replace).
 
     The destination's drift hash is re-verified immediately before its replace
-    (D9) — `validate_plan` checked it at PLAN time, which leaves a window in
+    — `validate_plan` checked it at PLAN time, which leaves a window in
     which a concurrent writer creates or edits the destination while we stage.
     Reproduced: content written during staging was clobbered silently.
 
@@ -1765,11 +1764,10 @@ def shard_file_body(label, lines):
 
 
 # Suffix stamped on every generated JIT pointer — human-readable prose only.
-# NOT used for detection (see JIT_POINTER_SENTINEL below, issue #183
-# finding 2) — a real note's own summary can legitimately contain this exact
+# NOT used for detection (see JIT_POINTER_SENTINEL below) — a real note's own summary can legitimately contain this exact
 # phrase, so it must never be what decides whether a line IS a pointer.
 JIT_POINTER_SUFFIX = "load JIT when the topic comes up"
-# issue #183 finding 2: _is_shard_pointer_line's second signal used to
+# _is_shard_pointer_line's second signal used to
 # match ANY line containing JIT_POINTER_SUFFIX's literal text — so a REAL
 # note whose own summary happened to contain that exact human-readable phrase
 # was misclassified as a pointer, and silently excluded from the no-loss
@@ -1779,7 +1777,7 @@ JIT_POINTER_SUFFIX = "load JIT when the topic comes up"
 # is appended ONLY by `_shard_pointer` below. Renders as nothing (zero visual
 # width) wherever the line is viewed.
 #
-# IMPORTANT (post-merge review follow-up, same finding): the sentinel alone
+# IMPORTANT: the sentinel alone
 # does NOT make bare substring containment ("SENTINEL in ln") safe — a stray
 # U+2063 is plausible in real note prose (PDF-extraction copy/paste, some
 # ICU/office-doc pipelines emit it), so "contains this character anywhere"
@@ -1871,9 +1869,7 @@ def _is_shard_pointer_line(ln):
     longer link at a shard file, but with the trailing suffix+sentinel
     still intact) is still caught.
 
-    The second signal checks POSITION, not mere containment
-    (issue #183 finding 2 follow-up, post-merge review of the first
-    attempt at this fix): matching on `JIT_POINTER_SENTINEL in ln` — ANYWHERE
+    The second signal checks POSITION, not mere containment: matching on `JIT_POINTER_SENTINEL in ln` — ANYWHERE
     in the line — is still a bare text-content match, just against a
     different string than the original human-readable-suffix bug. A stray
     U+2063 is plausible in real note prose (PDF-extraction copy/paste, some
@@ -1985,7 +1981,7 @@ def compute_budget(memory_dir, max_tokens, max_lines, taxonomy, today):
     the ceiling; when over, attach a shard proposal. Writes NOTHING.
 
     Two DISJOINT proposal shapes, chosen by whether the core is already
-    sharded (issue #175): a NOT-yet-sharded core gets `proposal`
+    sharded: a NOT-yet-sharded core gets `proposal`
     (`propose_shards`'s fresh-split grouping, unchanged from before this
     fix) with `reshard_proposal` staying None. An ALREADY-sharded core gets
     `reshard_proposal` (`propose_extend`'s move-into-existing-shards
@@ -1996,7 +1992,7 @@ def compute_budget(memory_dir, max_tokens, max_lines, taxonomy, today):
     notion that a shard file already exists on disk, so it would MINT a
     second, colliding pointer line for each touched shard carrying only the
     overflow note's count (not the shard's true total) — the "8 pointer
-    lines, 4 duplicates" defect issue #175 reports, since JIT pointer lines
+    lines, 4 duplicates" defect, since JIT pointer lines
     ARE excluded from note-classification (`_is_shard_pointer_line`) but are
     NOT reconciled against a same-named freshly-proposed shard. Plain
     `shard --apply` (no `--extend`) also still refuses outright on an
@@ -2060,7 +2056,7 @@ def budget_alert_line(result):
             why.append("%d tok > %d" % (m["est_tokens"], result["max_tokens"]))
         if result["over_lines"]:
             why.append("%d lines > %d" % (m["lines"], result["max_lines"]))
-        # issue #175: an already-sharded core's sanctioned remedy is
+        # An already-sharded core's sanctioned remedy is
         # `shard --extend` (moves overflow into an EXISTING shard); plain
         # `shard` (a fresh split) is the remedy only when it isn't sharded yet.
         remedy = ("run `shard --extend` to move overflow lines into an "
@@ -2072,8 +2068,7 @@ def budget_alert_line(result):
 
 
 def _render_reshard_proposal_section(result):
-    """Render budget's guidance for an ALREADY-SHARDED, over-budget core
-    (issue #175). The plain fresh-split proposal (`propose_shards`)
+    """Render budget's guidance for an ALREADY-SHARDED, over-budget core. The plain fresh-split proposal (`propose_shards`)
     is never shown here: it has no notion that the shard files already
     exist, so it would mint a SECOND, colliding pointer line per touched
     shard carrying the wrong (overflow-only) note count — the "8 pointer
@@ -2090,7 +2085,7 @@ def _render_reshard_proposal_section(result):
         "`MEMORY.md` already carries JIT shard pointers, so the plain "
         "fresh-split proposal does not apply here — it would mint a SECOND, "
         "colliding pointer for each shard that already exists, with the "
-        "wrong (overflow-only) note count (issue #175). Plain "
+        "wrong (overflow-only) note count. Plain "
         "`shard --apply` (no `--extend`) refuses outright on an "
         "already-sharded core; `--force` does not override that refusal. "
         "The sanctioned path back under the ceiling is `shard --extend`: it "
@@ -2178,7 +2173,7 @@ def render_budget_report(result):
         return "\n".join(out) + "\n"
 
     if result.get("already_sharded"):
-        # issue #175: never fall through to the fresh-split
+        # Never fall through to the fresh-split
         # rendering below on an already-sharded core — see
         # _render_reshard_proposal_section for why that proposal is unsafe
         # to show here (colliding, wrongly-counted pointer lines).
@@ -2308,12 +2303,11 @@ def render_shard_dryrun(memory_dir, taxonomy):
     content plus a summary (per-shard counts, before/after token estimate, and
     the current MEMORY.md sha256 to copy into --expect-sha256). Writes nothing.
 
-    Branches on `_core_is_already_sharded` exactly as `compute_budget` does
-    (BQ9, BP8's D3 follow-up): `propose_shards`/`build_shard_layout` have no
+    Branches on `_core_is_already_sharded` exactly as `compute_budget` does: `propose_shards`/`build_shard_layout` have no
     notion that the core is already sharded, so on an already-sharded store
     they would mint a fresh-split preview carrying colliding, wrongly-counted
-    pointer lines for shards that already exist on disk (issue #175's
-    own defect shape) — one `--apply` (no `--extend`) refuses outright
+    pointer lines for shards that already exist on disk (the same
+    defect shape) — one `--apply` (no `--extend`) refuses outright
     anyway. Preview the `shard --extend` path instead, via the SAME
     `propose_extend` proposal `--extend --apply` itself would execute
     (`_render_extend_proposal_dryrun`, shared with `render_extend_dryrun` so
@@ -2323,7 +2317,7 @@ def render_shard_dryrun(memory_dir, taxonomy):
         raise ValueError("no MEMORY.md in %s" % memory_dir)
     text = _read(memory_md)
     if _core_is_already_sharded(text):
-        # codex round-2 (BQ9 follow-up): the classify-read above is ONLY used
+        # The classify-read above is ONLY used
         # to pick this branch — reused it here (paired with a SEPARATE
         # file_sha256() call) and a writer landing between the two calls
         # could make the returned sha describe different bytes than the
@@ -2424,8 +2418,7 @@ def execute_shard(memory_dir, taxonomy, today, expect_sha256, force):
     """MUTATING. Execute the topic-split. Guards run in order, all refusing
     BEFORE any write; the backup, shards and core rewrite then commit, EVERY
     output staged to a temp sibling first, then os.replace'd into place in a
-    fixed order — backup, then every shard, then the core LAST (issue
-    #183 finding 1, BM10; see the commit-order comment beside `outputs` below
+    fixed order — backup, then every shard, then the core LAST (see the commit-order comment beside `outputs` below
     for why core-last is the safety property, since a multi-file commit
     cannot be made atomic on POSIX):
 
@@ -2499,7 +2492,7 @@ def execute_shard(memory_dir, taxonomy, today, expect_sha256, force):
     # (atomic per-file on POSIX). Any failure removes the temps, so the real dir
     # is left byte-identical to the start — no partial/duplicated state.
     #
-    # COMMIT ORDER (issue #183 finding 1, BM10): the core MEMORY.md is
+    # COMMIT ORDER: the core MEMORY.md is
     # replaced LAST, after every shard file it points to. A multi-file commit
     # cannot be made atomic on POSIX — os.replace is atomic per file, and
     # nothing makes N of them one transaction — so, as with
@@ -2513,8 +2506,7 @@ def execute_shard(memory_dir, taxonomy, today, expect_sha256, force):
     # directly (sharding has not visibly happened yet) — the store is always
     # fully old or fully new, never a state with an orphaned note.
     #
-    # Residual (codex second-review of BM10, PR #192, finding 2 — noted,
-    # not fixed): a crash after some shard(s) commit but before the core
+    # Residual (noted, not fixed): a crash after some shard(s) commit but before the core
     # does leaves those shard files sitting on disk unreferenced by the
     # (still-old) core. This is NOT silent — the "no silent clobber" guard
     # (`clashes`, a few lines above this function's start) already refuses
@@ -2538,7 +2530,7 @@ def execute_shard(memory_dir, taxonomy, today, expect_sha256, force):
     try:
         for final_path, content in outputs:
             tmp = final_path + ".tmp-shard"
-            # issue #183 finding 4: secure create — O_EXCL|O_NOFOLLOW
+            # Secure create — O_EXCL|O_NOFOLLOW
             # refuses (raises) if anything already sits at `tmp` (a leftover
             # file or a planted symlink) rather than silently
             # following/truncating it, the same opener execute_extend
@@ -2572,7 +2564,7 @@ def execute_shard(memory_dir, taxonomy, today, expect_sha256, force):
 
 # --------------------------------------------------------------------------- #
 # shard --extend — sanctioned "move overflow lines into an EXISTING shard"
-# mode (issue #175). A real incident needed this done by hand: 15
+# mode. A real incident needed this done by hand: 15
 # overflow index lines had built back up in MEMORY.md's core after its topic
 # shards were already created, and there was no sanctioned way to sweep them
 # into those EXISTING shards short of a bespoke one-off script. `extend` is
@@ -2746,8 +2738,7 @@ def propose_extend(memory_dir, taxonomy, text=None, shard_texts=None):
             old_text = shard_texts[shard_file]
         else:
             old_text = _read(os.path.join(memory_dir, shard_file))
-        # already_applied (issue #183 finding 1 follow-up, codex
-        # second-review of BM10): bullets in `lines` that are ALREADY present
+        # already_applied: bullets in `lines` that are ALREADY present
         # verbatim among the shard's own on-disk bullets. A crash landing
         # between a prior run's shard commit and its core commit leaves
         # exactly this shape (the shard already holds the moved bullet, but
@@ -2841,8 +2832,7 @@ def _render_extend_proposal_dryrun(memory_dir, prop, sha):
     Takes an already-built `prop` (propose_extend's output) and the caller's
     own `sha` so this never reads MEMORY.md itself — used both by
     `render_extend_dryrun`'s own direct entry point and by
-    `render_shard_dryrun`'s already-sharded branch (BQ9, BP8's D3
-    follow-up), so the plain `shard` dry-run and the `shard --extend` dry-run
+    `render_shard_dryrun`'s already-sharded branch, so the plain `shard` dry-run and the `shard --extend` dry-run
     can never print two different previews for the same already-sharded
     store."""
     out = []
@@ -2917,7 +2907,7 @@ def render_extend_dryrun(memory_dir, taxonomy):
 
 def _excl_nofollow_opener(path, _flags):
     """Custom `opener` for `open(path, "w", ...)` used by execute_shard's AND
-    execute_extend's staging writes (issue #183 finding 4 — ported to
+    execute_extend's staging writes (ported to
     execute_shard's own, older staging loop for parity; ORIGINALLY
     execute_extend-only): O_EXCL refuses to open if ANYTHING already sits at
     `path` — a leftover file or a planted symlink — instead of silently
@@ -2933,7 +2923,7 @@ def _check_extend_source_drift(final_path, expected_text, label):
     """Re-verify that `final_path` still holds EXACTLY `expected_text` —
     called immediately before that file's own os.replace in execute_extend's
     commit loop, mirroring `_commit_pointerize`'s destination re-check
-    (D9/`_check_docs_dest_drift`) for the same reason: the snapshot guards at
+    (`_check_docs_dest_drift`) for the same reason: the snapshot guards at
     the top of execute_extend (the MEMORY.md sha256, each touched shard's
     `shard_texts_before` text) only prove what the store looked like at ONE
     instant, read long before this loop runs — classification
@@ -2962,7 +2952,7 @@ def execute_extend(memory_dir, taxonomy, today, expect_sha256):
     refusing BEFORE any write; the backup, shard rewrites and core rewrite
     then commit, EVERY output staged to a temp sibling first, then
     os.replace'd into place in a fixed order — backup, then every touched
-    shard, then the core LAST (issue #183 finding 1, BM10; see the
+    shard, then the core LAST (see the
     commit-order comment beside `outputs` below, identical reasoning to
     execute_shard's):
 
@@ -2974,8 +2964,7 @@ def execute_extend(memory_dir, taxonomy, today, expect_sha256):
          --apply` first;
       3. something to move — refuse when no overflow bullet matches an
          EXISTING shard under this taxonomy;
-      4. no double-apply (issue #183 finding 1 follow-up, codex
-         second-review of BM10) — refuse when any shard already holds a
+      4. no double-apply — refuse when any shard already holds a
          bullet this run would move into it again (propose_extend's
          `already_applied`): the shape a crash between a prior run's shard
          commit and its (never-reached) core commit leaves behind. A plain
@@ -2984,8 +2973,7 @@ def execute_extend(memory_dir, taxonomy, today, expect_sha256):
       5. no-loss — {new core + every shard file on disk} must reproduce
          every original non-pointer bullet from {core + every shard file on
          disk}, exactly (check_extend_no_loss);
-      6. apply-time revalidation (issue #208's own PR body, codex
-         HIGH finding on this function, confirmed unmodified by that diff) —
+      6. apply-time revalidation —
          guards 1-5 all validate the ONE snapshot read at the very top of
          this function, but everything between that read and the actual
          commit (classification, no-loss checking, the backup-path scan) is
@@ -3037,8 +3025,7 @@ def execute_extend(memory_dir, taxonomy, today, expect_sha256):
             "no overflow core bullet matched an EXISTING shard under this "
             "taxonomy — nothing to extend")
 
-    # 4. No double-apply (issue #183 finding 1 follow-up, codex
-    #    second-review of BM10): a crash landing between a prior run's shard
+    # 4. No double-apply: a crash landing between a prior run's shard
     #    commit and its core commit leaves the shard already holding the
     #    moved bullet while the (unchanged) core still lists it directly too
     #    — so a plain retry, hashing the same unchanged core, proposes
@@ -3101,7 +3088,7 @@ def execute_extend(memory_dir, taxonomy, today, expect_sha256):
     backup_path = _next_backup_path(archive_dir, today)
     backup_rel = os.path.relpath(backup_path, memory_dir)
 
-    # COMMIT ORDER (issue #183 finding 1, BM10): as in execute_shard,
+    # COMMIT ORDER: as in execute_shard,
     # the core MEMORY.md commits LAST, after every touched shard — a crash
     # before it completes leaves the OLD core in place (still holding the
     # about-to-move bullets directly), so the store is always fully old or
