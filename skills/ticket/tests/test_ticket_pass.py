@@ -1,6 +1,7 @@
 """Matrix sections E and F: live-pass steps, gates, lifecycle, and close."""
 
 import copy
+import dataclasses
 import json
 import os
 import re
@@ -1133,3 +1134,42 @@ def test_F8_a_closed_card_takes_no_claim_on_the_ledger_and_the_markdown_store(re
     opened = [event for event in fake.events() if event["kind"] == "session.opened"]
     assert open_ledger(fake, src).phase == "closed"
     assert [event for event in fake.events() if event["kind"] == "session.opened"] == opened
+
+
+# --- open: the pulled ticket's key, and a closed ticket's review -------------
+
+
+class _WrongKeySource:
+    """A source that does not check the key it is asked for."""
+
+    def __init__(self, other="OTHER-9"):
+        self.other = other
+        self.trace = []
+
+    def pull(self, key):
+        self.trace.append("pull")
+        mapping = Source().pull(key).__dict__ if False else None
+        return dataclasses.replace(Source().pull(key), key=self.other)
+
+
+def test_F9_open_refuses_a_pulled_ticket_with_another_key_before_reading_the_card(repo):
+    handle = store(repo)
+    reads = []
+    real_read = handle.read
+    handle.read = lambda: reads.append("read") or real_read()
+    with pytest.raises(ticket.TicketError, match=re.escape(f"the source returned ticket 'OTHER-9', expected {KEY!r}")):
+        ticket.TicketPass.open(KEY, _WrongKeySource(), handle)
+    assert reads == []
+    assert not card_path(repo).exists() or read_card(repo)["pass"] is None
+
+
+def test_F10_reopening_a_closed_ticket_keeps_its_passing_review_in_the_plan(repo):
+    src = Source()
+    session = build(repo, src, "S4", 1)
+    session.close("Done.", refs=("example/repo#14",))
+    closing = session.plan.render()
+    assert "passes: true" in closing and "passes: false" not in closing
+    reopened = open_pass(repo, src)
+    assert reopened.phase == "closed"
+    assert reopened.plan.review is not None
+    assert reopened.plan.render() == closing
