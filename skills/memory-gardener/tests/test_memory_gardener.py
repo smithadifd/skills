@@ -179,7 +179,7 @@ def test_apply_frontmatter_description_serializes_embedded_newline_as_one_line()
 
 
 def test_apply_frontmatter_replaces_old_block_scalar_description_without_orphaning_continuation():
-    """D1 (material decision, see PR description): a description previously
+    """A description previously
     written as a YAML block scalar (`description: >` with indented
     continuation lines — the shape SKILL.md's own frontmatter uses) must be
     replaced WHOLE. Naively overwriting only the `description: >` line would
@@ -1485,7 +1485,7 @@ def test_shard_no_shards_dryrun_is_noop_and_apply_refuses(tmp_path):
 
 
 # =========================================================================== #
-# Adversarial-review round-2: re-application data-loss defects. All five must
+# Re-application data-loss defects found in review. All five must
 # hold WHILE the first-run behavior + existing tests stay green.
 # =========================================================================== #
 
@@ -1889,7 +1889,7 @@ def test_shard_apply_does_not_delete_a_preexisting_tmp_path_it_did_not_create(tm
 
 
 # =========================================================================== #
-# K4 — harness-layer budgets (the runtime's per-file memory load limit):
+# Harness-layer budgets (the runtime's per-file memory load limit):
 # per-file, all-stores truncation check (`filebudget`),
 # pointer-memory refactor (`pointerize`), and wikilink hyphen/underscore
 # normalization. All new surfaces below; nothing above this line was touched.
@@ -1907,7 +1907,7 @@ def _lines_text(n, filler="x"):
 
 
 def _symlink(link_path, target_path):
-    """Create a real symlink at link_path -> target_path, for the K4
+    """Create a real symlink at link_path -> target_path, for the harness-budget
     symlink-escape hardening tests below. The guard being tested is a
     POSIX/Syncthing concern; a platform that cannot create the symlink fails
     here, loudly, rather than passing without exercising the guard."""
@@ -2781,7 +2781,7 @@ def test_pointerize_refuses_when_docs_is_unwritable_source_survives(tmp_path):
 
 
 # =========================================================================== #
-# pointerize commit hardening — second-pass review findings
+# pointerize commit hardening
 # =========================================================================== #
 
 # ------------------------- (4) COMMIT ORDER: source is replaced LAST

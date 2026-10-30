@@ -968,7 +968,7 @@ def _content_lines(text):
     content loss); everything else — prose, bullets, headings, code, table rows
     — counts, because in a fact note any of them can be the fact.
 
-    LEADING whitespace is content (D6). It was previously stripped, and that
+    LEADING whitespace is content. It was previously stripped, and that
     let a whole class of loss through the invariant undetected: markdown
     indentation is meaning-bearing, so re-flowing
 
@@ -1338,7 +1338,7 @@ def _reserve_pointerize_backup_path(archive_dir, stem, today):
     `_next_backup_path`: an existing backup is NEVER overwritten (that would
     destroy the only undo path); a repeat run claims the next free name.
 
-    Reservation, not just selection (D7): the name is claimed with
+    Reservation, not just selection: the name is claimed with
     O_CREAT|O_EXCL, so it is ours from the moment we pick it. Merely testing
     `os.path.exists` and returning the name left a TOCTOU window — a same-day
     backup that appeared between the check and the `os.replace` was silently
@@ -1365,7 +1365,7 @@ def _stage_sibling(final_path, text):
     """Stage `text` in a fresh, exclusively-created sibling of `final_path`, and
     return the temp path.
 
-    `mkstemp` opens with O_CREAT|O_EXCL|O_WRONLY under a random name (D8). The
+    `mkstemp` opens with O_CREAT|O_EXCL|O_WRONLY under a random name. The
     previous fixed `final_path + ".tmp-pointerize"` name, opened with a
     truncating `open(tmp, "w")`, had three holes: it silently destroyed a stale
     temp left by a crashed run, two concurrent gardeners staged into the SAME
@@ -1422,7 +1422,7 @@ def _commit_pointerize(memory_dir, f, old, new, pz, pz_out, today):
     Commit ORDER is the safety property, because a multi-file commit cannot be
     made atomic on POSIX — `os.replace` is atomic per file, and nothing makes
     three of them one transaction. So the order is chosen to make every
-    reachable partial state safe (D10), replacing the source LAST:
+    reachable partial state safe, replacing the source LAST:
 
         backup  ->  destination  ->  source
 
@@ -1438,7 +1438,7 @@ def _commit_pointerize(memory_dir, f, old, new, pz, pz_out, today):
     (it only removes temps; it cannot un-replace).
 
     The destination's drift hash is re-verified immediately before its replace
-    (D9) — `validate_plan` checked it at PLAN time, which leaves a window in
+    — `validate_plan` checked it at PLAN time, which leaves a window in
     which a concurrent writer creates or edits the destination while we stage.
     Reproduced: content written during staging was clobbered silently.
 
@@ -2923,7 +2923,7 @@ def _check_extend_source_drift(final_path, expected_text, label):
     """Re-verify that `final_path` still holds EXACTLY `expected_text` —
     called immediately before that file's own os.replace in execute_extend's
     commit loop, mirroring `_commit_pointerize`'s destination re-check
-    (D9/`_check_docs_dest_drift`) for the same reason: the snapshot guards at
+    (`_check_docs_dest_drift`) for the same reason: the snapshot guards at
     the top of execute_extend (the MEMORY.md sha256, each touched shard's
     `shard_texts_before` text) only prove what the store looked like at ONE
     instant, read long before this loop runs — classification
