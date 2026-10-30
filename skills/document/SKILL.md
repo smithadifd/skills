@@ -18,7 +18,7 @@ agents so the heavy reading and drafting stay out of the main conversation:
 
 | Agent | Role |
 | --- | --- |
-| `doc-researcher` | Surveys the target and returns a tight brief. |
+| `doc-researcher` | Surveys the target and returns a brief of about 500 words. |
 | `doc-writer` | Drafts one page from the brief and returns the full page text and a claims list. Under this skill it never writes. |
 | `doc-verifier` | Checks each claim against the code and returns confirmed and flagged lists. |
 
