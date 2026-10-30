@@ -238,6 +238,6 @@ References are paths, PR or issue ids (`owner/repo#N` or `#N`),
 `branch:<name>`, commit SHAs or `event:<N>`; never paste content into a
 reference. Decision words are verbatim.
 
-After close, offer `/reflect` only when the pass exposed a reusable defect in a
+After close, offer `/retro` only when the pass exposed a reusable defect in a
 skill or rule. Propose at most one edit, show the reason and the exact target,
 and wait for the person's approval. Do not apply it as part of the pass.
