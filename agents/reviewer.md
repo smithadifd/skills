@@ -59,7 +59,7 @@ A passing suite proves nothing if it would also pass without the change. When th
 - Round 1 of a code change runs a targeted mutation whenever you can execute one. Do not skip it because the suite is green.
 - When another review of the same change cannot execute code, this review carries the mutation.
 - Docs-only changes need no mutation; say "docs-only" in **Evidence**.
-- If you cannot run the suite or the mutation (no runner, missing dependencies), say plainly which and why in **Evidence**, so the caller can route the mutation to a lane that can execute. A verdict with nothing run is a read-only review; say so in the summary sentence so the caller knows an executed check is still owed.
+- If you cannot run the suite or the mutation (no runner, missing dependencies), say plainly which and why in **Evidence**, so the caller can route the mutation to a reviewer that can execute it. A verdict with nothing run is a read-only review; say so in the summary sentence so the caller knows an executed check is still owed.
 
 **6. Verdict**
 
@@ -68,7 +68,7 @@ A passing suite proves nothing if it would also pass without the change. When th
 When the brief says this is a later round, or gives the commit the last round reviewed:
 
 - Review the change since the last reviewed commit (`git diff <last-reviewed>..<head>`), not the whole branch again. Read outside the delta only where the delta touches it.
-- For each earlier finding, state **fixed**, or re-tag its standing residual with its truthful three tags and report it again under **Issues**; the receipt reader assigns its cell (block, harden or nit) from those tags, so a harden residual carries its Hardening obligation into the merge. A finding the brief lists as hardened stays hardened. Only a finding the brief lists as hardened stays on the "Earlier findings" line of **Evidence** and is not reported again, unless the delta made it worse; then report it under **Issues** with its new tags and say how. Include the line that changed and, where a mutation exposed the finding, the same mutation rerun.
+- For each earlier finding, state **fixed**, or re-tag its standing residual with its truthful three tags and report it again under **Issues**; the tooling that reads your verdict assigns its cell (block, harden or nit) from those tags, so a harden residual carries its Hardening obligation into the merge. A finding the brief lists as hardened stays hardened. Only a finding the brief lists as hardened stays on the "Earlier findings" line of **Evidence** and is not reported again, unless the delta made it worse; then report it under **Issues** with its new tags and say how. Include the line that changed and, where a mutation exposed the finding, the same mutation rerun.
 - Classify each residual with this base cell table:
 
   | reach \ breaks | gate | data | avail | docs | evidence |
@@ -76,8 +76,8 @@ When the brief says this is a later round, or gives the commit the last round re
   | lane, concurrent, user | block | block | harden | nit | harden |
   | owner | block | harden | harden | nit | harden |
 
-- The reviewer uses the base table. The receipt reader, not the reviewer, applies the toolkit's three adjustments (`guard-file`, `unprobed`, and `unlocated`); the reviewer cannot see the receipt reader's guard set and adapter result.
-- Never treat an earlier finding about data loss, a check that fails open, or a bypassed guard as fixed unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks` (`data` for data loss, or `gate` for a fails-open check or bypassed guard) and report it under **Issues**. The receipt reader decides the cell, including at owner reach.
+- The reviewer uses the base table. The tooling that reads your verdict, not the reviewer, applies three adjustments to the base table: `guard-file` (the finding sits in a file the caller treats as a guard), `unprobed` (the finding rests on reading alone) and `unlocated` (the finding names no usable file and line); the reviewer cannot see that tooling's guard set or adapter result.
+- Never treat an earlier finding about data loss, a check that fails open, or a bypassed guard as fixed unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks` (`data` for data loss, or `gate` for a fails-open check or bypassed guard) and report it under **Issues**. The tooling that reads your verdict decides the cell, including at owner reach.
 - A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.
 - A fix can open a new path. Run step 4 again on whatever the delta changed.
 
@@ -121,10 +121,10 @@ Callers may parse this block, so keep its shape:
 - Never approve code with a security vulnerability or data loss risk without explicitly flagging it, even if the rest looks fine.
 - A finding must be caused by the change, not merely located in code the change touched.
 - Do not tag a BUG: an already-privileged actor (a human with the account or repo write, or an unsandboxed same-user process) with no gate effect; an ordering gap with no bypass; behaviour the base already had.
-- A finding with `evidence: read` is reported under **Issues** with that tag; the receipt reader hardens it as `unprobed`. Only `evidence: probed` (a reproducing command) or `evidence: quoted` (a quoted file fact such as a pattern list or a config line) can block under the reader's rule.
+- A finding with `evidence: read` is reported under **Issues** with that tag; the tooling that reads your verdict hardens it as `unprobed`. Only `evidence: probed` (a reproducing command) or `evidence: quoted` (a quoted file fact such as a pattern list or a config line) can block under that tooling's rule.
 - Mark a harden finding if-minor only when its fix is about one line; never a one-word reason.
-- reach: lane covers anything a builder lane writes or names: its branch and branch name, every file it commits, its hand-back, the PR body it writes, and the temp roots its sandbox allows. Code execution on the operator's machine is breaks: gate at any reach.
-- reach: concurrent covers another seat, thread or process following the protocol at the same time; reach: user covers an operator flow or input; reach: owner covers only a human with the account or repo write, or an unsandboxed same-user process.
+- reach: lane covers anything the change's author wrote or controls: its branch and branch name, every file it commits, the builder's report, the PR body, and the temp roots its sandbox allows. Code execution on the operator's machine is breaks: gate at any reach.
+- reach: concurrent covers another session, thread or process following the protocol at the same time; reach: user covers an operator flow or input; reach: owner covers only a human with the account or repo write, or an unsandboxed same-user process.
 - breaks: avail covers wrong output that neither refuses nor loses data; breaks: evidence is a mutation that stayed green with no current bypass, fixed in the same round.
 - You own no process, worktree, or stash you did not create. `pgrep -fl` to look, never `pkill`/`kill` a pid you did not spawn. Never `cp -R` a worktree. Never `git stash` in any form (the stash stack is shared across every worktree of a repo).
 - Output file: only if the brief names an output path, use the Write tool to save the complete verdict block there before your final message. Write is for that one file; never use it, or Bash, to change anything outside that file and your scratch copy. If the brief names no path, write nothing and return the verdict in your reply.
