@@ -2,6 +2,19 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+## Why
+
+Most mistakes in software are not hard decisions made badly. They are easy checks skipped because the moment to make them had passed. The test that would have failed was never written. The reviewer had watched the code being written and saw what was meant, not what was there. The push happened before anyone asked whether it should. Each skill here puts one of those checks back at the point where it is cheapest to skip, so that the careful path is also the path of least resistance. Good decisions should be the default, not an act of discipline.
+
+What that looks like in practice:
+
+- In a `ticket` pass, the build does not start until you have seen the plan and said go, and nothing leaves your machine (no push, no pull request, no comment on the ticket) until you have seen the result and said go again.
+- In `debug` and `tdd`, a fix is not a fix until a test has failed for the reported cause and then passed.
+- The `reviewer` agent sees the diff with no memory of how it was written, and its verdict shows what it ran.
+- `handoff` ends a session with a note whose verified checks are commands, so `pickup` can rerun them tomorrow instead of trusting them.
+
+## What this is
+
 Seventeen Claude Code skills and eight agents that take a change from first idea to handoff: planning, building, reviewing, shipping, and picking the work up again in a later session.
 
 The difference is in how the collection is built. Every skill that ships a script ships its tests, about 2,800 across the repository, and the lint refuses a script without a `tests/` directory. Every change is reviewed before merge by a reviewer with no context of the build, and code changes also by a second model family. A fix lands with mutation evidence in its pull request: the guarded line reverted, the test shown failing, then passing again with the fix restored. Each skill works from a plain install with no sibling checkout, and the CI check proves it by installing the whole set into an empty home directory.
@@ -29,6 +42,8 @@ flowchart LR
     next -.->|next session| plan
 ```
 
+[docs/lifecycle.md](docs/lifecycle.md) walks the same ground in more detail: what to run at the start, middle and end of a session, how a project moves from idea to documented code, which of `handoff`, `topic` and `ticket` carries work across sessions, and four short walkthroughs.
+
 The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) serve the first stage, and the three `doc-*` agents serve `document`. `humanizer`, `humanizer-finance` and `memory-gardener` are not tied to a stage. For open-ended reading of a codebase, Claude Code's built-in Explore agent is the right tool, and Plan mode outlines the steps for a change; the agents here are for jobs with a fixed contract, such as a draft pull request that is never merged, or a review that shows what it ran.
 
 ## Skills
@@ -36,7 +51,7 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 | Skill | What it does | Standalone? |
 | --- | --- | --- |
 | `debug` | Finds the cause of a bug by reproducing it, testing a hypothesis and isolating the fault, then fixes it behind a test that fails first and passes after. | Yes |
-| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder, through a guard script. | Needs Python 3 and the `doc-researcher`, `doc-writer` and `doc-verifier` agents. The plugin install includes them; otherwise `./install.sh --agent <name>` for each. |
+| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder, or the README when you ask for it, through a guard script. | Needs Python 3 and the `doc-researcher`, `doc-writer` and `doc-verifier` agents. The plugin install includes them; otherwise `./install.sh --agent <name>` for each. |
 | `handoff` | Writes one redacted, size-capped resume note so a fresh session can continue the work. | Yes (Python 3) |
 | `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. | Yes |
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. | Needs `humanizer` |
@@ -98,6 +113,19 @@ If you write your own skill, this is the path:
 - Run `claude plugin eval` to check how the skill behaves.
 - Run `ci/lint-skills.sh` to check this repository's own contract: a trigger and a NOT-for case in each description, size limits, a `tests/` directory for every skill that ships a script, a README row for every skill and agent, and no hard-coded install paths.
 - Run `python3 -m pytest skills/<name>/tests -q` for a skill's tests, and `ci/check.sh` for the whole repository: it installs everything into a throwaway home, checks the installed files for outside references, and runs the lint and the lint's own fixtures.
+
+## Built on
+
+Little here is new. Each line names what this repository took from the source; some skill files carry their own prior-art sections with more detail.
+
+- [pstack](https://github.com/cursor/plugins/tree/main/pstack), by Lauren Tan: the shape of this collection. Small, situational skills that each work on their own and install together as one plugin, so you can adopt one without the rest. In `retro`, the three parallel reviewers with a synthesizer come from `reflect`, and the rule that a repeated mistake becomes a check before it becomes a rule comes from `correct`.
+- [Matt Pocock's skills](https://github.com/mattpocock/skills): with pstack, the model for a repository of standalone skills, each one a file you can read in a few minutes and use alone. `sharpen` adapts the relentless one-question interview of `grill-me` and `grilling`, and records what it kept and changed; `retro` takes the idea of a retrospective on the agent's environment, sorted by severity, from his `retro`.
+- [Kent Beck, Canon TDD](https://newsletter.kentbeck.com/p/canon-tdd): the red, green, refactor loop in `tdd`, and the rule that a test must fail before the change in `debug` and `builder-core`.
+- [Gary Klein, "Performing a Project Premortem"](https://hbr.org/2007/09/performing-a-project-premortem) (Harvard Business Review, 2007): the failure-modes lens in `shape`, which assumes the plan has already failed and asks why.
+- [Mutation testing](https://en.wikipedia.org/wiki/Mutation_testing) (DeMillo, Lipton and Sayward, 1978): the `reviewer` agent's step of breaking the guarded line to see a test fail, done by hand rather than with a tool.
+- [Anthropic's Agent Skills format](https://code.claude.com/docs/en/skills): the `SKILL.md` file with frontmatter that every skill here is written in.
+- [Wikipedia: Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing), maintained by WikiProject AI Cleanup: the pattern catalog in `humanizer`. The way that catalog is organised was inspired by [blader/humanizer](https://github.com/blader/humanizer), which built on the same page first.
+- `kickoff` has its own prior-art table, crediting Harper Reed, Simon Willison, `interview-me`, `spec-kit` and `launch-your-agent` for the interview-then-spec shape.
 
 ## Contributing and support
 
