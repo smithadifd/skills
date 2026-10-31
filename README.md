@@ -53,8 +53,8 @@ flowchart LR
 Four everyday situations, as the skills you run in order:
 
 - **A new idea.** `kickoff`, then `sharpen` on any requirement still vague, then `shape` once the direction is firm, then tickets in your tracker, each worked with `ticket`.
-- **A bug report.** `debug`, then `review`, then `pr`. If the bug has a ticket, `ticket` runs all three.
-- **Stopping for the day.** Inside a ticket pass, stop at a go: the card holds everything. On a topic, update the note. Anything else, `/handoff`. Then `/retro` if the session taught you something about your setup.
+- **A bug report.** `debug`, then `review`, then `pr`. If the bug has a ticket, run `ticket` instead: it delegates the build and keeps the card.
+- **Stopping for the day.** Inside a ticket pass, stop at a go and note the pass id: the card holds everything else. On a topic, update the note. Anything else, `/handoff`. Then `/retro` if the session taught you something about your setup.
 - **Picking up tomorrow.** `/pickup` from a handoff note, `/topic <slug>` from a topic, or `ticket` with the key and the pass id you noted yesterday.
 
 **[Where each skill fits](docs/lifecycle.md)** is the full guide. It has each of these as a numbered walkthrough, the session on one diagram (what to run at the start, in the middle and at the end), the project from idea to documented code, and three which-one-when tables: `kickoff`, `sharpen` or `shape`; `handoff`, `topic` or the ticket card; `debug`, `tdd` or `ticket`.
