@@ -228,6 +228,13 @@ def test_model_notes_falls_back_to_the_older_file_name(tmp_path, monkeypatch):
     assert topics_dir.normative_paths(topics)["model_notes"] == current
 
 
+def test_normative_paths_keeps_the_earlier_model_routing_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    topics = tmp_path / ".claude" / "topics"
+    paths = topics_dir.normative_paths(topics)
+    assert paths["model_routing"] == paths["model_notes"]
+
+
 def test_standalone_install_paths_are_documented():
     installed_path = "${CLAUDE_SKILL_DIR}/topics_dir.py"
     for filename in ("SKILL.md", "topics_dir.py", "config.json"):

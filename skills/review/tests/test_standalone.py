@@ -271,3 +271,28 @@ def test_no_harness_coupling_literals_in_skill_md():
     assert match is None, (
         f"review/SKILL.md contains a coupling literal: {match.group(0)!r}"
     )
+
+
+def test_a_failing_word_scan_is_not_read_as_clean(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text(PLANT, encoding="utf-8")
+    real_grep = shutil.which("grep")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "grep"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do [ "$arg" = "-aiqE" ] && exit 2; done\n'
+        f'exec {real_grep} "$@"\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    env = dict(os.environ, NO_PERSON_DENY=PLANT, PATH=f"{fake_bin}:{os.environ['PATH']}")
+    env.pop("OWNER", None)
+    env.pop("REPO", None)
+    result = subprocess.run(
+        ["bash", str(repo / "ci/check.sh"), "references"],
+        capture_output=True, text=True, check=False, env=env,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "installed file could not be scanned" in result.stderr

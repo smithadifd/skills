@@ -68,7 +68,7 @@ def resolve() -> KickoffPaths:
         topics_dir=topics_dir,
         topic_template=normative["template"],
         topic_convention=normative["convention"],
-        model_notes=normative["model_notes"],
+        model_notes=normative.get("model_notes") or normative["model_routing"],
     )
 
 

@@ -132,7 +132,11 @@ def _load_override(path: Path) -> Mapping[str, Any] | None:
                 for value in candidate.values()
             )
         )
-        for candidate in (root_paths, old_root_paths)
+        for candidate in (
+            root_paths,
+            # With the new key set, the old one is dropped, so it is not checked.
+            old_root_paths if _NOTES_ROOT_KEY not in data else None,
+        )
     )
     invalid_string = any(
         key in data and data[key] is not None and not isinstance(data[key], str)

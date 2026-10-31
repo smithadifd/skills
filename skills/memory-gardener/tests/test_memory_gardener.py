@@ -4453,7 +4453,7 @@ def test_classify_skips_index_and_shard_files():
     assert len(by_note) == 8
 
 
-def test_classify_harness_fact_carries_rules_file_line():
+def test_classify_documented_carries_rules_file_line():
     by_note, _ = _classify()
     assert by_note["review-before-merge.md"]["evidence"] == \
         "duplicates: classify_rules/house-rules.md:3"
@@ -4471,7 +4471,7 @@ def test_classify_per_class_evidence():
     assert "/etc/garden-notes/shed.conf" in gone["low_confidence"]
 
 
-def test_classify_without_rules_root_never_yields_harness_fact():
+def test_classify_without_rules_root_never_yields_documented():
     by_note, result = _classify(rules=(), ledger=())
     e = by_note["agent-worktree-habit.md"]
     assert e["class"] == "personal"
@@ -4481,7 +4481,7 @@ def test_classify_without_rules_root_never_yields_harness_fact():
     assert by_note["shed-roof-choice.md"]["evidence"] == "ledger: none yet"
 
 
-def test_classify_every_harness_fact_line_carries_file_line():
+def test_classify_every_documented_line_carries_file_line():
     _, result = _classify()
     facts = [e for e in result["entries"] if e["class"] == "documented"]
     assert facts
@@ -4489,7 +4489,7 @@ def test_classify_every_harness_fact_line_carries_file_line():
                for e in facts)
 
 
-def test_classify_with_rules_root_but_no_duplicate_is_not_harness_fact():
+def test_classify_with_rules_root_but_no_duplicate_is_not_documented():
     by_note, _ = _classify()
     e = by_note["agent-worktree-habit.md"]
     assert e["class"] == "personal"

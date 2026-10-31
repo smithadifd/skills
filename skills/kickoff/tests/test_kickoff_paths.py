@@ -301,3 +301,25 @@ def test_older_model_notes_file_name_is_still_read_without_topic(tmp_path):
     assert process.returncode == 0, process.stderr
     assert Path(json.loads(process.stdout)["model_notes"]) == legacy
     assert "model notes" not in process.stderr
+
+
+def test_kickoff_reads_an_older_topic_that_names_the_entry_model_routing(tmp_path):
+    copied_skills = _copy_skills(tmp_path, "topic", "kickoff")
+    resolver = copied_skills / "topic" / "topics_dir.py"
+    resolver.write_text(
+        resolver.read_text(encoding="utf-8")
+        + "\n\n_current_normative_paths = normative_paths\n\n\n"
+        "def normative_paths(topics):\n"
+        "    paths = dict(_current_normative_paths(topics))\n"
+        "    paths['model_routing'] = paths.pop('model_notes')\n"
+        "    return paths\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+
+    process = _run(copied_skills / "kickoff", home)
+
+    assert process.returncode == 0, process.stderr
+    assert Path(json.loads(process.stdout)["model_notes"]) == (
+        home / ".claude" / "standards" / "model-notes.md"
+    )

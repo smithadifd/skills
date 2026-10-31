@@ -191,6 +191,8 @@ def normative_paths(topics: Path) -> dict[str, Path]:
         "convention": topics / "README.md",
         "template": topics / "TEMPLATE.md",
         "model_notes": model_notes,
+        # The earlier name of the same entry, for a kickoff install that still reads it.
+        "model_routing": model_notes,
     }
 
 
@@ -212,8 +214,10 @@ def read_optional(path: Path) -> tuple[Optional[str], Optional[str]]:
 
 def collect_notices(topics: Path) -> tuple[str, ...]:
     notices: list[str] = []
-    for path in normative_paths(topics).values():
-        _text, notice = read_optional(path)
+    paths = normative_paths(topics)
+    # `model_routing` repeats `model_notes` for older callers: read each file once.
+    for key in ("convention", "template", "model_notes"):
+        _text, notice = read_optional(paths[key])
         if notice:
             notices.append(notice)
     return tuple(notices)

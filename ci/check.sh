@@ -108,9 +108,13 @@ check_private_words() {
       LC_ALL=C tr '\000' ' ' |
       LC_ALL=C awk -v owner="${OWNER:-}" -v repo="${REPO:-}" -f "$repo_dir/ci/strip-own-url.awk" |
       LC_ALL=C cut -d "$(printf '\001')" -f 2-) || fail "installed file could not be scanned: $path"
-    if LC_ALL=C grep -aiqE -e "$NO_PERSON_DENY" <<< "$stripped"; then
-      fail "installed file contains a private project name: $path"
-    fi
+    deny_status=0
+    LC_ALL=C grep -aiqE -e "$NO_PERSON_DENY" <<< "$stripped" || deny_status=$?
+    case "$deny_status" in
+      0) fail "installed file contains a private project name: $path" ;;
+      1) ;;
+      *) fail "installed file could not be scanned: $path" ;;
+    esac
   done < <(find "$root" -regex "$root/[^/]*/tests" -type d -prune -o \( -type f -o -type l \) -print0)
 }
 

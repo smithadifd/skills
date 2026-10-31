@@ -1238,3 +1238,15 @@ def test_resolver_receives_settings_under_both_key_names(tmp_path):
     received = json.loads(seen.read_text(encoding="utf-8"))
     assert received["notes_root"]["root"] == "/n"
     assert received[OLD_ROOT_KEY]["root"] == "/n"
+
+
+def test_malformed_old_key_is_ignored_when_the_new_key_is_valid(tmp_path):
+    home, script, _ = _dir_override_setup(
+        tmp_path,
+        {OLD_ROOT_KEY: "not-an-object", "notes_root": {"roadmaps": str(tmp_path / "new")}},
+    )
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "a malformed old key must not reject a valid new key")
+    assert Path(actual["roadmaps"]) == tmp_path / "new"
+    assert "wrong type" not in result.stderr
+    assert "using 'notes_root'" in result.stderr
