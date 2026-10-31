@@ -11,7 +11,7 @@ What that looks like in practice:
 - In a `ticket` pass, the build does not start until you have seen the plan and said go, and nothing leaves your machine (no push, no pull request, no comment on the ticket) until you have seen the result and said go again.
 - In `debug` and `tdd`, a fix is not a fix until a test has failed for the reported cause and then passed.
 - The `reviewer` agent sees the diff with no memory of how it was written, and its verdict shows what it ran.
-- `handoff` ends a session with a note whose claims are commands, so `pickup` can rerun them tomorrow instead of trusting them.
+- `handoff` ends a session with a note whose verified checks are commands, so `pickup` can rerun them tomorrow instead of trusting them.
 
 ## What this is
 
@@ -116,11 +116,11 @@ If you write your own skill, this is the path:
 
 ## Built on
 
-Little here is new. Each line names what this repository took from the source; the skill files cite the same sources where the borrowing is specific.
+Little here is new. Each line names what this repository took from the source; some skill files carry their own prior-art sections with more detail.
 
 - [Matt Pocock's skills](https://github.com/mattpocock/skills): `sharpen` adapts the relentless one-question interview of `grill-me` and `grilling`, and records what it kept and changed; `retro` takes the idea of a retrospective on the agent's environment, sorted by severity, from his `retro`.
 - [pstack](https://github.com/cursor/plugins/tree/main/pstack), by Lauren Tan: `retro` takes the three parallel reviewers with a synthesizer from `reflect`, and the rule that a repeated mistake becomes a check before it becomes a rule from `correct`.
-- [Kent Beck, Test-Driven Development: By Example](https://newsletter.kentbeck.com/p/canon-tdd): the red, green, refactor loop in `tdd`, and the rule that a test must fail before the change in `debug` and `builder-core`.
+- [Kent Beck, Canon TDD](https://newsletter.kentbeck.com/p/canon-tdd): the red, green, refactor loop in `tdd`, and the rule that a test must fail before the change in `debug` and `builder-core`.
 - [Gary Klein, "Performing a Project Premortem"](https://hbr.org/2007/09/performing-a-project-premortem) (Harvard Business Review, 2007): the failure-modes lens in `shape`, which assumes the plan has already failed and asks why.
 - [Mutation testing](https://en.wikipedia.org/wiki/Mutation_testing) (DeMillo, Lipton and Sayward, 1978): the `reviewer` agent's step of breaking the guarded line to see a test fail, done by hand rather than with a tool.
 - [Anthropic's Agent Skills format](https://code.claude.com/docs/en/skills): the `SKILL.md` file with frontmatter that every skill here is written in.

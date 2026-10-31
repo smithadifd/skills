@@ -39,7 +39,7 @@ flowchart TD
 
 - **You have a handoff note.** Run `/pickup`, with the note's path or with nothing to take the newest note. It reads the note without running anything, warns when the repository has a commit newer than the note, and lists the note's verified commands by number. You choose which to rerun. A command that fails, or that you did not rerun, is demoted to a claim, so the session starts from what is true now, not what was true yesterday.
 - **You are continuing a thread of work** that is not a ticket: an investigation, a design discussion, a migration you touch once a week. Run `/topic <slug>`. Every touch starts with a reconcile pass over the note's external references (tickets move, PRs merge) and stamps `Last synced` before any work happens.
-- **You have a ticket.** Run the `ticket` skill with the key. Its first act is to pull the live ticket, then read the card it kept from the last pass, and tell you which phase it resumes at and why. A changed acceptance criterion sends the pass back to planning; a stored plan is never trusted blindly.
+- **You have a ticket.** Run the `ticket` skill with the key, and with the pass id from last time if that pass is still live. Its first act is to pull the live ticket, then read the card it kept from the last pass, and tell you which phase it resumes at and why. A changed acceptance criterion sends the pass back to planning; a stored plan is never trusted blindly.
 - **You have a fresh ask.** Start the work. If it will outlive the sitting, open a topic for it now rather than at the end.
 
 ### Middle
@@ -93,7 +93,7 @@ flowchart LR
 - **A direction you are about to commit to.** `shape` fans out five read-only lenses (unknowns, edge cases, alternatives, a pre-mortem, hidden dependencies) and returns one ranked list of what to resolve before building. It changes nothing.
 - **Tickets.** Writing them is your tracker's job. This repository has no ticket-writing skill; `ticket` pulls a ticket by key from a tracker connector or from a local JSON file.
 - **The loop.** For each ticket, `ticket` runs the pass described above. For a change with no ticket, `tdd` or `debug` carry the same discipline without a builder agent. `ticket` always reviews before the outward go; outside a ticket, run `review` yourself before `pr`.
-- **Documentation.** `document` writes pages under the repository's docs folder through a researcher, a writer and a verifier agent, and writes only through a guard script. It is for durable pages. A code comment is edited directly; a pull request description is `pr`.
+- **Documentation.** `document` writes pages under the repository's docs folder, and the README when you ask for it, through a researcher, a writer and a verifier agent, and writes only through a guard script. It is for durable pages. A code comment is edited directly; a pull request description is `pr`.
 - **The periodic loop.** `retro` after a session that taught you something about the setup. `memory-gardener` when the memory index stops being one line per note.
 
 ## Which one when
@@ -104,7 +104,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | Start from | An idea, a sentence, a blank page | A known topic whose requirements are not pinned | A direction already chosen |
 | Does | Interviews, then researches, then writes a plan file | Interviews only, one question at a time | Red-teams in parallel, read-only |
-| Output | One plan file, with cited sources and follow-ups | One requirements brief, ratified by you or not at all | One ranked brief: resolve these first |
+| Output | One plan file, with cited sources and follow-ups | One requirements brief, a draft until you ratify it | One ranked brief: resolve these first |
 | Refuses | To implement anything real | A topic that is really a choice between known options | Not for code that already exists (that is `review`) |
 | Next | `sharpen` or `shape` where it points, or build | Whoever plans next cites the brief | Fold the mitigations in and hand it to whoever builds |
 
@@ -159,5 +159,5 @@ Each of these is standalone. `kickoff` recommends `sharpen` and `shape` by name 
 
 1. From a handoff note: run `/pickup`. Read the warning if the repository moved since the note. Approve the verified commands worth rerunning. Treat the note's decisions as context, not orders.
 2. From a topic: run `/topic <slug>`. Read the reconcile pass before acting; a PR named in the note may have merged overnight.
-3. From a ticket: run `ticket` with the key. Read every reconciliation line it prints before reusing anything stored. If yesterday's session crashed and left its claim, the refusal prints the exact release command.
+3. From a ticket: run `ticket` with the key and the pass id you noted yesterday. A pass stopped at a go is still live, and an open without its id is refused as held. Read every reconciliation line it prints before reusing anything stored. Only if yesterday's session crashed does its claim need the release command the refusal prints.
 4. Load the skills the note or card names, then continue from where it stopped.
