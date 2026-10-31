@@ -3,9 +3,7 @@ review/tests/test_omp_adapter.py 1 # run-envelope fixture field set to null
 review/tests/test_omp_prose_grammar.py 1 # run-envelope fixture field set to null
 review/tests/test_review_phase.py 2 # run-envelope contract and fixture field
 review/tests/test_standalone.py 4 # assertions reject configured project-specific paths
-sharpen/SKILL.md 7 # standalone and opt-in path-resolution contract terminology
-sharpen/config.json 2 # path-resolution contract keys and resolver note
-sharpen/paths.py 5 # path-resolution contract, override, and degradation keys
-sharpen/tests/test_sharpen_harness_root_resolution.py 36 # standalone and opt-in resolution assertions and contract names
+sharpen/SKILL.md 1 # note that the earlier directory key name is still read
 topic/tests/test_topics_dir.py 9 # assertions reject configured project-specific paths
 kickoff/tests/test_kickoff_paths.py 1 # environment cleanup and absence assertions reject project-specific paths
+sharpen/tests/test_sharpen_notes_root_resolution.py 2 # environment cleanup for the optional opt-in resolver

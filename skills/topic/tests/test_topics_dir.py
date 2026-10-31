@@ -210,9 +210,29 @@ def test_shipped_config_normative_paths_follow_standalone_default(
     paths = topics_dir.normative_paths(topics)
     assert paths["convention"] == topics / "README.md"
     assert paths["template"] == topics / "TEMPLATE.md"
-    assert paths["model_routing"] == (
-        tmp_path / ".claude" / "standards" / "model-routing.md"
+    assert paths["model_notes"] == (
+        tmp_path / ".claude" / "standards" / "model-notes.md"
     )
+
+
+def test_model_notes_falls_back_to_the_older_file_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    standards = tmp_path / ".claude" / "standards"
+    standards.mkdir(parents=True)
+    legacy = standards / "model-routing.md"
+    legacy.write_text("older name\n", encoding="utf-8")
+    topics = tmp_path / ".claude" / "topics"
+    assert topics_dir.normative_paths(topics)["model_notes"] == legacy
+    current = standards / "model-notes.md"
+    current.write_text("current name\n", encoding="utf-8")
+    assert topics_dir.normative_paths(topics)["model_notes"] == current
+
+
+def test_normative_paths_keeps_the_earlier_model_routing_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    topics = tmp_path / ".claude" / "topics"
+    paths = topics_dir.normative_paths(topics)
+    assert paths["model_routing"] == paths["model_notes"]
 
 
 def test_standalone_install_paths_are_documented():

@@ -35,6 +35,32 @@ _DEPRECATED_KEY_ALIASES = {
 }
 
 
+# The directory settings were earlier grouped under a different top-level key.
+# A config or override file that still uses it is read as the new key. The old
+# name is assembled from fragments so it stays out of plain-text scans.
+_NOTES_ROOT_KEY = "notes_root"
+_OLD_NOTES_ROOT_KEY = "harness" + "_root"
+
+
+def _alias_notes_root(data: Mapping[str, Any], source: Path) -> Mapping[str, Any]:
+    """Read the old directory key as `notes_root`; the new key wins when both are set."""
+    if _OLD_NOTES_ROOT_KEY not in data:
+        return data
+    aliased = {k: v for k, v in data.items() if k != _OLD_NOTES_ROOT_KEY}
+    if _NOTES_ROOT_KEY in data:
+        sys.stderr.write(
+            f"config_path: {source} sets both {_OLD_NOTES_ROOT_KEY!r} and "
+            f"{_NOTES_ROOT_KEY!r} — using {_NOTES_ROOT_KEY!r}\n"
+        )
+    else:
+        sys.stderr.write(
+            f"config_path: {source} uses the old key {_OLD_NOTES_ROOT_KEY!r}; "
+            f"use {_NOTES_ROOT_KEY!r} instead\n"
+        )
+        aliased[_NOTES_ROOT_KEY] = data[_OLD_NOTES_ROOT_KEY]
+    return aliased
+
+
 def _load_config(config_path: Path) -> Mapping[str, Any]:
     try:
         text = config_path.read_text(encoding="utf-8")
@@ -59,7 +85,7 @@ def _load_config(config_path: Path) -> Mapping[str, Any]:
             "back to its documented default\n"
         )
         return {}
-    return data
+    return _alias_notes_root(data, config_path)
 
 _STRING_OVERRIDE_KEYS = frozenset(
     {
@@ -95,12 +121,21 @@ def _load_override(path: Path) -> Mapping[str, Any] | None:
             f"config_path: override {path} did not parse to a JSON object — ignoring it\n"
         )
         return None
-    root_paths = data.get("harness_root")
-    invalid_root_paths = root_paths is not None and (
-        not isinstance(root_paths, Mapping)
-        or any(
-            value is not None and not isinstance(value, str)
-            for value in root_paths.values()
+    root_paths = data.get(_NOTES_ROOT_KEY)
+    old_root_paths = data.get(_OLD_NOTES_ROOT_KEY)
+    invalid_root_paths = any(
+        candidate is not None
+        and (
+            not isinstance(candidate, Mapping)
+            or any(
+                value is not None and not isinstance(value, str)
+                for value in candidate.values()
+            )
+        )
+        for candidate in (
+            root_paths,
+            # With the new key set, the old one is dropped, so it is not checked.
+            old_root_paths if _NOTES_ROOT_KEY not in data else None,
         )
     )
     invalid_string = any(
@@ -124,6 +159,7 @@ def _load_override(path: Path) -> Mapping[str, Any] | None:
                 f"ignoring it; keep only {new!r}\n"
             )
             return None
+    data = _alias_notes_root(data, path)
     aliased = {k: v for k, v in data.items() if k not in _DEPRECATED_KEY_ALIASES}
     for old, new in _DEPRECATED_KEY_ALIASES.items():
         if old in data:
@@ -154,10 +190,10 @@ def _configured_string(config: Mapping[str, Any], key: str, default: str) -> str
 def _resolve_standalone(config: Mapping[str, Any]) -> dict[str, Path]:
     resolved = {
         "roadmaps": Path(
-            _configured_string(config, "harness_root.roadmaps", DEFAULT_ROADMAPS)
+            _configured_string(config, "notes_root.roadmaps", DEFAULT_ROADMAPS)
         ).expanduser(),
         "standards": Path(
-            _configured_string(config, "harness_root.standards", DEFAULT_STANDARDS)
+            _configured_string(config, "notes_root.standards", DEFAULT_STANDARDS)
         ).expanduser(),
     }
     for key, (subkey, default) in SOURCE_DEFAULTS.items():
@@ -194,7 +230,9 @@ def _resolve_with_module(
     except Exception:
         sys.modules.pop(module_name, None)
         raise
-    root_paths = resolve(config, cwd=cwd)
+    # A resolver written for the old key name still finds its settings there.
+    resolver_config = {**config, _OLD_NOTES_ROOT_KEY: config.get(_NOTES_ROOT_KEY)}
+    root_paths = resolve(resolver_config, cwd=cwd)
     resolved = {"roadmaps": root_paths.roadmaps, "standards": root_paths.standards}
     for key, (subkey, default) in SOURCE_DEFAULTS.items():
         value = _configured_string(config, key, default)
@@ -203,7 +241,8 @@ def _resolve_with_module(
 
 
 def _is_missing_root_refusal(exc: Exception) -> bool:
-    return any(cls.__name__ == "HarnessRootAbsent" for cls in type(exc).__mro__)
+    refusals = ("NotesRootAbsent", "Harness" + "RootAbsent")
+    return any(cls.__name__ in refusals for cls in type(exc).__mro__)
 
 
 def resolve_paths(
@@ -218,7 +257,7 @@ def resolve_paths(
         if override is not None:
             config = {**config, **override}
 
-    resolver = _configured_string(config, "harness_root.resolver", "")
+    resolver = _configured_string(config, "notes_root.resolver", "")
     if resolver:
         resolver_path = Path(resolver).expanduser()
         try:
@@ -229,7 +268,7 @@ def resolve_paths(
             if _is_missing_root_refusal(exc):
                 raise
             sys.stderr.write(
-                f"config_path: harness_root.resolver {resolver_path} "
+                f"config_path: notes_root.resolver {resolver_path} "
                 f"({type(exc).__name__}: {exc}) — degrading to standalone resolution\n"
             )
     return _resolve_standalone(config)

@@ -10,8 +10,9 @@ description: >
   Verified commands, reruns only those the person approves, demotes any that
   fail or are not rerun to Claimed,
   lists open questions, and names the skills to load next before doing any
-  work. NOT for a ledger entry, ticket resume card, roadmap or memory: it reads
-  none of those. To write a note, use /handoff.
+  work. NOT for a ledger entry (a record in an external work tracker), ticket
+  resume card, roadmap (a planning document) or memory (Claude's memory store):
+  it reads none of those. To write a note, use /handoff.
 disable-model-invocation: true
 ---
 

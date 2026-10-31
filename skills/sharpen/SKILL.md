@@ -12,8 +12,8 @@ description: >
   the user ratifies it. REFUSES a topic that is really a bounded, reversible call with a
   real option set, handing back the drafted choice instead. Use when the user says "sharpen
   this", "run a sharpening session", "grill me on this", "let's go deeper before we plan
-  it", "interview me about what I actually want", or when another workflow routed a
-  requirements question here. NOT for red-teaming a direction already chosen (that is
+  it", "interview me about what I actually want", or when a requirements question
+  needs the user's own words. NOT for red-teaming a direction already chosen (that is
   `shape`), and NOT a multiple-choice question.
 ---
 
@@ -40,7 +40,7 @@ menu — spend the same channel. Ask only what only the user can answer.
   time, in the main loop, with the user present. No `AskUserQuestion` batch, no
   option menus, no fan-out of questions across sub-agents.
 - Its only deliverable is a **requirements mini-brief** (§ The output) —
-  **exactly one file**, written under `harness_root.roadmaps`. It never edits an
+  **exactly one file**, written under `notes_root.roadmaps`. It never edits an
   existing plan, tracker, direction record, standard, code, or any live system.
   Whoever plans next cites the brief; this skill does not plan.
 - **It AUTHORS a brief; it never CERTIFIES one.** An unratified brief confirms
@@ -61,19 +61,22 @@ and the four optional-source paths below.
 Path resolution is standalone by default: `paths.py` never discovers or delegates
 to a neighboring resolver. It reads `config.json` beside itself and resolves the
 configured directories and source filenames directly. The
-`harness_root.roadmaps` directory is the mini-brief directory; do not add
+`notes_root.roadmaps` directory is the mini-brief directory; do not add
 `brief_dir` or another alias for it.
 
 Missing, malformed, non-object, and non-string configuration values each emit one
-degradation line. Unset `harness_root.roadmaps` and `harness_root.standards`
+degradation line. Unset `notes_root.roadmaps` and `notes_root.standards`
 resolve to `~/.claude/roadmaps` and `~/.claude/standards`. For each source key
 below, an absolute or `~`-prefixed value stays explicit; a bare filename is joined
 to its named directory. Path precedence is explicit `--config`, then
 `~/.claude/skill-config/sharpen.json`, then shipped config, then built-in
-defaults; top-level keys are replaced whole, so an override `harness_root` object
+defaults; top-level keys are replaced whole, so an override `notes_root` object
 replaces the shipped one.
+An override or `--config` file that still uses the earlier name for this object
+(`harness_root`) is read as `notes_root` with one notice; when both are set,
+`notes_root` wins.
 
-Set `harness_root.resolver` to an absolute or `~`-prefixed Python file to opt in
+Set `notes_root.resolver` to an absolute or `~`-prefixed Python file to opt in
 to delegated resolution. Its module must provide `resolve(config, cwd=)` and
 `resolve_relative(paths, subkey, value)`; `--cwd` forwards a working directory
 to `resolve`. If the configured resolver reports that no root is set,
@@ -81,9 +84,8 @@ to `resolve`. If the configured resolver reports that no root is set,
 runtime failures emit one configuration line and degrade to the unchanged
 standalone resolution.
 
-**Install-specific routing is optional and lives outside this skill.** An install
-that keeps its own process documents (how questions get routed here, how a brief is
-cited, which models to use) points the four source keys below at those documents
+**Install-specific process notes are optional and live outside this skill.** An install
+that keeps its own process documents (how a brief is cited, which models to use) points the four source keys below at those documents
 through `~/.claude/skill-config/sharpen.json`. The skill reads each document only
 when it is present and follows it for the matter it covers; when it is absent the
 built-in default below applies and the skill still works in full.
@@ -96,24 +98,23 @@ Then continue with the corresponding built-in default:
 
 | Source | Resolution | Built-in default when unavailable |
 |---|---|---|
-| Brief dir | `harness_root.roadmaps` | Write the mini-brief here using `brief_filename_pattern`. This is the only write target. |
+| Brief dir | `notes_root.roadmaps` | Write the mini-brief here using `brief_filename_pattern`. This is the only write target. |
 | Process standard | `<standards>/process.md` (`process_standard`) | Apply this skill's refusal rule, authority boundary, ratification checks, and provenance format as written below; claim no external standard as authority. |
 | Direction record | `<roadmaps>/direction.md` (`direction_record`) | Treat every quote from before this conversation as stale and verify it with the user before relying on it. |
-| Routing context | `<roadmaps>/routing-context.md` (`routing_context`) | Continue without routing context and record `routing context unavailable` in the brief's provenance. |
+| Context notes | `<roadmaps>/routing-context.md` (`routing_context`) | Continue without context notes and record `context notes unavailable` in the brief's provenance. |
 | Model guidance | `<standards>/model-guidance.md` (`model_guidance`) | Stay in the current conversation and launch no fact-finding sub-agents. |
 
 ## Flow
 
 ### 0. Confirm this is a sharpening topic, not a choice (the refusal rule — which also re-fires mid-interview)
 
-**Apply the routing rule in this skill.** When `process_standard` is available,
+**Apply the refusal rule in this skill.** When `process_standard` is available,
 also read the part of it that covers requirements interviews and follow it where it
 is stricter. The three ways a session legitimately starts:
 
 1. **The user invokes it** — `/sharpen <topic>`, on anything they want sharpened.
-2. **Another workflow routed a requirements question here** — the question keeps
-   its original id, verbatim, and the routing step scheduled the session instead
-   of picking an answer.
+2. **A question that needs the user's own words** — another piece of work reached
+   a requirements question and scheduled a session instead of picking an answer.
 3. **An earlier session scheduled one** — a carried-forward note with the topic,
    the question, and why it needs the user's own words.
 
@@ -208,7 +209,7 @@ Write one file in the resolved `roadmaps` directory from `paths.py`, named
 # Sharpening brief — <topic>
 
 **STATUS: DRAFT — carries no authority until ratified.**
-**Session:** <YYYY-MM-DD> · <n> questions · <duration> · routed from <originating question id | earlier session note | user direct>
+**Session:** <YYYY-MM-DD> · <n> questions · <duration> · started from <the question | earlier session note | user direct>
 
 ## Must-dos
 - <the requirement, as a thing that must be true when this is done>
@@ -223,7 +224,7 @@ Write one file in the resolved `roadmaps` directory from `paths.py`, named
 - <question> — <cheapest way to answer it: prototype / spike / look at X> — <what it blocks>
 
 ## Provenance
-- Routed here by: <the rule + the surface that routed it>
+- Started by: <the user, or the earlier note or question that scheduled it>
 - Assumptions challenged and dropped during the session: <list, briefly>
 - Stale quotes tested: <quote (date)> — <still speaks / superseded by their answer>
 ```
@@ -316,7 +317,7 @@ reorder its fields.
   probing question asked mid-stream in a high-throughput session gets drowned.
 - **Fresh conversation, not stacked on the drafting session.** The drafter's
   option list is one of the assumptions being challenged, and a session carrying
-  it in context anchors on it. Bring the topic and the routing reference; leave
+  it in context anchors on it. Bring the topic and any context notes; leave
   the drafted answers behind.
 - **Model selection:** when `model_guidance` is available, read its session
   guidance live and follow it without hardcoding an id. When absent, remain in the
@@ -400,7 +401,7 @@ on an existing plan.
 | `skills/sharpen/config.json` | directory keys, filename pattern, optional source filenames, commit behavior |
 | `skills/sharpen/paths.py` | executable resolver for the write directory and optional sources |
 | `<roadmaps>/sharpen-<slug>-<date>.md` | the mini-brief — the ONLY file this skill writes |
-| `<standards>/process.md` (`process_standard`) | optional install-specific routing and citation rules; local fallback above |
+| `<standards>/process.md` (`process_standard`) | optional install-specific process and citation rules; local fallback above |
 | `<roadmaps>/direction.md` (`direction_record`) | optional quote-freshness boundary; conservative local fallback above |
-| `<roadmaps>/routing-context.md` (`routing_context`) | optional routing context; provenance fallback above |
+| `<roadmaps>/routing-context.md` (`routing_context`) | optional context notes; provenance fallback above |
 | `<standards>/model-guidance.md` (`model_guidance`) | optional session guidance; current-conversation fallback above |

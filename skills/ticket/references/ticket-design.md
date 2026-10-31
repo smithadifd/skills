@@ -2,7 +2,7 @@
 
 The code is checked against `test-matrix.md`: every behavior here maps to a named test.
 Scope: `skills/ticket/` (the pass, the plan identity, resume, both stores). The ledger CLI it relies on
-is the toolkit's, at the version that has `append --expect-revision` and `append-many`.
+is an external CLI that implements the contract in `SKILL.md`, at the version that has `append --expect-revision` and `append-many`.
 Both stores are built: the markdown store (section 6.1) and the ledger store (section 6.2, matrix
 section H). A configured `TICKET_LEDGER_CLI` selects the ledger store (section 6.3).
 
@@ -524,7 +524,7 @@ The ledger's event schemas are closed: a kind takes exactly the keys its schema 
 other. `decision.recorded` and `review.recorded` carry neither a plan identity nor a gate, and a
 decision cannot cite an event that lands in the same batch (its `source_event_id` must already
 exist). The store therefore writes the ticket's own records (plan, decision, review) as `item.note`
-events whose `text` is a self-describing *ticket record* (6.2.3), and uses the toolkit's kinds only
+events whose `text` is a self-describing *ticket record* (6.2.3), and uses the ledger's own kinds only
 where the schema holds every field unchanged (`item.created`, `session.*`, `item.stopped`,
 `item.tried`, `item.state`). No event cites another event; every record is complete on its own, so a
 batch resolves nothing and the ledger needs no new schema.
@@ -573,7 +573,7 @@ version lives inside the note text, where the skill, not the ledger, reads it.
 | every `source` | optional text ≥ 1 | `W`, never empty | H24 |
 
 The skill's validators (section I of the matrix) are at least as strict as each rule, so a payload the
-skill accepts is one the schema accepts; H24 pins this by running the toolkit's own `validate_payload`
+skill accepts is one the schema accepts; H24 pins this by running the ledger's own `validate_payload`
 over every batch the store builds. The kinds the store no longer writes are `decision.recorded`,
 `review.recorded` and `outside.recorded`; no payload carries `source_event_id`.
 
@@ -618,7 +618,7 @@ the normalizer walks every `item.note` of the export in id order:
   every decision note is one entry of `decisions` and every review note one entry of `reviews`, in id
   order.
 
-The toolkit's own `decision.recorded`, `review.recorded` and `outside.recorded` events on the item are
+The ledger's own `decision.recorded`, `review.recorded` and `outside.recorded` events on the item are
 another tool's and fold into nothing (H12).
 
 #### 6.2.4 Reading the CLI's answer
@@ -632,7 +632,7 @@ produces at this head, and what each becomes:
 | `ok: true` (0) | the batch landed, or a stored batch replayed | landed | the token becomes `data.events[-1].id` |
 | `stale_revision` (5) | `--expect-revision` no longer matches the item's newest event | lost race (the revision condition) | refusal `stale`; the message is the CLI's, naming the newest event's actor and session |
 | `conflict` (3) | a batch key is already stored under a different event | lost race (the write-once key condition: two sessions creating the item under `ticket-item/K/created`, or a key another writer took) | refusal `stale`; the message is the CLI's, naming the key |
-| `validation` (3) | a payload fails its schema (rolled back, nothing written) | permanent: a skill/toolkit mismatch the section-I validators should have caught | `StoreUnavailable` `ledger_refused` |
+| `validation` (3) | a payload fails its schema (rolled back, nothing written) | permanent: a skill/ledger mismatch the section-I validators should have caught | `StoreUnavailable` `ledger_refused` |
 | `missing_harness`, `shared_database`, `synced_path` (3) | the environment refuses writes | permanent | `ledger_refused` |
 | `not_found` (1) | the item does not exist | permanent on a write; on `read` it means no item: the blank card with token `none` | `ledger_refused` / the blank card |
 | `missing_db` (1) | the database file does not exist | permanent | `ledger_refused` |
@@ -642,7 +642,7 @@ produces at this head, and what each becomes:
 
 Only `stale_revision` and `conflict` are races, and `stale` is raised for nothing else. A permanent
 refusal ends the pass with no retry and no batch-key lookup (the batch was rolled back or never
-started); its message carries the CLI's code and message so a person can read what the toolkit
+started); its message carries the CLI's code and message so a person can read what the ledger
 refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once and reports `held`
 (section 5).
 

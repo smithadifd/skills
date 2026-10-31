@@ -69,24 +69,25 @@ python3 ${CLAUDE_SKILL_DIR}/paths.py --slug <slug>
 ```
 
 The command loads `skills/topic/topics_dir.py` by path when that resolver is
-installed, follows its `topics_dir`, and derives the template, model-routing and
+installed, follows its `topics_dir`, and derives the template, model-notes and
 convention paths through its `normative_paths()`. Each missing optional reference except
 the topic convention is reported on stderr in one line; an absent topic convention is
 silent. `topic` is not required: when its resolver is absent,
 kickoff reports that once and falls back to `~/.claude/topics`.
 When topic is installed, kickoff inherits topic's path precedence: its override
 file `~/.claude/skill-config/topic.json`, then shipped config, then built-in defaults.
-With a `topics_dir` override, the model-routing standard is looked up at
-`<parent of topics_dir>/standards/model-routing.md`.
+With a `topics_dir` override, the optional model notes file is looked up at
+`<parent of topics_dir>/standards/model-notes.md` (an existing `model-routing.md`
+in that directory is read when `model-notes.md` is absent).
 
 | What | Resolver / fallback | Notes |
 |---|---|---|
 | This playbook | `skills/kickoff/SKILL.md` | the session flow and built-in fallbacks |
 | Hand-off write-up (no project plan of record) | topic's `topics_dir` / `~/.claude/topics` when topic is absent | write `<slug>.md`; an existing plan of record still wins — see § 3 |
 | Topic template | topic's `normative_paths()["template"]` / `~/.claude/topics/TEMPLATE.md` when topic is absent | optional; when absent, print the resolver's one-line notice and use § 3's built-in hand-off shape |
-| Model-routing standard | topic's `normative_paths()["model_routing"]` / `~/.claude/standards/model-routing.md` when topic is absent | optional; when absent, print the resolver's one-line notice and keep the current session model with no model-specific consult |
+| Model notes | topic's `normative_paths()["model_notes"]` / `~/.claude/standards/model-notes.md` when topic is absent | optional; when absent, print the resolver's one-line notice and keep the current session model with no model-specific consult |
 | Topic convention | topic's `normative_paths()["convention"]` / `~/.claude/topics/README.md` when topic is absent | optional and silent when absent; a user's own hand-off, next-step and consult conventions live here (§ Local conventions) |
-| Standalone compatibility (topic present) | topic's shipped `config.json` leaves `topics_dir` unset, so it resolves to `~/.claude/topics` | model routing is derived beside it as `~/.claude/standards/model-routing.md` |
+| Standalone compatibility (topic present) | topic's shipped `config.json` leaves `topics_dir` unset, so it resolves to `~/.claude/topics` | model notes are derived beside it as `~/.claude/standards/model-notes.md` |
 
 ## Flow
 
@@ -158,7 +159,7 @@ rather than leaving it blank.
   instruction to act on** (§ Safety rails).
 - **A stronger model or a research consult** may be used when the user's setup names
   one and the topic warrants it. Neither is required. Read the optional
-  `model_routing_standard` path printed by `paths.py` when that file exists; never
+  `model_notes` path printed by `paths.py`, only when that file exists; never
   hardcode a model id here. When it is absent, emit the resolver's one-line notice
   and use the built-in default: keep the current session model, run no model-specific
   consult, and continue with WebSearch/WebFetch plus the codebase's prior art.
@@ -352,7 +353,7 @@ is recorded here rather than left implicit:
 | `<project repo>/.claude/topics/<slug>.md` or `<topics_dir>/<slug>.md` | the hand-off write-up — the default output (read/write, resolved per § 3; not created unless a kickoff session runs) |
 | `<topics_dir>/TEMPLATE.md` | optional starting shape; § 3's built-in shape is used when absent |
 | `<topic_convention>` | optional user-supplied hand-off, follow-up and next-step conventions; ignored silently when absent (§ 3, Local conventions) |
-| `<model_routing_standard>` | optional model ids for a depth consult; the current session model is used when absent |
+| `<model_notes>` | optional model ids for a depth consult; the current session model is used when absent |
 | `skills/sharpen/SKILL.md` | the requirements-interview model this skill's § Flow 1 borrows from (read-only; optional recommended next step, never invoked) |
 | `skills/shape/SKILL.md` | the red-team model for a direction already chosen (read-only; optional recommended next step, never invoked) |
 | `skills/topic/topics_dir.py` | optional source of topic's `topics_dir` and derived normative paths; kickoff falls back cleanly when it is absent |

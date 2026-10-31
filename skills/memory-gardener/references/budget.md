@@ -14,7 +14,7 @@ python3 memory_gardener.py budget --json                            # machine-re
 python3 memory_gardener.py budget --taxonomy my-shards.json         # override groupings
 ```
 
-- **Token cost method.** A dependency-free **chars/4** approximation (the toolkit
+- **Token cost method.** A dependency-free **chars/4** approximation (this repository
   ships no tokenizer and prefers zero-dep helpers). It's a tripwire, not an
   invoice — the ceiling is generous enough to absorb the imprecision.
 - **Budget.** Configurable `--max-tokens` (default **4500**) and `--max-lines`
@@ -39,7 +39,7 @@ python3 memory_gardener.py budget --taxonomy my-shards.json         # override g
   isn't.
 - **Topic-sharding proposal.** When over budget, `budget` proposes splitting
   `MEMORY.md` into a small always-loaded **core index** plus topic sub-indexes
-  (`MEMORY.fleet.md`, `MEMORY.infra.md`, `MEMORY.automation.md`,
+  (`MEMORY.workflow.md`, `MEMORY.infra.md`, `MEMORY.automation.md`,
   `MEMORY.secrets.md`, …) pulled **just-in-time**. Each shard gets a one-line
   JIT pointer in the core index. It stays **markdown** on purpose — grep/Explore
   displaces an embedding index, so there's no vector store to maintain. Notes

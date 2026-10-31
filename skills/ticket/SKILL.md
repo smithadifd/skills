@@ -67,8 +67,9 @@ token is a digest of the card as the pass last read or wrote it. If anything
 changed the card since then, another session or a hand edit, the write is
 refused as `stale` and the pass ends. Open it again to see the change.
 
-`choose_store` returns the markdown store unless `TICKET_LEDGER_CLI` names a
-ledger CLI (an empty value counts as unset); then it returns the ledger store,
+`choose_store` returns the markdown store unless `TICKET_LEDGER_CLI` names an
+external ledger CLI that implements the contract below (an empty value counts as
+unset; this repository does not ship one); then it returns the ledger store,
 which keeps the card as the events of one ledger item. There the token is the
 item's newest event id, and each step is one `append-many` under
 `--expect-revision`, so concurrent writers never interleave half a step and a
@@ -76,6 +77,23 @@ lost race is `stale`. A CLI without `append-many` or `--expect-revision` is
 refused (`ledger_incompatible`) before anything is read or written. Any other
 refusal by the CLI is `ledger_refused` and carries the CLI's own code and
 message; never retry it as if it were `stale`.
+
+The ledger CLI contract. Every call is `<cli> --json <verb> ...` and the CLI
+prints one JSON envelope, `{"ok": true, "data": ...}` or
+`{"ok": false, "error": {"code": ..., "message": ...}}`:
+
+- `append-many <item> [--expect-revision <n>]` reads a JSON array of events on
+  stdin (each with `kind`, `payload`, `item_id` and an `idempotency_key`) and appends them
+  as one atomic batch; `data.events[-1].id` is the new revision. `append-many
+  --help` must exit 0 and name `--expect-revision`. A replayed key writes
+  nothing. The error codes `stale_revision` and `conflict` are lost races.
+- `query --item <item>` gives `data.items` rows with `item_id`, `type`,
+  `revision`, `owner` and `claim`; the codes `not_found` and `empty` mean no
+  such item.
+- `export-item <item>` gives `data.events` in id order, each with `id`, `kind`,
+  `payload` and `idempotency_key`.
+- `usage` is an unknown command or flag. Codes such as `validation` and
+  `integrity` are permanent refusals.
 
 ## One live pass
 

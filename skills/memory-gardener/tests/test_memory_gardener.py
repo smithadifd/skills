@@ -687,7 +687,7 @@ def test_render_report_smoke():
 # =========================================================================== #
 
 # A garden-themed taxonomy so the invented fixture notes classify predictably —
-# mirrors the real fleet/infra/automation/secrets default taxonomy in shape.
+# mirrors the workflow/infra/automation/secrets default taxonomy in shape.
 GARDEN_TAXONOMY = [
     ("watering", "Watering & irrigation", ["hose", "sprinkler", "spigot"]),
     ("tools", "Yard tools & equipment", ["mower", "trimmer", "hedge"]),
@@ -737,27 +737,27 @@ def test_classify_shard_first_keyword_wins_else_core():
 
 
 def test_default_taxonomy_classifies_real_topic_shapes():
-    # Sanity on the shipped default taxonomy (anonymized real stems).
-    assert mg.classify_shard("fleet-roadmap", mg.DEFAULT_SHARD_TAXONOMY) == "fleet"
+    # Sanity on the shipped default taxonomy.
+    assert mg.classify_shard("workflow-roadmap", mg.DEFAULT_SHARD_TAXONOMY) == "workflow"
     assert mg.classify_shard("infra-living-map", mg.DEFAULT_SHARD_TAXONOMY) == "infra"
-    assert mg.classify_shard("ai-coding-tasks-pipeline", mg.DEFAULT_SHARD_TAXONOMY) == "automation"
-    assert mg.classify_shard("op-tcc-appdata-gate", mg.DEFAULT_SHARD_TAXONOMY) == "secrets"
+    assert mg.classify_shard("nightly-report-pipeline", mg.DEFAULT_SHARD_TAXONOMY) == "automation"
+    assert mg.classify_shard("credential-rotation-gate", mg.DEFAULT_SHARD_TAXONOMY) == "secrets"
     assert mg.classify_shard("patio-umbrella", mg.DEFAULT_SHARD_TAXONOMY) is None
 
 
 def test_default_taxonomy_classifies_generic_note_stems():
     tax = mg.DEFAULT_SHARD_TAXONOMY
     assert [name for name, _label, _keys in tax] == [
-        "fleet", "infra", "automation", "secrets",
+        "workflow", "infra", "automation", "secrets",
     ]
     assert mg.classify_shard("vpn-exit-node-setup", tax) == "infra"
     assert mg.classify_shard("media-server-update", tax) == "infra"
     assert mg.classify_shard("nas-backup-plan", tax) == "infra"
     assert mg.classify_shard("password-manager-migration", tax) == "secrets"
     assert mg.classify_shard("sync-folder-layout", tax) == "secrets"
-    assert mg.classify_shard("podcast-feed-refresh", tax) == "automation"
-    assert mg.classify_shard("streaming-library-index", tax) == "automation"
-    assert mg.classify_shard("broker-trade-digest", tax) == "automation"
+    assert mg.classify_shard("newsletter-feed-refresh", tax) == "automation"
+    assert mg.classify_shard("weekly-report-index", tax) == "automation"
+    assert mg.classify_shard("weekly-trade-digest", tax) == "automation"
 
 
 def test_default_taxonomy_keywords_do_not_match_inside_longer_words():
@@ -918,7 +918,7 @@ def test_taxonomy_precedence_store_local_wins_defaults_stop_limit_regression(
     assert "Taxonomy source: %s" % source in shard_io.out
     assert "MEMORY.mechanics.md" in budget_io.out
     assert "MEMORY.mechanics.md" in shard_io.out
-    # The built-in "op-" substring must not misfile st[op-l]imit as secrets.
+    # The built-in defaults must not misfile stop-limit notes as secrets.
     assert "MEMORY.secrets.md" not in budget_io.out + shard_io.out
 
 
@@ -1541,8 +1541,8 @@ def test_shard_pointer_line_never_classified_into_a_shard():
     """A bullet linking to MEMORY.<topic>.md (or carrying the JIT suffix) is a
     pointer, not a note — propose_shards must never fold it into a shard even
     when its stem keyword-matches the taxonomy."""
-    # DEFAULT taxonomy: `MEMORY.fleet` would match the "fleet" keyword.
-    pointer = ("- [MEMORY.fleet.md](MEMORY.fleet.md) — Fleet / Overview · "
+    # DEFAULT taxonomy: `MEMORY.workflow` would match the "workflow" keyword.
+    pointer = ("- [MEMORY.workflow.md](MEMORY.workflow.md) — Workflow / Overview · "
                "11 notes · ~500 tok · load JIT when the topic comes up")
     text = ("# Memory Index\n\n%s\n- [Notes](notes.md) — meta repo\n"
             % pointer)
@@ -4115,7 +4115,7 @@ def test_index_line_re_keys_off_the_first_link_not_the_last():
     line does). The nested-bracket fix must not become a greedy
     match-to-the-final-`](`, which would re-key the line to the wrong note."""
     ln = ("- [**NETWORK/OUTAGE**](network-outage.md) — read the syslog first. "
-          "Studio-only dark → [studio-wifi-wedge](studio-wifi-wedge.md)\n")
+          "Garage-only dark → [garage-wifi-wedge](garage-wifi-wedge.md)\n")
     assert mg.INDEX_LINE_RE.match(ln).group(1) == "network-outage.md"
 
 
@@ -4302,12 +4302,12 @@ def test_extend_dryrun_states_the_refusal_it_would_hit(tmp_path):
 def test_refresh_shard_pointer_updates_stats_only(tmp_path):
     """The stats segment is rewritten; every other byte of the line survives,
     including hand-added prose after the generated suffix."""
-    pointer = mg._shard_pointer("fleet", "Fleet stuff", 41, 3487)
+    pointer = mg._shard_pointer("workflow", "Workflow stuff", 41, 3487)
     hand_augmented = pointer + " · **standing note a human added**"
     core = "# Index\n\n%s\n- [Note](note.md) — a core note\n" % hand_augmented
-    shard = "# Fleet\n\n- [A](a.md) — one\n- [B](b.md) — two\n"
+    shard = "# Workflow\n\n- [A](a.md) — one\n- [B](b.md) — two\n"
 
-    out = mg.refresh_shard_pointer(core, "MEMORY.fleet.md", shard)
+    out = mg.refresh_shard_pointer(core, "MEMORY.workflow.md", shard)
 
     assert "· 2 notes · ~%d tok ·" % mg.estimate_tokens(shard) in out
     assert "3487" not in out
@@ -4320,11 +4320,11 @@ def test_refresh_shard_pointer_updates_stats_only(tmp_path):
 def test_refresh_shard_pointer_is_a_noop_for_unknown_or_unparsable(tmp_path):
     """No pointer for that shard, or a pointer edited past recognition, is left
     alone rather than guessed at."""
-    core = "# Index\n\n%s\n" % mg._shard_pointer("fleet", "Fleet", 1, 10)
+    core = "# Index\n\n%s\n" % mg._shard_pointer("workflow", "Workflow", 1, 10)
     assert mg.refresh_shard_pointer(core, "MEMORY.infra.md", "x") == core
-    mangled = "# Index\n\n- [MEMORY.fleet.md](MEMORY.fleet.md) — no stats here\n"
-    assert mg.refresh_shard_pointer(mangled, "MEMORY.fleet.md", "x") == mangled
-    assert mg.refresh_shard_pointer("", "MEMORY.fleet.md", "x") == ""
+    mangled = "# Index\n\n- [MEMORY.workflow.md](MEMORY.workflow.md) — no stats here\n"
+    assert mg.refresh_shard_pointer(mangled, "MEMORY.workflow.md", "x") == mangled
+    assert mg.refresh_shard_pointer("", "MEMORY.workflow.md", "x") == ""
 
 
 def test_apply_refreshes_the_pointer_of_every_shard_it_rewrites(tmp_path):
@@ -4439,7 +4439,7 @@ def test_classify_assigns_each_class_from_a_fixture_note():
     by_note, _ = _classify()
     assert by_note["user-prefers-tea.md"]["class"] == "personal"
     assert by_note["terse-answers.md"]["class"] == "personal"
-    assert by_note["review-before-merge.md"]["class"] == "harness-fact"
+    assert by_note["review-before-merge.md"]["class"] == "documented"
     assert by_note["shed-roof-choice.md"]["class"] == "decision"
     assert by_note["hose-reel-gotcha.md"]["class"] == "project-gotcha"
     assert by_note["old-fence-plan.md"]["class"] == "stale"
@@ -4453,7 +4453,7 @@ def test_classify_skips_index_and_shard_files():
     assert len(by_note) == 8
 
 
-def test_classify_harness_fact_carries_rules_file_line():
+def test_classify_documented_carries_rules_file_line():
     by_note, _ = _classify()
     assert by_note["review-before-merge.md"]["evidence"] == \
         "duplicates: classify_rules/house-rules.md:3"
@@ -4471,27 +4471,27 @@ def test_classify_per_class_evidence():
     assert "/etc/garden-notes/shed.conf" in gone["low_confidence"]
 
 
-def test_classify_without_rules_root_never_yields_harness_fact():
+def test_classify_without_rules_root_never_yields_documented():
     by_note, result = _classify(rules=(), ledger=())
-    e = by_note["seat-worktree-habit.md"]
+    e = by_note["agent-worktree-habit.md"]
     assert e["class"] == "personal"
     assert e["evidence"] == "type=feedback; duplicates: not searched"
     assert "not searched" in e["low_confidence"]
-    assert result["counts"]["harness-fact"] == 0
+    assert result["counts"]["documented"] == 0
     assert by_note["shed-roof-choice.md"]["evidence"] == "ledger: none yet"
 
 
-def test_classify_every_harness_fact_line_carries_file_line():
+def test_classify_every_documented_line_carries_file_line():
     _, result = _classify()
-    facts = [e for e in result["entries"] if e["class"] == "harness-fact"]
+    facts = [e for e in result["entries"] if e["class"] == "documented"]
     assert facts
     assert all(re.search(r"^duplicates: \S+\.md:\d+$", e["evidence"])
                for e in facts)
 
 
-def test_classify_with_rules_root_but_no_duplicate_is_not_harness_fact():
+def test_classify_with_rules_root_but_no_duplicate_is_not_documented():
     by_note, _ = _classify()
-    e = by_note["seat-worktree-habit.md"]
+    e = by_note["agent-worktree-habit.md"]
     assert e["class"] == "personal"
     assert e["low_confidence"]
 
@@ -4500,7 +4500,7 @@ def test_classify_report_count_line_matches_entries():
     _, result = _classify()
     text = mg.render_classify_report(result)
     assert text.splitlines()[1] == (
-        "counts: personal=3 harness-fact=1 decision=1 project-gotcha=2 "
+        "counts: personal=3 documented=1 decision=1 project-gotcha=2 "
         "stale=1 total=8")
     body = [ln for ln in text.splitlines() if " | " in ln]
     assert len(body) == 8
@@ -4617,7 +4617,7 @@ def test_classify_class_ignores_whether_a_quoted_path_exists(tmp_path, monkeypat
     "/private/tmp/<x>", HOME_TOKEN + "/work/*/notes.md",
     HOME_TOKEN + "/code/{a,b}/x.md", HOME_TOKEN + "/work/.../file",
     "https://example.org/a/b", "/api/v1/items", "/" + "tmp/scratch/out.txt",
-    HOME_TOKEN + "/repos/wt/EK1/file.md",
+    HOME_TOKEN + "/repos/wt/ABC1/file.md",
     HOME_TOKEN + "/proj/.claude/worktrees/abc/file.md",
 ])
 def test_classify_ignores_placeholder_route_and_scratch_paths(tmp_path, token):
@@ -4654,8 +4654,8 @@ def test_find_duplicate_rejects_a_long_line_that_merely_contains_the_words(tmp_p
     assert mg._find_duplicate(DUP_DESC, md) == "rules/r.md:1"
 
 
-def test_find_duplicate_ignores_generic_harness_words(tmp_path):
-    generic = "harness session standard worktree director builder"
+def test_find_duplicate_ignores_generic_tooling_words(tmp_path):
+    generic = "harness session standard worktree reviewer builder"
     md = _rule_lines(tmp_path, generic + " alpha bravo charlie delta")
     assert mg._find_duplicate(generic + " alpha bravo charlie delta", md) is None
 
