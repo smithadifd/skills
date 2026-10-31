@@ -89,7 +89,7 @@ digest prose, both take priority over the defaults below.
   on the data three different ways — a finance-flavored instance of the CORE's general
   judgment against padding, not a new rule.
 - **Forward-looking market views usually read better attributed than asserted as
-  fact** — "the strip is pricing a slower cutting path," "the author expects," rather
+  fact** — "the strip is pricing a slower cutting path," "analysts expect," rather
   than stating an expectation as if it had already happened. This is this register's
   edge case of the CORE's evidence-boundary rule: a market's current pricing or
   expectation is real and citable, but it's a different category of claim from

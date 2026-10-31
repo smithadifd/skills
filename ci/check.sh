@@ -81,13 +81,22 @@ check_outside_references() {
 }
 
 check_private_words() {
-  local root path first second
+  local root path deny_status
   root=$1
-  first='foun''dry'
-  second='claude''[-_]toolkit'
+  # The private words come from NO_PERSON_DENY, a grep extended regular
+  # expression (term1|term2|...), as in ci/lint-skills.sh. No name is spelled
+  # in this repository. Unset or empty, the word scan is skipped with a notice.
+  if [ -z "${NO_PERSON_DENY:-}" ]; then
+    printf 'NOTE: NO_PERSON_DENY is unset; the private-word scan of installed files was skipped\n'
+  else
+    deny_status=0
+    printf '' | grep -iE -e "$NO_PERSON_DENY" > /dev/null 2>&1 || deny_status=$?
+    [ "$deny_status" -ne 2 ] || fail 'NO_PERSON_DENY is not a valid extended regular expression'
+  fi
   while IFS= read -r -d '' path; do
     [ -f "$path" ] || fail "installed file contains an unreadable symlink: $path"
-    if LC_ALL=C grep -aiqE "$first|$second" "$path"; then
+    [ -n "${NO_PERSON_DENY:-}" ] || continue
+    if LC_ALL=C grep -aiqE -e "$NO_PERSON_DENY" "$path"; then
       fail "installed file contains a private project name: $path"
     fi
   done < <(find "$root" -regex "$root/[^/]*/tests" -type d -prune -o \( -type f -o -type l \) -print0)

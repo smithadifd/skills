@@ -33,27 +33,39 @@ def private_reference_repo(tmp_path, include_tests=True):
     return repo
 
 
-@pytest.mark.parametrize("name", ["foun" + "dry", "claude" + "-toolkit"])
-@pytest.mark.parametrize("target", ["skills/example/SKILL.md", "agents/example.md"])
-def test_installed_private_name_is_rejected(tmp_path, name, target):
-    repo = private_reference_repo(tmp_path)
-    (repo / target).write_text(f"See {name} for details.\n", encoding="utf-8")
-    result = subprocess.run(
+# A synthetic word, assembled at run time, stands in for a private name. The
+# real names come from NO_PERSON_DENY and are never spelled in this repository.
+PLANT = "zz" + "planted"
+
+
+def run_references(repo, deny=PLANT):
+    env = dict(os.environ)
+    if deny is None:
+        env.pop("NO_PERSON_DENY", None)
+    else:
+        env["NO_PERSON_DENY"] = deny
+    return subprocess.run(
         ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, env=env,
     )
-    assert result.returncode == 1, f"{target} private name was accepted: {result.stderr}"
+
+
+def assert_rejected(result, why):
+    assert result.returncode == 1, f"{why}: {result.stdout}{result.stderr}"
     assert "installed file contains a private project name" in result.stderr
 
 
-@pytest.mark.parametrize("name", ["foun" + "dry", "claude" + "-toolkit"])
-def test_private_name_in_test_file_is_allowed(tmp_path, name):
+@pytest.mark.parametrize("target", ["skills/example/SKILL.md", "agents/example.md"])
+def test_installed_private_name_is_rejected(tmp_path, target):
     repo = private_reference_repo(tmp_path)
-    (repo / "skills/example/tests/test_example.py").write_text(name, encoding="utf-8")
-    result = subprocess.run(
-        ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
-    )
+    (repo / target).write_text(f"See {PLANT} for details.\n", encoding="utf-8")
+    assert_rejected(run_references(repo), f"{target} private name was accepted")
+
+
+def test_private_name_in_test_file_is_allowed(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/tests/test_example.py").write_text(PLANT, encoding="utf-8")
+    result = run_references(repo)
     assert result.returncode == 0, result.stderr
 
 
@@ -63,47 +75,57 @@ def test_installed_symlink_to_test_file_with_private_name_is_rejected(tmp_path):
     skill.unlink()
     skill.symlink_to("tests/test_example.py")
     (repo / "skills/example/tests/test_example.py").write_text(
-        "See " + "foun" + "dry for details.\n", encoding="utf-8"
+        f"See {PLANT} for details.\n", encoding="utf-8"
     )
-    result = subprocess.run(
-        ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
-    )
-    assert result.returncode == 1, f"installed symlink private name was accepted: {result.stderr}"
-    assert "installed file contains a private project name" in result.stderr
+    assert_rejected(run_references(repo), "installed symlink private name was accepted")
 
 
-@pytest.mark.parametrize("name", [
-    "FOUN" + "DRY_ROOT",
-    "foun" + "dryctl",
-    "claude" + "_toolkit",
-])
-def test_private_name_substrings_are_rejected(tmp_path, name):
+def test_private_name_substring_is_rejected(tmp_path):
     repo = private_reference_repo(tmp_path)
-    (repo / "skills/example/SKILL.md").write_text(name, encoding="utf-8")
-    result = subprocess.run(
-        ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
-    )
-    assert result.returncode == 1, f"private name substring was accepted: {result.stderr}"
-    assert "installed file contains a private project name" in result.stderr
+    (repo / "skills/example/SKILL.md").write_text("pre" + PLANT + "ctl", encoding="utf-8")
+    assert_rejected(run_references(repo), "private name substring was accepted")
 
 
 def test_private_name_case_is_ignored(tmp_path):
     repo = private_reference_repo(tmp_path)
-    (repo / "skills/example/SKILL.md").write_text("FoUn" + "DrY", encoding="utf-8")
-    result = subprocess.run(
-        ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
+    (repo / "skills/example/SKILL.md").write_text(PLANT.upper(), encoding="utf-8")
+    assert_rejected(run_references(repo), "mixed-case private name was accepted")
+
+
+def test_every_alternative_of_the_deny_expression_is_scanned(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text("zz" + "second", encoding="utf-8")
+    assert_rejected(
+        run_references(repo, deny=PLANT + "|zz" + "second"),
+        "second alternative was accepted",
     )
-    assert result.returncode == 1, f"mixed-case private name was accepted: {result.stderr}"
-    assert "installed file contains a private project name" in result.stderr
+
+
+def test_clean_installed_files_pass_with_a_deny_expression(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    result = run_references(repo)
+    assert result.returncode == 0, result.stderr
+
+
+def test_unset_deny_expression_skips_the_scan_with_a_notice(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text(PLANT, encoding="utf-8")
+    result = run_references(repo, deny=None)
+    assert result.returncode == 0, result.stderr
+    assert "NO_PERSON_DENY is unset" in result.stdout
+
+
+def test_invalid_deny_expression_is_refused(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    result = run_references(repo, deny="(")
+    assert result.returncode == 1
+    assert "NO_PERSON_DENY is not a valid extended regular expression" in result.stderr
 
 
 @pytest.mark.parametrize("entry", ["symlink", "file", "nested"])
 def test_non_test_directory_named_tests_is_scanned(tmp_path, entry):
     repo = private_reference_repo(tmp_path, include_tests=False)
-    content = "foun" + "dry"
+    content = PLANT
     if entry == "symlink":
         outside = tmp_path / "outside.md"
         outside.write_text(content, encoding="utf-8")
@@ -114,40 +136,33 @@ def test_non_test_directory_named_tests_is_scanned(tmp_path, entry):
         nested = repo / "skills/example/references/tests"
         nested.mkdir(parents=True)
         (nested / "a.md").write_text(content, encoding="utf-8")
-    result = subprocess.run(
-        ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
-    )
-    assert result.returncode == 1, f"{entry} named tests was accepted: {result.stderr}"
-    assert "installed file contains a private project name" in result.stderr
+    assert_rejected(run_references(repo), f"{entry} named tests was accepted")
 
 
 def test_unreadable_installed_symlink_is_rejected(tmp_path):
     repo = private_reference_repo(tmp_path)
     (repo / "skills/example/missing.md").symlink_to("absent.md")
-    result = subprocess.run(
-        ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
-    )
+    result = run_references(repo)
     assert result.returncode == 1, f"unreadable symlink was accepted: {result.stderr}"
     assert "installed file contains an unreadable symlink" in result.stderr
 
 
 def test_private_name_in_invalid_utf8_file_is_rejected(tmp_path):
     repo = private_reference_repo(tmp_path)
-    (repo / "skills/example/SKILL.md").write_bytes(b"\xff" + b"foun" + b"dry")
-    result = subprocess.run(
-        ["bash", str(repo / "ci/check.sh"), "references"],
-        capture_output=True, text=True, check=False,
+    (repo / "skills/example/SKILL.md").write_bytes(b"\xff" + PLANT.encode())
+    assert_rejected(run_references(repo), "invalid UTF-8 private name was accepted")
+
+
+def test_check_script_reads_the_private_words_from_the_environment():
+    check = CHECK_SCRIPT.read_text(encoding="utf-8")
+    assert "NO_PERSON_DENY" in check
+    deny = os.environ.get("NO_PERSON_DENY", "").strip()
+    if not deny:
+        pytest.skip("NO_PERSON_DENY is unset")
+    hits = subprocess.run(
+        ["grep", "-a", "-i", "-E", "-e", deny], input=check.encode(), capture_output=True
     )
-    assert result.returncode == 1, f"invalid UTF-8 private name was accepted: {result.stderr}"
-    assert "installed file contains a private project name" in result.stderr
-
-
-def test_private_names_are_not_spelled_out_in_check_script():
-    check = CHECK_SCRIPT.read_text(encoding="utf-8").lower()
-    assert "foun" + "dry" not in check
-    assert "claude" + "-toolkit" not in check
+    assert hits.returncode == 1, "the check script must not spell a denied name"
 
 
 @pytest.mark.parametrize(
