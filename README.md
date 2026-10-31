@@ -4,7 +4,11 @@
 
 ## Why
 
-Most mistakes in software are not hard decisions made badly. They are easy checks skipped because the moment to make them had passed. The test that would have failed was never written. The reviewer had watched the code being written and saw what was meant, not what was there. The push happened before anyone asked whether it should. Each skill here puts one of those checks back at the point where it is cheapest to skip, so that the careful path is also the path of least resistance. Good decisions should be the default, not an act of discipline.
+Before coding agents, the practices that keep a codebase sound were held in place by people and by friction. The test came first because the team had agreed it would. A second person read the change because the pull request would not merge until they had. The plan came before the build because the build was going to take a week. Writing code was the slow part, so the checks fit around it.
+
+An agent writes the code in minutes. The checks cost what they always did, but next to the agent they feel slow, so they get skipped, or the agent was never asked to do them and nobody noticed. The engineer's work shifts from writing the change to deciding what to build and verifying what came back, and there are more of those decisions, closer together, than there used to be.
+
+Most mistakes in software are not hard decisions made badly. They are easy checks skipped because the moment to make them had passed. The test that would have failed was never written. The reviewer had watched the code being written and saw what was meant, not what was there. The push happened before anyone asked whether it should. This collection takes the engineering and project-management practices that used to live in people and process and builds them into the agent's own workflow, each one at the point where it is cheapest to skip, so that the careful path is also the path of least resistance. Good decisions should be the default, not an act of discipline.
 
 What that looks like in practice:
 
@@ -12,6 +16,8 @@ What that looks like in practice:
 - In `debug` and `tdd`, a fix is not a fix until a test has failed for the reported cause and then passed.
 - The `reviewer` agent sees the diff with no memory of how it was written, and its verdict shows what it ran.
 - `handoff` ends a session with a note whose verified checks are commands, so `pickup` can rerun them tomorrow instead of trusting them.
+
+None of these practices are new. [Built on](#built-on) names where each one came from.
 
 ## What this is
 
