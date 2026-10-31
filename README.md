@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+**Start here:** [Where each skill fits](docs/lifecycle.md) says which skill to run at the start, middle and end of a session, and takes four everyday situations through them step by step: a new idea, a bug report, stopping for the day, picking up tomorrow.
+
 ## Why
 
 Before coding agents, the practices that keep a codebase sound were held in place by people and by friction. The test came first because the team had agreed it would. A second person read the change because the pull request would not merge until they had. The plan came before the build because the build was going to take a week. Writing code was the slow part, so the checks fit around it.
@@ -25,7 +27,7 @@ Seventeen Claude Code skills and eight agents that take a change from first idea
 
 The difference is in how the collection is built. Every skill that ships a script ships its tests, about 2,800 across the repository, and the lint refuses a script without a `tests/` directory. Every change is reviewed before merge by a reviewer with no context of the build, and code changes also by a second model family. A fix lands with mutation evidence in its pull request: the guarded line reverted, the test shown failing, then passing again with the fix restored. Each skill works from a plain install with no sibling checkout, and the CI check proves it by installing the whole set into an empty home directory.
 
-## Where each one fits
+## How it fits together
 
 ```mermaid
 flowchart LR
@@ -48,7 +50,14 @@ flowchart LR
     next -.->|next session| plan
 ```
 
-[docs/lifecycle.md](docs/lifecycle.md) walks the same ground in more detail: what to run at the start, middle and end of a session, how a project moves from idea to documented code, which of `handoff`, `topic` and `ticket` carries work across sessions, and four short walkthroughs.
+Four everyday situations, as the skills you run in order:
+
+- **A new idea.** `kickoff`, then `sharpen` on any requirement still vague, then `shape` once the direction is firm, then tickets in your tracker, each worked with `ticket`.
+- **A bug report.** `debug`, then `review`, then `pr`. If the bug has a ticket, `ticket` runs all three.
+- **Stopping for the day.** Inside a ticket pass, stop at a go: the card holds everything. On a topic, update the note. Anything else, `/handoff`. Then `/retro` if the session taught you something about your setup.
+- **Picking up tomorrow.** `/pickup` from a handoff note, `/topic <slug>` from a topic, or `ticket` with the key and the pass id you noted yesterday.
+
+**[Where each skill fits](docs/lifecycle.md)** is the full guide. It has each of these as a numbered walkthrough, the session on one diagram (what to run at the start, in the middle and at the end), the project from idea to documented code, and three which-one-when tables: `kickoff`, `sharpen` or `shape`; `handoff`, `topic` or the ticket card; `debug`, `tdd` or `ticket`.
 
 The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) serve the first stage, and the three `doc-*` agents serve `document`. `humanizer`, `humanizer-finance` and `memory-gardener` are not tied to a stage. For open-ended reading of a codebase, Claude Code's built-in Explore agent is the right tool, and Plan mode outlines the steps for a change; the agents here are for jobs with a fixed contract, such as a draft pull request that is never merged, or a review that shows what it ran.
 

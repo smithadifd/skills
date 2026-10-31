@@ -2,6 +2,8 @@
 
 The skills in this repository sit at the points in a piece of work where the quick path and the safe path split: before you build, before you claim a fix, before anything leaves your machine, and when you stop for the day. This page shows those points on two clocks. The session clock runs from opening Claude Code to closing it. The project clock runs from an idea to shipped, documented code, over many sessions.
 
+On this page: [the session view](#the-session-view) (start, middle, end), [the project view](#the-project-view) (idea to documented code), [which one when](#which-one-when) (three tables for the skills that overlap), and [four walkthroughs](#walkthroughs) (a new idea, a bug report, stopping for the day, picking up tomorrow). If you read one section, read the walkthroughs.
+
 Each claim here comes from the skill's own `SKILL.md`. Where this page and a skill file disagree, the skill file is right; open an issue.
 
 Four skills run only when you type their command, never on Claude's own initiative: `handoff`, `pickup`, `retro` and `humanizer`. The rest can be picked up from what you say ("why does this fail", "open a PR").
