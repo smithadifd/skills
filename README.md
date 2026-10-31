@@ -17,7 +17,7 @@ What that looks like in practice:
 - The `reviewer` agent sees the diff with no memory of how it was written, and its verdict shows what it ran.
 - `handoff` ends a session with a note whose verified checks are commands, so `pickup` can rerun them tomorrow instead of trusting them.
 
-None of these practices are new. [Built on](#built-on) names where each one came from.
+None of this is new. [Built on](#built-on) says where the ideas came from.
 
 ## What this is
 
