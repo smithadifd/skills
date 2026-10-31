@@ -1628,76 +1628,6 @@ def test_from_text_cli_refuses_a_missing_record_with_exit_1(tmp_path: Path):
     )
 
 
-class _ApprovingJev:
-    calls = 0
-
-    def decide(self, text: str) -> tuple[str, float]:
-        type(self).calls += 1
-        return review_phase.APPROVED, 0.95
-
-
-def _jev_fallback_run(monkeypatch, text: str, backend: str = "claude-fresh") -> dict:
-    monkeypatch.setattr(_ApprovingJev, "calls", 0)
-    monkeypatch.setattr(review_phase, "JevClient", _ApprovingJev)
-    envelope = _envelope(backend, text)
-    envelope["adapters"] = {"jev_fallback": True}
-    return review_phase.run_phase(envelope)
-
-
-def test_jev_fallback_refuses_a_missing_record_before_jev_is_asked(monkeypatch):
-    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n")
-    assert _ApprovingJev.calls == 0
-    assert result["status"] == "failure"
-    assert result["reason"] == (
-        "claude-fresh: review_interval_missing: line 1: The diff looks reasonable."
-    )
-    assert "intervals" not in result
-
-
-def test_jev_fallback_accepts_interval_none(monkeypatch):
-    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n\nINTERVAL: none\n")
-    assert _ApprovingJev.calls == 1
-    assert result["status"] == "success", result["reason"]
-    assert result["verdict_source"] == "jev"
-    assert result["intervals"] == []
-
-
-def test_jev_fallback_success_carries_the_measured_record(monkeypatch):
-    result = _jev_fallback_run(monkeypatch, "The diff looks reasonable.\n\n" + MEASURED + "\n")
-    assert _ApprovingJev.calls == 1
-    assert result["status"] == "success", result["reason"]
-    assert result["verdict_source"] == "jev"
-    assert result["intervals"] == [MEASURED_RECORD]
-
-
-def test_jev_fallback_other_adapter_path_still_requires_the_record(monkeypatch):
-    text = "## Verdict: APPROVE\n\n### Issues\n- none\n"
-    result = _jev_fallback_run(monkeypatch, text, backend="grok-notools")
-    assert _ApprovingJev.calls == 0
-    assert result["status"] == "failure"
-    assert result["reason"] == "grok-notools: review_interval_missing: line 4: - none"
-    accepted = _jev_fallback_run(monkeypatch, text + "INTERVAL: none\n", backend="grok-notools")
-    assert accepted["status"] == "success", accepted["reason"]
-    assert accepted["verdict_source"] == "regex"
-    assert accepted["intervals"] == []
-
-
-def test_jev_shadow_runs_only_after_the_record_passes(monkeypatch):
-    monkeypatch.setenv("REVIEW_PHASE_JEV_SHADOW", "1")
-    monkeypatch.setattr(_ApprovingJev, "calls", 0)
-    monkeypatch.setattr(review_phase, "JevClient", _ApprovingJev)
-    refused = review_phase.run_phase(_envelope("grok-notools", DURATION_WITHOUT_INTERVAL))
-    assert refused["status"] == "failure"
-    assert "review_interval_missing" in refused["reason"]
-    assert "jev_verdict" not in refused
-    assert _ApprovingJev.calls == 0
-    accepted = review_phase.run_phase(_envelope("grok-notools", DURATION_WITH_INTERVAL))
-    assert accepted["status"] == "success", accepted["reason"]
-    assert accepted["intervals"] == [MEASURED_RECORD]
-    assert accepted["jev_verdict"] == "approved"
-    assert _ApprovingJev.calls == 1
-
-
 # Each shape ends on a findings section, so a last line that is not a record
 # would be foreign prose in that section if an adapter read it first. `{tail}`
 # starts on the line given.
@@ -1736,36 +1666,22 @@ _SECTION_LAST_SHAPES = [
 ]
 
 
-@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
 @pytest.mark.parametrize("last", ["**INTERVAL: none**", "Happy to look again."])
 @pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
 def test_section_ending_in_a_non_record_line_is_refused_as_missing(
-    monkeypatch, backend, shape, tail_line, last, jev_fallback
+    backend, shape, tail_line, last
 ):
     text = shape.format(tail=last)
-    if jev_fallback:
-        result = _jev_fallback_run(monkeypatch, text, backend=backend)
-        assert _ApprovingJev.calls == 0
-        assert result["status"] == "failure"
-        reason = result["reason"]
-    else:
-        reason = _refused(text, backend=backend)
+    reason = _refused(text, backend=backend)
     assert reason == f"{backend}: review_interval_missing: line {tail_line}: {last}"
 
 
-@pytest.mark.parametrize("jev_fallback", [False, True], ids=["plain", "jev-fallback"])
 @pytest.mark.parametrize(("backend", "shape", "tail_line"), _SECTION_LAST_SHAPES)
 def test_malformed_record_under_an_unparsed_section_is_refused_by_its_own_name(
-    monkeypatch, backend, shape, tail_line, jev_fallback
+    backend, shape, tail_line
 ):
     text = shape.format(tail="Happy to look again.\nINTERVAL: maybe")
-    if jev_fallback:
-        result = _jev_fallback_run(monkeypatch, text, backend=backend)
-        assert _ApprovingJev.calls == 0
-        assert result["status"] == "failure"
-        reason = result["reason"]
-    else:
-        reason = _refused(text, backend=backend)
+    reason = _refused(text, backend=backend)
     assert reason == (
         f"{backend}: review_interval_malformed: line {tail_line + 1}: INTERVAL: maybe"
     )

@@ -28,7 +28,7 @@ The adapters parse the return without its trailing record block. Without that, a
 
 ## 2. Validation
 
-`run_phase` checks the record block first, before the selected adapter parses the verdict and findings and before the Jev fallback tries the other adapters or calls Jev. A return without a valid record is refused by the record's own name, never by a findings parse error, and never reaches an adapter or an external call. That check is the only one about time. It performs no scan of prose, Issues, Evidence, headings or verdict lines for duration-shaped tokens, and it never asks whether the verdict really relies on an interval: the reviewer's declaration is the input, as every other claim in a verdict is.
+`run_phase` checks the record block first, before the selected adapter parses the verdict and findings. A return without a valid record is refused by the record's own name, never by a findings parse error, and never reaches an adapter or an external call. That check is the only one about time. It performs no scan of prose, Issues, Evidence, headings or verdict lines for duration-shaped tokens, and it never asks whether the verdict really relies on an interval: the reviewer's declaration is the input, as every other claim in a verdict is.
 
 | Condition | Refusal (`reason` = `<backend>: <name>: line <n>: <line, cut at 200 characters>`) |
 |---|---|
@@ -39,7 +39,7 @@ The adapters parse the return without its trailing record block. Without that, a
 | `none` beside a measured line, or `none` twice | `review_interval_contradictory`, naming the second of the two |
 | Two measured lines identical after trimming | `review_interval_duplicate`, naming the second |
 
-Every refusal is `status: failure`, exit `1`, `artifacts["review.md"]` verbatim and `findings.json` null, exactly as an adapter parse error is; the review is retried by running it again. The first failing line wins, in text order; within one measured line the form is checked (malformed, endpoints, duration) before its relation to the lines above it (contradictory, duplicate). On success the phase result always carries `intervals`: `[]` for `none`, otherwise the parsed records in order. The Jev fallback and Jev shadow paths rely on the same check, made once on the same text before either can run; nothing is quoted or exempted for them either.
+Every refusal is `status: failure`, exit `1`, `artifacts["review.md"]` verbatim and `findings.json` null, exactly as an adapter parse error is; the review is retried by running it again. The first failing line wins, in text order; within one measured line the form is checked (malformed, endpoints, duration) before its relation to the lines above it (contradictory, duplicate). On success the phase result always carries `intervals`: `[]` for `none`, otherwise the parsed records in order.
 
 Checks that are deliberately absent: no cross-check that the review text mentions the duration; no check that a measured record is used; no exemption for timeouts, bounds, shas, paths, section numbers, emphasis, quotes, code spans or fences, since none of those lines is read.
 
@@ -91,6 +91,6 @@ Change 2 belongs to another repository and comes after change 1 and a release of
 
 ## 8. Non-goals and risks
 
-Non-goals: verifying that a declared interval is true or that the review mentions it; recording intervals in a caller's receipt; a v2 of `review-findings`; any change to how a caller chooses which message carries the verdict; the Jev shadow's payload trim.
+Non-goals: verifying that a declared interval is true or that the review mentions it; recording intervals in a caller's receipt; a v2 of `review-findings`; any change to how a caller chooses which message carries the verdict.
 
 Risks: (1) A reviewer omits the line or puts it before Evidence. The refusal names the line and the review is run again; the installed contracts show the line in the block. (2) A model appends a sign-off after the line: refused as missing, retryable; the contracts say "last line". (3) A false `none`: accepted as an attestation, auditable through a pinned result digest (section 2). (4) A caller that changes its prompts and moves its pin in separate changes breaks reviews between them, whichever lands first (section 4); the two land as one change. (5) This change deletes most of one file; read the surviving code in full rather than the diff.

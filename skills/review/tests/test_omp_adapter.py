@@ -612,21 +612,3 @@ def test_from_text_without_model_is_blocked(tmp_path: Path):
     )
     assert result.returncode == 3, result.stderr
     assert "inputs.model" in json.loads(result.stdout)["reason"]
-
-
-def test_jev_fallback_does_not_rescue_a_missing_record(monkeypatch):
-    consulted = []
-
-    def fake_consult(backend, reply, intervals):
-        consulted.append((backend, reply))
-        return review_phase._finish(
-            backend, review_phase.APPROVED, [], reply, source="jev"
-        )
-
-    monkeypatch.setattr(review_phase, "_consult_jev", fake_consult)
-    envelope = _envelope("Verdict: APPROVE\n")
-    envelope["adapters"] = {"jev_fallback": True}
-    result = review_phase.run_phase(envelope)
-    assert result["status"] == "failure"
-    assert "ReviewRecordMissing" in result["reason"]
-    assert consulted == []
