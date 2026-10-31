@@ -51,7 +51,7 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 | Skill | What it does | Standalone? |
 | --- | --- | --- |
 | `debug` | Finds the cause of a bug by reproducing it, testing a hypothesis and isolating the fault, then fixes it behind a test that fails first and passes after. | Yes |
-| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder, through a guard script. | Needs Python 3 and the `doc-researcher`, `doc-writer` and `doc-verifier` agents. The plugin install includes them; otherwise `./install.sh --agent <name>` for each. |
+| `document` | Writes documentation pages for a module, service or app by running the doc researcher, writer and verifier agents, and writes only under the repository's docs folder, or the README when you ask for it, through a guard script. | Needs Python 3 and the `doc-researcher`, `doc-writer` and `doc-verifier` agents. The plugin install includes them; otherwise `./install.sh --agent <name>` for each. |
 | `handoff` | Writes one redacted, size-capped resume note so a fresh session can continue the work. | Yes (Python 3) |
 | `humanizer` | Revises prose to sound natural, or points out robotic phrasing in a draft. | Yes |
 | `humanizer-finance` | Applies the writing review to market and financial analysis while preserving useful technical terms and figures. | Needs `humanizer` |
@@ -118,13 +118,13 @@ If you write your own skill, this is the path:
 
 Little here is new. Each line names what this repository took from the source; some skill files carry their own prior-art sections with more detail.
 
-- [Matt Pocock's skills](https://github.com/mattpocock/skills): `sharpen` adapts the relentless one-question interview of `grill-me` and `grilling`, and records what it kept and changed; `retro` takes the idea of a retrospective on the agent's environment, sorted by severity, from his `retro`.
-- [pstack](https://github.com/cursor/plugins/tree/main/pstack), by Lauren Tan: `retro` takes the three parallel reviewers with a synthesizer from `reflect`, and the rule that a repeated mistake becomes a check before it becomes a rule from `correct`.
+- [pstack](https://github.com/cursor/plugins/tree/main/pstack), by Lauren Tan: the shape of this collection. Small, situational skills that each work on their own and install together as one plugin, so you can adopt one without the rest. In `retro`, the three parallel reviewers with a synthesizer come from `reflect`, and the rule that a repeated mistake becomes a check before it becomes a rule comes from `correct`.
+- [Matt Pocock's skills](https://github.com/mattpocock/skills): with pstack, the model for a repository of standalone skills, each one a file you can read in a few minutes and use alone. `sharpen` adapts the relentless one-question interview of `grill-me` and `grilling`, and records what it kept and changed; `retro` takes the idea of a retrospective on the agent's environment, sorted by severity, from his `retro`.
 - [Kent Beck, Canon TDD](https://newsletter.kentbeck.com/p/canon-tdd): the red, green, refactor loop in `tdd`, and the rule that a test must fail before the change in `debug` and `builder-core`.
 - [Gary Klein, "Performing a Project Premortem"](https://hbr.org/2007/09/performing-a-project-premortem) (Harvard Business Review, 2007): the failure-modes lens in `shape`, which assumes the plan has already failed and asks why.
 - [Mutation testing](https://en.wikipedia.org/wiki/Mutation_testing) (DeMillo, Lipton and Sayward, 1978): the `reviewer` agent's step of breaking the guarded line to see a test fail, done by hand rather than with a tool.
 - [Anthropic's Agent Skills format](https://code.claude.com/docs/en/skills): the `SKILL.md` file with frontmatter that every skill here is written in.
-- [Wikipedia: Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing), maintained by WikiProject AI Cleanup: the pattern catalog in `humanizer`.
+- [Wikipedia: Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing), maintained by WikiProject AI Cleanup: the pattern catalog in `humanizer`. The way that catalog is organised was inspired by [blader/humanizer](https://github.com/blader/humanizer), which built on the same page first.
 - `kickoff` has its own prior-art table, crediting Harper Reed, Simon Willison, `interview-me`, `spec-kit` and `launch-your-agent` for the interview-then-spec shape.
 
 ## Contributing and support
