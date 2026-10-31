@@ -81,7 +81,7 @@ check_outside_references() {
 }
 
 check_private_words() {
-  local root path deny_status
+  local root path deny_status stripped slug
   root=$1
   # The private words come from NO_PERSON_DENY, a grep extended regular
   # expression (term1|term2|...), as in ci/lint-skills.sh. No name is spelled
@@ -92,11 +92,23 @@ check_private_words() {
     deny_status=0
     printf '' | grep -iE -e "$NO_PERSON_DENY" > /dev/null 2>&1 || deny_status=$?
     [ "$deny_status" -ne 2 ] || fail 'NO_PERSON_DENY is not a valid extended regular expression'
+    # The repository's own URL is allowed, as in the lint: OWNER and REPO come
+    # from the environment, else from the origin remote.
+    if [ -z "${OWNER:-}" ] || [ -z "${REPO:-}" ]; then
+      slug=$(git remote get-url origin 2>/dev/null | sed -n 's#.*github\.com[:/]\([^/]*\)/\([^/]*\)$#\1 \2#p' || true)
+      OWNER=${OWNER:-${slug%% *}}
+      REPO=${REPO:-${slug#* }}
+      REPO=${REPO%.git}
+    fi
   fi
   while IFS= read -r -d '' path; do
     [ -f "$path" ] || fail "installed file contains an unreadable symlink: $path"
     [ -n "${NO_PERSON_DENY:-}" ] || continue
-    if LC_ALL=C grep -aiqE -e "$NO_PERSON_DENY" "$path"; then
+    stripped=$({ LC_ALL=C grep -na -e '' -- "$path" || [ $? -eq 1 ]; } |
+      LC_ALL=C tr '\000' ' ' |
+      LC_ALL=C awk -v owner="${OWNER:-}" -v repo="${REPO:-}" -f "$repo_dir/ci/strip-own-url.awk" |
+      LC_ALL=C cut -d "$(printf '\001')" -f 2-) || fail "installed file could not be scanned: $path"
+    if LC_ALL=C grep -aiqE -e "$NO_PERSON_DENY" <<< "$stripped"; then
       fail "installed file contains a private project name: $path"
     fi
   done < <(find "$root" -regex "$root/[^/]*/tests" -type d -prune -o \( -type f -o -type l \) -print0)

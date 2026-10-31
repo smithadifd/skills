@@ -27,6 +27,7 @@ def private_reference_repo(tmp_path, include_tests=True):
         (repo / directory).mkdir(parents=True)
     shutil.copy2(CHECK_SCRIPT, repo / "ci/check.sh")
     shutil.copy2(CHECK_SCRIPT.parent.parent / "install.sh", repo / "install.sh")
+    shutil.copy2(CHECK_SCRIPT.parent / "strip-own-url.awk", repo / "ci/strip-own-url.awk")
     (repo / "ci/reference-allowlist.txt").write_text("", encoding="utf-8")
     (repo / "skills/example/SKILL.md").write_text("clean\n", encoding="utf-8")
     (repo / "agents/example.md").write_text("clean\n", encoding="utf-8")
@@ -38,8 +39,12 @@ def private_reference_repo(tmp_path, include_tests=True):
 PLANT = "zz" + "planted"
 
 
-def run_references(repo, deny=PLANT):
+def run_references(repo, deny=PLANT, own=None):
     env = dict(os.environ)
+    env.pop("OWNER", None)
+    env.pop("REPO", None)
+    if own is not None:
+        env["OWNER"], env["REPO"] = own
     if deny is None:
         env.pop("NO_PERSON_DENY", None)
     else:
@@ -99,6 +104,32 @@ def test_every_alternative_of_the_deny_expression_is_scanned(tmp_path):
         run_references(repo, deny=PLANT + "|zz" + "second"),
         "second alternative was accepted",
     )
+
+
+OWN = (PLANT, "some-repo")
+
+
+def test_the_repository_own_url_is_allowed(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text(
+        f"See https://github.com/{OWN[0]}/{OWN[1]} for the source.\n", encoding="utf-8"
+    )
+    result = run_references(repo, own=OWN)
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_owner_word_elsewhere_is_rejected_when_the_own_url_is_allowed(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text(f"Written by {PLANT}.\n", encoding="utf-8")
+    assert_rejected(run_references(repo, own=OWN), "the bare owner word was accepted")
+
+
+def test_another_repository_of_the_owner_is_rejected(tmp_path):
+    repo = private_reference_repo(tmp_path)
+    (repo / "skills/example/SKILL.md").write_text(
+        f"See github.com/{OWN[0]}/other-repo.\n", encoding="utf-8"
+    )
+    assert_rejected(run_references(repo, own=OWN), "another repository was accepted")
 
 
 def test_clean_installed_files_pass_with_a_deny_expression(tmp_path):
