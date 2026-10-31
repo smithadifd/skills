@@ -25,7 +25,7 @@ None of this is new. [Built on](#built-on) says where the ideas came from.
 
 Seventeen Claude Code skills and eight agents that take a change from first idea to handoff: planning, building, reviewing, shipping, and picking the work up again in a later session.
 
-The difference is in how the collection is built. Every skill that ships a script ships its tests, about 2,800 across the repository, and the lint refuses a script without a `tests/` directory. Every change is reviewed before merge by a reviewer with no context of the build, and code changes also by a second model family. A fix lands with mutation evidence in its pull request: the guarded line reverted, the test shown failing, then passing again with the fix restored. Each skill works from a plain install with no sibling checkout, and the CI check proves it by installing the whole set into an empty home directory.
+The difference is in how the collection is built. Every skill that ships a script ships its tests, about 2,700 across the repository, and the lint refuses a script without a `tests/` directory. Every change is reviewed before merge by a reviewer with no context of the build, and code changes also by a second model family. A fix lands with mutation evidence in its pull request: the guarded line reverted, the test shown failing, then passing again with the fix restored. Each skill works from a plain install with no sibling checkout, and the CI check proves it by installing the whole set into an empty home directory.
 
 ## How it fits together
 
