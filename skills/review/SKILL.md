@@ -27,6 +27,12 @@ finding across several bullets.
   a short read. Add a length check before the final iteration. [reach:
   <lane|concurrent|user|owner> (<one-clause reason>); breaks:
   <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]`
+  (`lane` is anything the change's author wrote or controls: its branch and
+  branch name, every file it commits, the builder's report, the PR body, and
+  the temp roots its sandbox allows; `concurrent` is another session, thread or
+  process following the same protocol at the same time; `user` is an operator
+  flow or input; `owner` is only a human with account or repo write, or an
+  unsandboxed same-user process.)
 - If nothing found: "No bugs or security issues found."
 - End the review with an `INTERVAL:` line, the last line of the reply:
   `INTERVAL: none`, or one measured record per interval the verdict relies on
@@ -46,10 +52,14 @@ worked example above is the shape it expects, verbatim. The closing
 `review_interval_missing`. The grammar and every refusal are in
 `references/structured-interval.md`. A return that states
 two different verdicts, in either order, is a failure for the `claude-fresh`
-and `grok-notools` backends.
+backend and for a supplied `grok-notools` output.
 
-For a review run through `omp -p --model <id> --thinking=<level>`, append this
-output contract to the reviewer prompt. Parse the reply with `--backend omp`,
+Optional external reviewer output formats: a caller that runs its own reviewer
+may supply the reply in the OMP or `grok-notools` format. Plain Claude Code
+needs neither; the `claude-fresh` path above is complete on its own.
+
+For a review run through `omp -p --model <id> --thinking=<level>`, a caller
+appends this output contract to the reviewer prompt and parses the reply with `--backend omp`,
 `--model <id>`, and `--thinking <level>`; in an envelope, use `inputs.model`
 and `inputs.thinking`.
 
@@ -85,7 +95,7 @@ this schema.
 ```
 ````
 
-The block is the OMP verdict's only source: zero or multiple blocks, invalid
+The block is the OMP-format verdict's only source: zero or multiple blocks, invalid
 JSON, unknown or incorrectly typed fields, malformed `reviewed_head`, and an
 `APPROVE` record with non-empty `bugs` fail closed as record errors; a clean
 sentence never substitutes for a missing or invalid record. Outside the record
@@ -108,7 +118,7 @@ A key-only line takes the next non-blank line, or the record after it, as its
 value.
 The model and thinking level are required caller inputs. The level is one of `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `auto`. The result
-records both, with the lane name, as `attribution`.
+records both, with the backend name, as `attribution`.
 
 Do NOT comment on:
 - Style, formatting, naming conventions
