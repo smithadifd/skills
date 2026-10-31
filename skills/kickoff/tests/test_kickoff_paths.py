@@ -50,9 +50,9 @@ def test_topic_config_change_is_followed_without_shared_library(tmp_path):
     assert Path(payload["topic_template"]) == target / "TEMPLATE.md", (
         "DRIFT: kickoff must derive the template through topic's normative_paths()"
     )
-    assert Path(payload["model_routing_standard"]) == (
-        tmp_path / "standards" / "model-routing.md"
-    ), "DRIFT: kickoff must derive model routing through topic's normative_paths()"
+    assert Path(payload["model_notes"]) == (
+        tmp_path / "standards" / "model-notes.md"
+    ), "DRIFT: kickoff must derive model notes through topic's normative_paths()"
 
 
 def test_topic_override_reaches_kickoff_topic_path(tmp_path):
@@ -91,9 +91,9 @@ def test_shipped_standalone_topic_config_uses_clean_home_defaults(tmp_path):
     assert Path(payload["topic_template"]) == topics_dir / "TEMPLATE.md", (
         "SHIPPED-CONFIG: topic template must be derived from the resolved topics directory"
     )
-    assert Path(payload["model_routing_standard"]) == (
-        home / ".claude" / "standards" / "model-routing.md"
-    ), "SHIPPED-CONFIG: model routing must be derived beside the topics directory"
+    assert Path(payload["model_notes"]) == (
+        home / ".claude" / "standards" / "model-notes.md"
+    ), "SHIPPED-CONFIG: model notes must be derived beside the topics directory"
     assert "topic resolver not found" not in process.stderr, (
         "SHIPPED-CONFIG: kickoff must use the shipped topic resolver"
     )
@@ -119,10 +119,10 @@ def test_kickoff_alone_uses_clean_home_fallback_and_three_notices(tmp_path):
         f"{copied_skills}/topic/topics_dir.py; using ~/.claude/topics",
         "kickoff: optional topic template not found at "
         f"{home}/.claude/topics/TEMPLATE.md; using the built-in hand-off shape in SKILL.md",
-        "kickoff: optional model-routing standard not found at "
-        f"{home}/.claude/standards/model-routing.md; using the current session model with no "
+        "kickoff: optional model notes not found at "
+        f"{home}/.claude/standards/model-notes.md; using the current session model with no "
         "model-specific consult",
-    ], "KICKOFF-ALONE: resolver, template, and model routing must emit exactly 3 notices"
+    ], "KICKOFF-ALONE: resolver, template, and model notes must emit exactly 3 notices"
 
     target.parent.mkdir(parents=True)
     target.write_text("# clean home\n", encoding="utf-8")
@@ -185,6 +185,8 @@ def test_topic_convention_absent_is_silent_in_both_modes(tmp_path):
         )
 
 
+# Private project and person names are not listed here: they come from the
+# NO_PERSON_DENY expression below, so no tracked file spells them.
 PRIVATE_VOCABULARY = (
     r"\bCHART\b",
     r"(?i:\bchart-wave\b)",
@@ -192,8 +194,6 @@ PRIVATE_VOCABULARY = (
     r"\bSoT\b",
     r"\bROLL\b",
     r"contract: v3",
-    "(?i:" + "foun" + "dry)",
-    "(?i:claude-" + "toolkit)",
     r"\bAstra\b",
     r"(?i:\bnotion\b)",
     r"\borchestrate\b",
@@ -269,3 +269,35 @@ def test_kickoff_owns_no_config_file():
     assert not (SKILL_DIR / "config.json").exists(), (
         "CONFIG-OWNERSHIP: kickoff must own no path config keys"
     )
+
+
+def _write_older_model_notes(home: Path) -> Path:
+    standards = home / ".claude" / "standards"
+    standards.mkdir(parents=True)
+    legacy = standards / "model-routing.md"
+    legacy.write_text("older file name\n", encoding="utf-8")
+    return legacy
+
+
+def test_older_model_notes_file_name_is_still_read_with_topic(tmp_path):
+    copied_skills = _copy_skills(tmp_path, "topic", "kickoff")
+    home = tmp_path / "home"
+    legacy = _write_older_model_notes(home)
+
+    process = _run(copied_skills / "kickoff", home)
+
+    assert process.returncode == 0, process.stderr
+    assert Path(json.loads(process.stdout)["model_notes"]) == legacy
+    assert "model notes" not in process.stderr
+
+
+def test_older_model_notes_file_name_is_still_read_without_topic(tmp_path):
+    copied_skills = _copy_skills(tmp_path, "kickoff")
+    home = tmp_path / "home"
+    legacy = _write_older_model_notes(home)
+
+    process = _run(copied_skills / "kickoff", home)
+
+    assert process.returncode == 0, process.stderr
+    assert Path(json.loads(process.stdout)["model_notes"]) == legacy
+    assert "model notes" not in process.stderr

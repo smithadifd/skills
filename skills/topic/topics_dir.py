@@ -10,12 +10,14 @@ does not raise.
 This standalone config leaves the key unset, so resolving the shipped file
 uses `DEFAULT_TOPICS_DIR`.
 
-Convention, template, and model-routing documents are optional reads derived
+Convention, template, and model-notes documents are optional reads derived
 from that one directory — not a second path key:
 
 - `<topics_dir>/README.md`
 - `<topics_dir>/TEMPLATE.md`
-- `<topics_dir>/../standards/model-routing.md`
+- `<topics_dir>/../standards/model-notes.md` (an existing
+  `<topics_dir>/../standards/model-routing.md` is read when `model-notes.md`
+  is absent)
 
 When one of those files is absent, `read_optional` returns a single-line
 notice and does not raise. The caller continues with the built-in default
@@ -180,10 +182,15 @@ def resolve(config_path: Optional[Path] = None) -> Path:
 
 def normative_paths(topics: Path) -> dict[str, Path]:
     """The three optional reads, derived from the topics directory alone."""
+    standards = topics.parent / "standards"
+    model_notes = standards / "model-notes.md"
+    legacy_notes = standards / "model-routing.md"
+    if not model_notes.is_file() and legacy_notes.is_file():
+        model_notes = legacy_notes
     return {
         "convention": topics / "README.md",
         "template": topics / "TEMPLATE.md",
-        "model_routing": topics.parent / "standards" / "model-routing.md",
+        "model_notes": model_notes,
     }
 
 

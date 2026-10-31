@@ -16,18 +16,27 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TOPIC_RESOLVER_PATH = HERE.parent / "topic" / "topics_dir.py"
 FALLBACK_TOPICS_DIR = "~/.claude/topics"
-FALLBACK_MODEL_ROUTING_STANDARD = "~/.claude/standards/model-routing.md"
+FALLBACK_MODEL_NOTES = "~/.claude/standards/model-notes.md"
+LEGACY_MODEL_NOTES = "~/.claude/standards/model-routing.md"
 
 
 @dataclass(frozen=True)
 class KickoffPaths:
     topics_dir: Path
     topic_template: Path
-    model_routing_standard: Path
+    model_notes: Path
     topic_convention: Path
 
     def topic_path(self, slug: str) -> Path:
         return self.topics_dir / f"{slug}.md"
+
+
+def _fallback_model_notes() -> Path:
+    notes = Path(FALLBACK_MODEL_NOTES).expanduser()
+    legacy = Path(LEGACY_MODEL_NOTES).expanduser()
+    if not notes.is_file() and legacy.is_file():
+        return legacy
+    return notes
 
 
 def _load_topic_resolver():
@@ -49,9 +58,7 @@ def resolve() -> KickoffPaths:
             topics_dir=topics_dir,
             topic_template=topics_dir / "TEMPLATE.md",
             topic_convention=topics_dir / "README.md",
-            model_routing_standard=Path(
-                FALLBACK_MODEL_ROUTING_STANDARD
-            ).expanduser(),
+            model_notes=_fallback_model_notes(),
         )
 
     topic_resolver = _load_topic_resolver()
@@ -61,7 +68,7 @@ def resolve() -> KickoffPaths:
         topics_dir=topics_dir,
         topic_template=normative["template"],
         topic_convention=normative["convention"],
-        model_routing_standard=normative["model_routing"],
+        model_notes=normative["model_notes"],
     )
 
 
@@ -77,10 +84,10 @@ def optional_read_notices(paths: KickoffPaths) -> list[str]:
             "kickoff: optional topic template not found at "
             f"{paths.topic_template}; using the built-in hand-off shape in SKILL.md"
         )
-    if not paths.model_routing_standard.is_file():
+    if not paths.model_notes.is_file():
         notices.append(
-            "kickoff: optional model-routing standard not found at "
-            f"{paths.model_routing_standard}; using the current session model with no "
+            "kickoff: optional model notes not found at "
+            f"{paths.model_notes}; using the current session model with no "
             "model-specific consult"
         )
     return notices
@@ -98,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "topics_dir": str(paths.topics_dir),
         "topic_template": str(paths.topic_template),
-        "model_routing_standard": str(paths.model_routing_standard),
+        "model_notes": str(paths.model_notes),
         "topic_convention": str(paths.topic_convention),
     }
     if args.slug:

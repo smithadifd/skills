@@ -444,8 +444,8 @@ def test_a_key_held_by_another_item_type_is_refused(fake, payload):
 
 
 @needs_ledger_cli
-def test_H24_every_batch_the_store_builds_passes_the_toolkit_schema(tmp_path):
-    validate_payload = _toolkit_validate_payload()
+def test_H24_every_batch_the_store_builds_passes_the_ledger_schema(tmp_path):
+    validate_payload = _ledger_validate_payload()
     kinds_sent = set()
     for stage, rounds in (("S0", 0), ("S1", 0), ("S2", 1), ("S3", 2), ("S4", 1), ("S5", 0), ("S6", 0)):
         fake = FakeLedger(tmp_path / stage)
@@ -472,7 +472,7 @@ def test_H24_every_batch_the_store_builds_passes_the_toolkit_schema(tmp_path):
         "item.created", "session.opened", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
 
 
-def _toolkit_validate_payload():
+def _ledger_validate_payload():
     """The ledger's own ``validate_payload``, loaded from ``ledger/schema.py`` beside the CLI ``LEDGER_CLI`` names."""
 
     cli = Path(LEDGER_CLI).resolve()

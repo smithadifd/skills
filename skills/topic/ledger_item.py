@@ -2,7 +2,7 @@
 """ledger_item.py — open or resume a topic as a ledger item.
 
 The ledger route is switched on by `config.json`'s `ledger_cli` key: the path
-or name of the `ledger` executable. Absent, null or empty means off. The key
+or name of an external ledger CLI that implements the contract in `SKILL.md`. Absent, null or empty means off. The key
 is read the same way `topics_dir` is: an explicit `--config` file alone, or
 else the shipped `config.json` with `~/.claude/skill-config/topic.json` laid
 over it.

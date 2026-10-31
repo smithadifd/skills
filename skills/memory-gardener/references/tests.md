@@ -1,6 +1,6 @@
 ## Tests
 
-The toolkit has no repo-wide Python runner; this suite is standalone and
+This repository has no repo-wide Python runner; this suite is standalone and
 network-free (pure logic + the invented fixture memory dir):
 
 ```bash

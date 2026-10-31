@@ -11,7 +11,7 @@ description: >
   when humanizing text where the document type is financial/investment-analytical. If
   the text isn't financial/analytical, use the bare humanizer skill instead — this
   overlay adds nothing useful there. NOT for general prose, and NOT a replacement
-  for `humanizer`, which it builds on.
+  for `humanizer`, which it builds on, and which must be installed beside it.
 ---
 
 # Humanizer — finance overlay
@@ -77,7 +77,7 @@ separate a good dense passage from an AI-flattened one:
 The target register for finance/market digests: informed and direct, like an analyst
 briefing a colleague who already follows the market — not a press release, not a
 casual chat. These are register preferences, not new rules — the source material's
-own structure, and the CORE's voice-sample calibration when the desk supplies prior
+own structure, and the CORE's voice-sample calibration when the author supplies prior
 digest prose, both take priority over the defaults below.
 
 - **Digests tend to read better opening with the takeaway** — a level, a move, a
@@ -89,7 +89,7 @@ digest prose, both take priority over the defaults below.
   on the data three different ways — a finance-flavored instance of the CORE's general
   judgment against padding, not a new rule.
 - **Forward-looking market views usually read better attributed than asserted as
-  fact** — "the strip is pricing a slower cutting path," "the desk expects," rather
+  fact** — "the strip is pricing a slower cutting path," "the author expects," rather
   than stating an expectation as if it had already happened. This is this register's
   edge case of the CORE's evidence-boundary rule: a market's current pricing or
   expectation is real and citable, but it's a different category of claim from

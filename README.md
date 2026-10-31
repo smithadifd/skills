@@ -99,6 +99,12 @@ If you write your own skill, this is the path:
 - Run `ci/lint-skills.sh` to check this repository's own contract: a trigger and a NOT-for case in each description, size limits, a `tests/` directory for every skill that ships a script, a README row for every skill and agent, and no hard-coded install paths.
 - Run `python3 -m pytest skills/<name>/tests -q` for a skill's tests, and `ci/check.sh` for the whole repository: it installs everything into a throwaway home, checks the installed files for outside references, and runs the lint and the lint's own fixtures.
 
+## Contributing and support
+
+To report a problem or ask a question, open an issue on the repository's GitHub issue tracker. Say which skill or agent it concerns, what you ran, what you expected and what happened.
+
+To propose a change, open a pull request from a branch. Keep it to one change, and add or update a test that fails without it. Before you ask for review, `ci/check.sh`, `ci/lint-skills.sh` and every skill's test suite (`python3 -m pytest skills/<name>/tests -q`) must pass.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

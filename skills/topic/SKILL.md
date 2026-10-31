@@ -48,7 +48,8 @@ Do not invent a second directory when the resolved path is absent.
 
 ## Ledger route
 
-`ledger_cli` names the `ledger` executable. It is a key in `config.json`, read
+`ledger_cli` names an external ledger CLI that implements the contract below;
+this repository does not ship one. It is a key in `config.json`, read
 the same way as `topics_dir` (explicit `--config`, then
 `~/.claude/skill-config/topic.json`, then the shipped file). Unset, null or empty
 means off, and everything else in this file applies as written. A value that is
@@ -56,6 +57,21 @@ not a string is an error. When it is set,
 a thread is a ledger item of type `topic` with the id `topic-<slug>`, this skill
 writes no markdown note, and File resolution, the template and the built-in
 skeleton below are not used.
+
+**The contract.** Every call is `<ledger_cli> <verb> ... --json`, and the CLI
+prints one JSON envelope: `{"ok": true, "data": ...}` or
+`{"ok": false, "error": {"code": ..., "message": ...}}`. The verbs and flags
+used:
+
+| Call | Answers |
+|---|---|
+| `query --type topic --item <id>` | `data.items`, rows with `item_id` and an integer `revision`; error code `empty` or `missing_db` when there is no such item |
+| `new --type topic --title <slug> --id <id>` | `data.event.id`; error code `conflict` when the id exists |
+| `note <id> --text <text> --expect-revision <n>` | `data.event.id`; error code `stale_revision` when the item's revision is no longer `n` |
+| `export-item <id>` | `data.events`, each with `kind` and `payload` (`item.note` events carry `payload.text`) |
+| `card <id>` | a readable summary of the item and its notes |
+| `link <id> --rel url --target <path>` | attaches a link to the item |
+| `state <id> --status closed` | closes the item |
 
 - **Open or resume:** `python3 ${CLAUDE_SKILL_DIR}/ledger_item.py --open <slug> --ask <words>`.
   It prints the item id, `created` or `resumed`, and the executable. It creates
@@ -109,8 +125,7 @@ skeleton below are not used.
    `~/.claude/skill-config/topic.json`, then shipped config, then built-in defaults.
 3. Creating: copy `<topics_dir>/TEMPLATE.md` when that file exists, fill the
    header, record the ask in the asker's words. When it does not exist, print
-   the one line above and use the built-in skeleton in this file. Run the
-   session from the note's cwd (spend attribution follows cwd).
+   the one line above and use the built-in skeleton in this file.
 
    The same create is `python3 ${CLAUDE_SKILL_DIR}/topics_dir.py --open <slug> --ask <words>`.
    It does not overwrite an existing note file. Absent-read notices are printed
@@ -158,8 +173,9 @@ LITE
      paragraph at the top of this file.
    - `<topics_dir>/TEMPLATE.md` — create shape. Built-in default: the skeleton
      in this file.
-   - `<topics_dir>/../standards/model-routing.md` — model guidance. Built-in
-     default: the Models section below.
+   - `<topics_dir>/../standards/model-notes.md` — optional model notes (an
+     existing `model-routing.md` there is read when `model-notes.md` is absent).
+     Built-in default: the Models section below.
    `topics_dir.py --notices` prints the one line for each absent path and
    exits 0.
 3. **Reconcile before acting**: check each `External refs` entry against live state —
@@ -195,7 +211,7 @@ LITE
 
 ## Models
 
-Default, used when `<topics_dir>/../standards/model-routing.md` is absent: use the
+Default, used when `<topics_dir>/../standards/model-notes.md` is absent: use the
 session's own model. Never hardcode model names.
 
 When that file is present it is the reference for model choice — read it live,

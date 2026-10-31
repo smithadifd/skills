@@ -9,9 +9,10 @@ description: >
   verified command and result pairs, claimed but not verified, decisions,
   failed approaches, open questions, references, skills to invoke next,
   secrets), is redacted by pattern, capped at 20 KB, and written to the
-  temporary directory, not the repository. NOT for a ledger entry, ticket
-  resume card, roadmap update or memory note: this skill reads and writes none
-  of those. To continue from a note, use /pickup.
+  temporary directory, not the repository. NOT for a ledger entry (a record in
+  an external work tracker), ticket resume card, roadmap update (an edit to a
+  planning document) or memory note (an entry in Claude's memory store): this
+  skill reads and writes none of those. To continue from a note, use /pickup.
 disable-model-invocation: true
 ---
 

@@ -37,15 +37,15 @@ def _run_paths(
     *,
     home: Path,
     cwd: Path,
-    harness_root_env: Path | None = None,
+    notes_root_env: Path | None = None,
     args: tuple[str, ...] = (),
 ):
     env = os.environ.copy()
     env["HOME"] = str(home)
-    if harness_root_env is None:
+    if notes_root_env is None:
         env.pop("HARNESS_ROOT", None)
     else:
-        env["HARNESS_ROOT"] = str(harness_root_env)
+        env["HARNESS_ROOT"] = str(notes_root_env)
     return subprocess.run(
         [sys.executable, str(script), *args],
         cwd=cwd,
@@ -81,7 +81,7 @@ def _create_default_sources(home: Path) -> None:
 
 def test_brief_dir_key_is_not_reintroduced():
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    assert "brief_dir" not in config, "brief_dir must not fork harness_root.roadmaps"
+    assert "brief_dir" not in config, "brief_dir must not fork notes_root.roadmaps"
 
 
 def test_source_keys_remain_bare_filenames():
@@ -122,7 +122,7 @@ def test_standalone_ignores_neighbor_shared_resolver(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
-    shared_resolver = tmp_path / "skills" / "_lib" / "harness_root.py"
+    shared_resolver = tmp_path / "skills" / "_lib" / "notes_root.py"
     shared_resolver.parent.mkdir()
     shared_resolver.write_text(
         """
@@ -170,7 +170,7 @@ def test_per_skill_override_merges_over_shipped_config(tmp_path):
     override.write_text(
         json.dumps(
             {
-                "harness_root": {
+                "notes_root": {
                     "roadmaps": str(roadmaps),
                     "standards": str(standards),
                 },
@@ -211,12 +211,12 @@ def test_explicit_config_beats_per_skill_override(tmp_path):
     override = home / ".claude" / "skill-config" / "sharpen.json"
     override.parent.mkdir(parents=True)
     override.write_text(
-        json.dumps({"harness_root": {"roadmaps": str(override_roadmaps)}}),
+        json.dumps({"notes_root": {"roadmaps": str(override_roadmaps)}}),
         encoding="utf-8",
     )
     explicit = tmp_path / "explicit.json"
     explicit.write_text(
-        json.dumps({"harness_root": {"roadmaps": str(explicit_roadmaps)}}),
+        json.dumps({"notes_root": {"roadmaps": str(explicit_roadmaps)}}),
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -243,7 +243,7 @@ def test_invalid_per_skill_override_degrades_once(tmp_path):
     override = home / ".claude" / "skill-config" / "sharpen.json"
     override.parent.mkdir(parents=True)
     override.write_text(
-        json.dumps({"harness_root": {"roadmaps": 7}}), encoding="utf-8"
+        json.dumps({"notes_root": {"roadmaps": 7}}), encoding="utf-8"
     )
 
     result = _run_paths(script, home=home, cwd=tmp_path)
@@ -256,7 +256,7 @@ def test_invalid_per_skill_override_degrades_once(tmp_path):
     ], "invalid sharpen override must emit exactly one line naming its path"
 
 
-def test_non_object_harness_root_override_degrades_once(tmp_path):
+def test_non_object_notes_root_override_degrades_once(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     _create_default_sources(home)
@@ -264,12 +264,12 @@ def test_non_object_harness_root_override_degrades_once(tmp_path):
     override = home / ".claude" / "skill-config" / "sharpen.json"
     override.parent.mkdir(parents=True)
     override.write_text(
-        json.dumps({"harness_root": "notadict"}), encoding="utf-8"
+        json.dumps({"notes_root": "notadict"}), encoding="utf-8"
     )
 
     result = _run_paths(script, home=home, cwd=tmp_path)
     actual = _resolved_output(
-        result, "a non-object harness_root override must degrade without a traceback"
+        result, "a non-object notes_root override must degrade without a traceback"
     )
 
     assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
@@ -277,7 +277,7 @@ def test_non_object_harness_root_override_degrades_once(tmp_path):
     assert Path(actual["routing_context"]) == home / ".claude" / "roadmaps" / "routing-context.md"
     assert result.stderr.splitlines() == [
         f"config_path: override {override} has a value of the wrong type — ignoring it"
-    ], "a non-object harness_root override must emit exactly one degradation line"
+    ], "a non-object notes_root override must emit exactly one degradation line"
 
 
 def test_non_boolean_brief_commit_override_degrades_once(tmp_path):
@@ -331,13 +331,13 @@ def test_standalone_config_degrades_once_for_each_invalid_shape(tmp_path):
         "missing": None,
         "malformed": "{broken",
         "non-dict": "[]",
-        "non-string": json.dumps({"harness_root": {"roadmaps": 7}}),
+        "non-string": json.dumps({"notes_root": {"roadmaps": 7}}),
     }
     expected_fragments = {
         "missing": "could not read",
         "malformed": "is not valid JSON",
         "non-dict": "did not parse to a JSON object",
-        "non-string": "'harness_root.roadmaps' is a int, not a string",
+        "non-string": "'notes_root.roadmaps' is a int, not a string",
     }
 
     for name, config_text in cases.items():
@@ -422,7 +422,7 @@ def test_relative_source_value_joins_its_configured_directory(tmp_path):
         tmp_path,
         json.dumps(
             {
-                "harness_root": {"roadmaps": str(roadmaps)},
+                "notes_root": {"roadmaps": str(roadmaps)},
                 "routing_context": "nested/routing-context.md",
             }
         ),
@@ -546,7 +546,7 @@ def test_explicit_config_uses_configured_resolver_for_all_paths(tmp_path):
     _create_resolver_sources(roadmaps, standards)
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -575,7 +575,7 @@ def test_relative_configured_resolver_degrades_once_to_standalone(tmp_path):
     _write_resolver(resolver)
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": "p/marker.py"}}),
+        json.dumps({"notes_root": {"resolver": "p/marker.py"}}),
         encoding="utf-8",
     )
 
@@ -598,7 +598,7 @@ def test_relative_configured_resolver_degrades_once_to_standalone(tmp_path):
     assert len(lines) == 1, (
         f"a relative configured resolver must emit exactly one line; got {lines!r}"
     )
-    assert lines[0].startswith("config_path: harness_root.resolver")
+    assert lines[0].startswith("config_path: notes_root.resolver")
     assert "path must be absolute or ~-prefixed" in lines[0]
 
 
@@ -630,7 +630,7 @@ def resolve_relative(paths, subkey, value):
         source.write_text("available\n", encoding="utf-8")
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -684,7 +684,7 @@ def resolve_relative(paths, subkey, value):
     _create_resolver_sources(root / "roadmaps", root / "standards")
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -703,7 +703,7 @@ def resolve_relative(paths, subkey, value):
     for key, (subdir, filename) in SOURCE_KEYS.items():
         expected[key] = str(root / subdir / filename)
     assert actual == expected, "the dataclass resolver must produce all six paths"
-    assert "config_path: harness_root.resolver" not in result.stderr, (
+    assert "config_path: notes_root.resolver" not in result.stderr, (
         "a registered dataclass resolver must not degrade to standalone resolution"
     )
 
@@ -720,7 +720,7 @@ def test_override_uses_configured_resolver(tmp_path):
     override = home / ".claude" / "skill-config" / "sharpen.json"
     override.parent.mkdir(parents=True)
     override.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -745,7 +745,7 @@ def test_cwd_option_reaches_configured_resolver(tmp_path):
     _create_resolver_sources(roadmaps, standards)
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -790,7 +790,7 @@ def resolve_relative(paths, subkey, value):
     )
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -828,7 +828,7 @@ def resolve_relative(paths, subkey, value):
     )
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -851,7 +851,7 @@ def resolve_relative(paths, subkey, value):
         expected[key] = str(home / ".claude" / subdir / filename)
     assert actual == expected, "a runtime failure must use all standalone defaults"
     assert result.stderr.splitlines() == [
-        f"config_path: harness_root.resolver {resolver} "
+        f"config_path: notes_root.resolver {resolver} "
         "(RuntimeError: resolver exploded) — degrading to standalone resolution"
     ]
 
@@ -864,7 +864,7 @@ def test_missing_configured_resolver_degrades_once_to_standalone(tmp_path):
     resolver = tmp_path / "absent-resolver.py"
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -887,7 +887,7 @@ def test_missing_configured_resolver_degrades_once_to_standalone(tmp_path):
     assert len(lines) == 1, (
         f"a missing configured resolver must emit exactly one line; got {lines!r}"
     )
-    assert lines[0].startswith("config_path: harness_root.resolver")
+    assert lines[0].startswith("config_path: notes_root.resolver")
     assert str(resolver) in lines[0]
 
 
@@ -903,7 +903,7 @@ def test_invalid_configured_resolver_degrades_once_to_standalone(tmp_path):
     )
     config = tmp_path / "explicit.json"
     config.write_text(
-        json.dumps({"harness_root": {"resolver": str(resolver)}}),
+        json.dumps({"notes_root": {"resolver": str(resolver)}}),
         encoding="utf-8",
     )
 
@@ -926,7 +926,7 @@ def test_invalid_configured_resolver_degrades_once_to_standalone(tmp_path):
     assert len(lines) == 1, (
         f"an invalid configured resolver must emit exactly one line; got {lines!r}"
     )
-    assert lines[0].startswith("config_path: harness_root.resolver")
+    assert lines[0].startswith("config_path: notes_root.resolver")
     assert str(resolver) in lines[0]
     assert "resolve_relative" in lines[0]
 
@@ -937,7 +937,7 @@ def test_non_string_configured_resolver_is_ignored_once(tmp_path):
     _create_default_sources(home)
     script = _copy_standalone(
         tmp_path,
-        json.dumps({"harness_root": {"resolver": 7}}),
+        json.dumps({"notes_root": {"resolver": 7}}),
     )
 
     result = _run_paths(script, home=home, cwd=tmp_path)
@@ -945,7 +945,7 @@ def test_non_string_configured_resolver_is_ignored_once(tmp_path):
 
     assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
     assert result.stderr.splitlines() == [
-        "config_path: 'harness_root.resolver' is a int, not a string "
+        "config_path: 'notes_root.resolver' is a int, not a string "
         "(7) — ignoring it; the default applies instead"
     ]
 
@@ -1030,8 +1030,6 @@ _PRIVATE_PATTERNS = {
     "source-of-truth abbreviation": r"(?i)(?<![a-z])s" + r"ot(?![a-z])",
     "executor stage": r"\bRO" + r"LL\b",
     "record grammar": r"contract" + r": v3",
-    "private project name": r"(?i)foun" + r"dry",
-    "private toolkit name": r"(?i)claude[-_]tool" + r"kit",
     "personal name": r"\bAnd" + r"rew\b",
     "unshipped skill": r"\borches" + r"trate\b|session-hand" + r"off",
 }
@@ -1041,6 +1039,27 @@ _PUBLIC_FILES = (
     PATHS_PATH,
     Path(__file__).resolve(),
 )
+
+
+def test_public_files_carry_no_denied_terms():
+    # Private project and person names are never spelled in a tracked file; the
+    # deny expression comes from NO_PERSON_DENY, as the repository lint reads it.
+    import os
+    import subprocess
+
+    import pytest
+
+    deny = os.environ.get("NO_PERSON_DENY", "").strip()
+    if not deny:
+        pytest.skip("NO_PERSON_DENY is unset")
+    for path in _PUBLIC_FILES:
+        result = subprocess.run(
+            ["grep", "-a", "-i", "-n", "-E", "-e", deny],
+            input=path.read_bytes(),
+            capture_output=True,
+        )
+        assert result.returncode in (0, 1), result.stderr.decode("utf-8", "replace")
+        assert result.returncode == 1, f"{path.name} contains a denied term"
 
 
 def test_public_files_carry_no_private_vocabulary():
@@ -1077,7 +1096,7 @@ def test_install_specific_routing_flows_through_the_override(tmp_path):
     override.write_text(
         json.dumps(
             {
-                "harness_root": {
+                "notes_root": {
                     "roadmaps": str(roadmaps),
                     "standards": str(standards),
                 },
@@ -1105,3 +1124,117 @@ def test_skill_text_reads_install_routing_only_when_present():
     assert "only when it is present" in " ".join(text.split()), (
         "SKILL.md must state that install-specific documents are read only when present"
     )
+
+
+# The directory settings were once grouped under another key name. The name is
+# assembled from fragments so it stays out of plain-text scans.
+OLD_ROOT_KEY = "harness" + "_root"
+
+
+def _dir_override_setup(tmp_path, override_data):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    override = home / ".claude" / "skill-config" / "sharpen.json"
+    override.parent.mkdir(parents=True)
+    override.write_text(json.dumps(override_data), encoding="utf-8")
+    return home, script, override
+
+
+def test_notes_root_override_sets_the_brief_directory(tmp_path):
+    home, script, _ = _dir_override_setup(
+        tmp_path, {"notes_root": {"roadmaps": str(tmp_path / "briefs")}}
+    )
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "new-key override must resolve")
+    assert Path(actual["roadmaps"]) == tmp_path / "briefs"
+    assert OLD_ROOT_KEY not in result.stderr, "the new key must print no notice"
+
+
+def test_old_directory_key_in_override_is_still_read_with_one_notice(tmp_path):
+    home, script, override = _dir_override_setup(
+        tmp_path, {OLD_ROOT_KEY: {"roadmaps": str(tmp_path / "briefs")}}
+    )
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "old-key override must still resolve")
+    assert Path(actual["roadmaps"]) == tmp_path / "briefs"
+    assert result.stderr.count(f"config_path: {override} uses the old key {OLD_ROOT_KEY!r}; use 'notes_root' instead") == 1
+
+
+def test_old_directory_key_in_explicit_config_is_still_read(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({OLD_ROOT_KEY: {"standards": str(tmp_path / "std")}}), encoding="utf-8"
+    )
+    result = _run_paths(script, home=home, cwd=tmp_path, args=("--config", str(config)))
+    actual = _resolved_output(result, "old-key --config must still resolve")
+    assert Path(actual["standards"]) == tmp_path / "std"
+    assert "uses the old key" in result.stderr
+
+
+def test_new_directory_key_wins_when_both_are_set(tmp_path):
+    home, script, _ = _dir_override_setup(
+        tmp_path,
+        {
+            OLD_ROOT_KEY: {"roadmaps": str(tmp_path / "old")},
+            "notes_root": {"roadmaps": str(tmp_path / "new")},
+        },
+    )
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "conflicting keys must still resolve")
+    assert Path(actual["roadmaps"]) == tmp_path / "new"
+    assert "using 'notes_root'" in result.stderr
+
+
+def test_wrong_type_under_old_directory_key_is_ignored(tmp_path):
+    home, script, _ = _dir_override_setup(tmp_path, {OLD_ROOT_KEY: "not-an-object"})
+    result = _run_paths(script, home=home, cwd=tmp_path)
+    actual = _resolved_output(result, "bad override must degrade")
+    assert Path(actual["roadmaps"]) == home / ".claude" / "roadmaps"
+    assert "wrong type" in result.stderr
+
+
+def test_resolver_refusal_named_for_the_new_key_propagates(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    resolver = tmp_path / "resolver.py"
+    resolver.write_text(
+        "class NotesRootAbsent(LookupError):\n    pass\n\n\n"
+        "def resolve(config, cwd=None):\n    raise NotesRootAbsent('no notes root set')\n\n\n"
+        "def resolve_relative(paths, subkey, value):\n    raise AssertionError\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "explicit.json"
+    config.write_text(json.dumps({"notes_root": {"resolver": str(resolver)}}), encoding="utf-8")
+    result = _run_paths(script, home=home, cwd=tmp_path, args=("--config", str(config)))
+    assert result.returncode != 0
+    assert "no notes root set" in result.stderr
+
+
+def test_resolver_receives_settings_under_both_key_names(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    script = _copy_standalone(tmp_path, CONFIG_PATH.read_text(encoding="utf-8"))
+    seen = tmp_path / "seen.json"
+    resolver = tmp_path / "resolver.py"
+    resolver.write_text(
+        "import json\nfrom types import SimpleNamespace\n\n\n"
+        "def resolve(config, cwd=None):\n"
+        f"    open({str(seen)!r}, 'w').write(json.dumps(config))\n"
+        "    from pathlib import Path\n    return SimpleNamespace(roadmaps=Path('/r'), standards=Path('/s'))\n\n\n"
+        "def resolve_relative(paths, subkey, value):\n    from pathlib import Path\n    return Path('/x') / value\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "explicit.json"
+    config.write_text(
+        json.dumps({"notes_root": {"resolver": str(resolver), "root": "/n"}}), encoding="utf-8"
+    )
+    result = _run_paths(script, home=home, cwd=tmp_path, args=("--config", str(config)))
+    assert result.returncode == 0, result.stderr
+    received = json.loads(seen.read_text(encoding="utf-8"))
+    assert received["notes_root"]["root"] == "/n"
+    assert received[OLD_ROOT_KEY]["root"] == "/n"

@@ -21,7 +21,7 @@ Subcommands
           tombstone, and wikilink repair. This is the gated, mutating step.
   budget  Read-only index-load-cost check; when over the ceiling it PROPOSES a
           topic-sharding split (never writes). Schedulable.
-  classify  Read-only: tag every note personal / harness-fact / decision /
+  classify  Read-only: tag every note personal / documented / decision /
           project-gotcha / stale, with evidence. Writes only an explicit --out.
   shard   EXECUTE the topic-split budget proposes. Dry-run by DEFAULT (prints
           exactly what would be written, reusing propose_shards); `--apply`
@@ -121,20 +121,17 @@ OVER_BUDGET_EXIT = 3
 # Brand-specific keywords belong in a user's own --taxonomy file; these
 # defaults are generic category words that substring-match real note stems.
 DEFAULT_SHARD_TAXONOMY = [
-    ("fleet", "Fleet, orchestration & agentic maturity",
-     ["fleet", "growth", "agentic", "harness", "model-pinning",
-      "delegate", "orchestrate", "session-handoff", "last-stretch",
-      "portfolio-case", "roadmap"]),
-    ("infra", "Home-lab infrastructure, networking & hosting",
-     ["infra", "router", "syslog", "docker", "vpn",
-      "media", "nas", "backup", "server"]),
-    ("automation", "Scheduled automations, pipelines & digests",
-     ["ai-coding", "digest", "briefing", "podcast", "streaming",
-      "feed", "reader", "broker", "scheduled", "watchlist",
-      "condenser", "transcript"]),
-    ("secrets", "Secrets, password manager, dotfiles & sync",
-     ["op-", "oplock", "password", "secret", "sync", "dotfiles",
-      "-tree"]),
+    ("workflow", "Workflow, planning & agents",
+     ["workflow", "agentic", "delegate", "orchestrate", "handoff",
+      "roadmap", "planning"]),
+    ("infra", "Infrastructure, networking & hosting",
+     ["infra", "router", "docker", "vpn", "media", "nas", "backup",
+      "server"]),
+    ("automation", "Scheduled jobs, pipelines & reports",
+     ["pipeline", "digest", "briefing", "report", "feed", "reader",
+      "scheduled", "cron", "transcript"]),
+    ("secrets", "Secrets, credentials & sync",
+     ["password", "credential", "secret", "sync", "dotfiles"]),
 ]
 
 # --- Per-file harness truncation budget (`filebudget`) ---------------------- #
@@ -389,7 +386,7 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]")
 # `(?:[^\[\]]|\[[^\[\]]*\])*` accepts one level of nesting inside the title,
 # which is as deep as markdown link titles go in practice. It deliberately
 # CANNOT cross a `](` boundary, so a line whose SUMMARY carries a second
-# markdown link (`… Studio-only dark → [studio-wifi-wedge](studio-wifi-wedge.md)`)
+# markdown link (`… Garage-only dark → [garage-wifi-wedge](garage-wifi-wedge.md)`)
 # still resolves to the FIRST link's target, not the last — a greedy
 # match-to-the-final-`](` would silently re-key that line to the wrong note.
 # Deeper nesting still fails to match; `_assert_no_duplicate_index_targets`
@@ -1825,8 +1822,8 @@ def refresh_shard_pointer(core_text, shard_basename, shard_text):
 
     Surgical by design: only the `· N notes · ~T tok ·` segment is rewritten, and
     the rest of the pointer line — including any hand-added trailing prose — stays
-    byte-identical. Live pointers DO get augmented by hand (the fleet pointer
-    carries a standing ADR/calibration reminder after the generated suffix), so
+    byte-identical. Live pointers DO get augmented by hand (a shard pointer
+    can carry a standing reminder after the generated suffix), so
     regenerating the line through `_shard_pointer` would silently delete it.
 
     Why this exists: `propose_extend` refreshes a pointer only for a shard it MOVES
@@ -2597,8 +2594,8 @@ def _extend_ceiling(new_measure):
     destination shard over the cap, converting a cured core into a truncating
     shard — the same data loss, relocated into a JIT-loaded file where it is
     less likely to be noticed. Measured on a real store, an
-    extend put MEMORY.fleet.md at 19,840 B / 72 notes: inside the
-    cap, but with ~15 notes of headroom against ~1.25 fleet notes/day.
+    extend put one shard at 19,840 B / 72 notes: inside the
+    cap, but with ~15 notes of headroom against ~1.25 new notes/day.
 
     Returns {status, headroom_bytes, headroom_lines, notes_headroom}, where
     status is "ok", "warn" (inside the cap but with little room left, using
@@ -3401,7 +3398,7 @@ def render_file_budget_report(result):
 # classify (report-only migration classification)
 # --------------------------------------------------------------------------- #
 
-CLASSIFY_CLASSES = ("personal", "harness-fact", "decision", "project-gotcha", "stale")
+CLASSIFY_CLASSES = ("personal", "documented", "decision", "project-gotcha", "stale")
 LOW_CONFIDENCE = "low-confidence"
 # A rules line counts as the duplicate of a note only when the note's
 # description and the line share at least DUP_MIN_SHARED distinctive words AND
@@ -3424,10 +3421,9 @@ CLASSIFY_STOPWORDS = frozenset((
 CLASSIFY_GENERIC = frozenset((
     "harness session sessions model models file files memory rule rules "
     "standard standards claude").split())
-HARNESS_VOCAB = frozenset((
-    "harness seat seats orchestrate orchestrator director builder reviewer "
-    "worktree launchd cmux omp codex subagent subagents packet handback "
-    "rail rails wave queue").split())
+AGENT_TOOLING_VOCAB = frozenset((
+    "harness orchestrate orchestrator builder reviewer worktree subagent "
+    "subagents hook hooks plugin plugins").split())
 DECISION_CUES = ("decided", "decision", "ratified", "election", "elected", "adr",
                  "chose", "approved", "agreed", "going forward", "greenlight",
                  "outcome", "outcomes")
@@ -3461,7 +3457,7 @@ PATH_SCRATCH_RE = re.compile(
 def _sig_words(text):
     return {w for w in WORD_RE.findall(text.lower())
             if w not in CLASSIFY_STOPWORDS and w not in CLASSIFY_GENERIC
-            and w not in HARNESS_VOCAB}
+            and w not in AGENT_TOOLING_VOCAB}
 
 
 def _collect_md_lines(roots):
@@ -3566,7 +3562,7 @@ def _note_repo(fm_lines, text, store_slug):
 def classify_note(name, text, md_lines, ledger_lines, store_slug):
     """-> (class, evidence, low_confidence_reason_or_None). Rules, in order:
     1 explicit stale marker -> stale; 2 type user -> personal; 3 duplicate
-    found in a rules root -> harness-fact (never without a rules root);
+    found in a rules root -> documented (never without a rules root);
     4 by metadata.type: feedback -> personal, project -> decision or
     project-gotcha by cue count, reference and mechanics -> project-gotcha;
     anything else decided by cues, flagged. A quoted path that no longer
@@ -3588,21 +3584,21 @@ def classify_note(name, text, md_lines, ledger_lines, store_slug):
     if ntype == "user":
         return "personal", "type=user", "; ".join(low) or None
 
-    harness_words = sorted(w for w in HARNESS_VOCAB
+    tooling_words = sorted(w for w in AGENT_TOOLING_VOCAB
                            if re.search(r"\b%s\b" % w, haystack))
-    harness_like = len(harness_words) >= 2 and ntype != "project"
+    tooling_like = len(tooling_words) >= 2 and ntype != "project"
     suffix = ""
     if md_lines is not None:
         dup = _find_duplicate(description, md_lines)
         if dup:
-            return ("harness-fact", "duplicates: %s" % dup,
+            return ("documented", "duplicates: %s" % dup,
                     "; ".join(low) or None)
-        if harness_like:
-            low.append("harness vocabulary but no duplicate found in the rules roots")
-    elif harness_like:
+        if tooling_like:
+            low.append("agent-tooling vocabulary but no duplicate found in the rules roots")
+    elif tooling_like:
         suffix = "; duplicates: not searched"
-        low.append("harness vocabulary (%s) but no --rules-root given, so "
-                   "duplicates were not searched" % ", ".join(harness_words[:3]))
+        low.append("agent-tooling vocabulary (%s) but no --rules-root given, so "
+                   "duplicates were not searched" % ", ".join(tooling_words[:3]))
 
     decide = sum(1 for c in DECISION_CUES if c in haystack)
     gotcha = sum(1 for c in GOTCHA_CUES if c in haystack)
@@ -3858,12 +3854,12 @@ def main(argv=None):
     clp = sub.add_parser(
         "classify",
         help="read-only migration classification of every note into one of "
-             "personal / harness-fact / decision / project-gotcha / stale "
+             "personal / documented / decision / project-gotcha / stale "
              "(report only; moves nothing)")
     clp.add_argument("--dir", default=default_dir)
     clp.add_argument("--rules-root", action="append", default=[],
                      help="directory of *.md rules/standards to search for the "
-                          "line a harness-fact note duplicates (repeatable; "
+                          "line a documented note duplicates (repeatable; "
                           "no default)")
     clp.add_argument("--ledger-root", action="append", default=[],
                      help="directory of *.md ledger items a decision note maps "

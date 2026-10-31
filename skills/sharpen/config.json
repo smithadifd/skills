@@ -1,5 +1,5 @@
 {
-  "harness_root": {
+  "notes_root": {
     "resolver": null,
     "root": null,
     "roadmaps": null,
@@ -15,5 +15,5 @@
   "routing_context": "routing-context.md",
   "model_guidance": "model-guidance.md",
   "brief_commit": true,
-  "_notes": "Standalone resolution: config.json lives beside this skill. Set harness_root.resolver to an absolute or ~-prefixed Python file to opt in to that module's path resolution. Unset roadmaps and standards use the ~/.claude/roadmaps and ~/.claude/standards defaults. Relative source values join their configured roadmaps or standards directory; absolute source values remain explicit, and ~-prefixed source values expand against HOME instead of joining that directory. A missing optional source degrades to one one-line notice. An install that keeps its own routing documents points these source keys at them from ~/.claude/skill-config/sharpen.json; the shipped values are neutral defaults."
+  "_notes": "Standalone resolution: config.json lives beside this skill. Set notes_root.resolver to an absolute or ~-prefixed Python file to opt in to that module's path resolution. Unset roadmaps and standards use the ~/.claude/roadmaps and ~/.claude/standards defaults. Relative source values join their configured roadmaps or standards directory; absolute source values remain explicit, and ~-prefixed source values expand against HOME instead of joining that directory. A missing optional source degrades to one one-line notice. An install that keeps its own process documents points these source keys at them from ~/.claude/skill-config/sharpen.json; the shipped values are neutral defaults."
 }
