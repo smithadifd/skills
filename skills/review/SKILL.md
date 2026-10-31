@@ -27,7 +27,9 @@ finding across several bullets.
   a short read. Add a length check before the final iteration. [reach:
   <lane|concurrent|user|owner> (<one-clause reason>); breaks:
   <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]`
-  (`reach: lane` is `lane` — anything the change's author wrote or controls: its branch and branch name, every file it commits, its report, the PR body, and the temp roots its sandbox allows; `concurrent` is another session, thread or
+  (`lane` is anything the change's author wrote or controls: its branch and
+  branch name, every file it commits, the builder's report, the PR body, and
+  the temp roots its sandbox allows; `concurrent` is another session, thread or
   process following the same protocol at the same time; `user` is an operator
   flow or input; `owner` is only a human with account or repo write, or an
   unsandboxed same-user process.)

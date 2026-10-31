@@ -299,7 +299,7 @@ def test_reviewer_agent_issues_shape_carries_the_group():
         "| reach \\ breaks | gate | data | avail | docs | evidence |",
         "| lane, concurrent, user | block | block | harden | nit | harden |",
         "| owner | block | harden | harden | nit | harden |",
-        "The tooling that reads your verdict, not the reviewer, applies three adjustments to the base table: `guard-file` (the finding sits in a file the caller treats as a guard), `unprobed` (the finding rests on reading alone) and `unlocated` (the finding names no usable file and line); the reviewer cannot see that tooling's guard set or adapter result.",
+        "The tooling that reads your verdict, not the reviewer, applies three adjustments to the base table: `guard-file` (a `breaks: evidence` finding in a file the caller treats as a guard becomes block), `unprobed` (a block finding that rests on `evidence: read` becomes harden) and `unlocated` (a harden finding that names no usable file and line becomes block); the reviewer cannot see that tooling's guard set or adapter result.",
         "Earlier findings (round 2+): [each one — fixed, reported again under **Issues** with its three tags, or still hardened only when the brief lists it as hardened; include the line]",
         "A finding must be caused by the change, not merely located in code the change touched.",
         "Do not tag a BUG: an already-privileged actor (a human with the account or repo write, or an unsandboxed same-user process) with no gate effect; an ordering gap with no bypass; behaviour the base already had.",

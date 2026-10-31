@@ -76,7 +76,7 @@ When the brief says this is a later round, or gives the commit the last round re
   | lane, concurrent, user | block | block | harden | nit | harden |
   | owner | block | harden | harden | nit | harden |
 
-- The reviewer uses the base table. The tooling that reads your verdict, not the reviewer, applies three adjustments to the base table: `guard-file` (the finding sits in a file the caller treats as a guard), `unprobed` (the finding rests on reading alone) and `unlocated` (the finding names no usable file and line); the reviewer cannot see that tooling's guard set or adapter result.
+- The reviewer uses the base table. The tooling that reads your verdict, not the reviewer, applies three adjustments to the base table: `guard-file` (a `breaks: evidence` finding in a file the caller treats as a guard becomes block), `unprobed` (a block finding that rests on `evidence: read` becomes harden) and `unlocated` (a harden finding that names no usable file and line becomes block); the reviewer cannot see that tooling's guard set or adapter result.
 - Never treat an earlier finding about data loss, a check that fails open, or a bypassed guard as fixed unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks` (`data` for data loss, or `gate` for a fails-open check or bypassed guard) and report it under **Issues**. The tooling that reads your verdict decides the cell, including at owner reach.
 - A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.
 - A fix can open a new path. Run step 4 again on whatever the delta changed.
