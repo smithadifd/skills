@@ -97,7 +97,7 @@ def _expect_parse(text: str, expected: tuple) -> None:
     assert detail in str(caught.value), str(caught.value)
 
 
-def _envelope(text: str, *, jev_fallback: bool = False) -> dict:
+def _envelope(text: str) -> dict:
     """A run envelope with every key; the ones not set here are null."""
     envelope = dict.fromkeys(review_phase.ENVELOPE_KEYS)
     envelope.update(
@@ -112,7 +112,7 @@ def _envelope(text: str, *, jev_fallback: bool = False) -> dict:
                 "thinking": "medium",
             },
             "constraints": {"scope": "diff only"},
-            "adapters": {"jev_fallback": True} if jev_fallback else {},
+            "adapters": {},
             "budget": {"tokens": 0},
         }
     )
@@ -418,23 +418,10 @@ TERMINAL_ROWS = [
 @pytest.mark.parametrize(
     "text, fragment", [pytest.param(text, fragment, id=case) for case, text, fragment in TERMINAL_ROWS]
 )
-def test_terminal_row(monkeypatch, text, fragment):
-    consulted = []
-
-    def other_adapters(*args):
-        consulted.append("adapters")
-        return ("approved", [])
-
-    def consult_jev(*args):
-        consulted.append("jev")
-        raise AssertionError("Jev must not be consulted for an omp reply")
-
-    monkeypatch.setattr(review_phase, "_try_other_adapters", other_adapters)
-    monkeypatch.setattr(review_phase, "_consult_jev", consult_jev)
-    result = review_phase.run_phase(_envelope(text + "INTERVAL: none\n", jev_fallback=True))
+def test_terminal_row(text, fragment):
+    result = review_phase.run_phase(_envelope(text + "INTERVAL: none\n"))
     assert result["status"] == "failure", result["reason"]
     assert fragment in result["reason"], result["reason"]
-    assert consulted == []
 
 
 # --- K. the prompt contract (R11) ---------------------------------------------

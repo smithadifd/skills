@@ -52,7 +52,7 @@ worked example above is the shape it expects, verbatim. The closing
 `review_interval_missing`. The grammar and every refusal are in
 `references/structured-interval.md`. A return that states
 two different verdicts, in either order, is a failure for the `claude-fresh`
-backend and for a supplied `grok-notools` output, even with `adapters.jev_fallback` on.
+backend and for a supplied `grok-notools` output.
 
 Optional external reviewer output formats: a caller that runs its own reviewer
 may supply the reply in the OMP or `grok-notools` format. Plain Claude Code
@@ -119,13 +119,6 @@ value.
 The model and thinking level are required caller inputs. The level is one of `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `auto`. The result
 records both, with the backend name, as `attribution`.
-
-`REVIEW_PHASE_JEV_SHADOW=1` enables an advisory TypeSafe pass on parse-success
-returns. It sends only `jev_client.trim_payload`'s FINDINGS/VERDICT payload and
-records `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason` on
-the phase result. `jev_reason` is a secret-free failure classification when
-Jev is unavailable and null otherwise; the selected adapter's verdict and
-verbatim `review.md` remain authoritative. Absent/unset is the exact base path.
 
 Do NOT comment on:
 - Style, formatting, naming conventions
