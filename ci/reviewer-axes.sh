@@ -36,7 +36,7 @@ standards_at=$(first_line "$standards")
 require 'scope' 'report only correctness and requirement gaps'
 require 'round-1 mutation' 'Round 1 of a code change runs a targeted mutation'
 require 'round-1 executable owner' 'whenever you can execute one'
-require 'mutation routing' 'route the mutation to a lane that can execute'
+require 'mutation routing' 'route the mutation to a reviewer that can execute it'
 require 'mutation fallback' 'this review carries the mutation'
 require 'docs exemption' 'Docs-only changes need no mutation'
 require 'delta review heading' 'Delta review (round 2 and later)'
