@@ -75,7 +75,7 @@ def _bold(text: str) -> str:
     return _styled(text, 0x1D400, 0x1D41A)
 
 
-def _envelope(text: str, *, jev_fallback: bool = False) -> dict:
+def _envelope(text: str) -> dict:
     return {
         "repo/ref": "example/invoice-cli@def456",
         "inputs": {
@@ -88,7 +88,7 @@ def _envelope(text: str, *, jev_fallback: bool = False) -> dict:
         },
         "constraints": {"scope": "diff only"},
         "harness_root": None,
-        "adapters": {"jev_fallback": True} if jev_fallback else {},
+        "adapters": {},
         "budget": {"tokens": 0},
     }
 
@@ -481,7 +481,7 @@ def test_G6_a_record_with_no_prose_approves_with_no_findings():
     assert result["intervals"] == []
 
 
-# --- G. every omp parse error is terminal, even with the Jev fallback on ------
+# --- G. every omp parse error is terminal --------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -499,23 +499,10 @@ def test_G6_a_record_with_no_prose_approves_with_no_findings():
         ),
     ],
 )
-def test_omp_parse_errors_are_terminal_with_the_fallback_on(monkeypatch, text, fragment):
-    consulted = []
-
-    def other_adapters(*args):
-        consulted.append(("adapters", args))
-        return None
-
-    def consult_jev(*args):
-        consulted.append(("jev", args))
-        raise AssertionError("Jev must not be consulted for an omp reply")
-
-    monkeypatch.setattr(review_phase, "_try_other_adapters", other_adapters)
-    monkeypatch.setattr(review_phase, "_consult_jev", consult_jev)
-    result = review_phase.run_phase(_envelope(text, jev_fallback=True))
+def test_omp_parse_errors_are_terminal(text, fragment):
+    result = review_phase.run_phase(_envelope(text))
     assert result["status"] == "failure", result["reason"]
     assert fragment in result["reason"], result["reason"]
-    assert consulted == []
 
 
 # --- H. the prompt contract names what prose must not contain ----------------

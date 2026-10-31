@@ -29,14 +29,6 @@ adapters never see it, and on success the phase result carries `intervals`
 endpoint, contradictory or duplicated is `failure`, with a reason naming the
 line (references/structured-interval.md).
 
-With `REVIEW_PHASE_JEV_SHADOW=1`, a successful regex parse also sends
-`jev_client.trim_payload(review.md)` through the existing `JevClient` and adds
-advisory `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason`
-fields to the phase result. `jev_reason` classifies an unavailable outcome and
-is null otherwise. The selected adapter's verdict remains authoritative. The
-flag is off by default; any shadow failure cannot change review status,
-artifacts, reason, or verdict.
-
 Backends (one adapter each, chosen by the envelope's `inputs.backend`):
     claude-fresh   the reviewer agent's `## Verdict:` block with `### Issues`
                    / `### Minor notes` (clean: "No bugs or security issues found."
@@ -95,14 +87,10 @@ import bisect
 import copy
 import html.entities
 import json
-import math
-import os
 import re
 import sys
 import unicodedata
 from pathlib import Path
-
-from jev_client import _ANY_HEADING, JevClient, JevClosed, trim_payload
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "findings.schema.json"
 SCHEMA_ID = "review-findings/v1"
@@ -125,8 +113,7 @@ class ParseError(ValueError):
 class VerdictConflict(ParseError):
     """The return states two different verdicts, so neither one can be taken.
 
-    A failure even with `adapters.jev_fallback` on: another adapter or Jev
-    would pick one of two verdicts the reviewer wrote.
+    A failure: choosing one of two verdicts the reviewer wrote would be a guess.
     """
 
 class ReviewProseUnsafe(ParseError):
@@ -339,10 +326,19 @@ def _extract_verdict(lines: list[str], vocabulary: str) -> str | None:
 # --- text helpers shared by the adapters -------------------------------------
 
 # A markdown heading, or a bare section label (`FINDINGS:`, `VERDICT: …`) in
-# the headless shape that writes no `#` at all. This is the same compiled
-# pattern the Jev payload trim uses, so the two can never drift apart; its
-# grammar, and why it stays linear on any line, is described in jev_client.py.
-_HEADING = _ANY_HEADING
+# the headless shape that writes no `#` at all. It runs on every line of every
+# review, so it has to stay linear on any line. A title starts on a non-space
+# character, so it never shares the marker's whitespace. It ends on a character
+# the closing `#`/space tail cannot hold, so no lazy quantifier rescans that
+# tail. A label's payload stops at the first newline and allows only whitespace
+# after it.
+_HEADING = re.compile(
+    r"^\s*(?:#{1,6}\s*(\S(?:.*[^\s#]|.*#(?=\s+#))?|[^\S\n])(?:\s*#+)?"
+    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**\s*:[^\n]*(?:\n\s*)?$"
+    r"|\**(FINDINGS|ISSUES|MINOR NOTES|VERDICT|ANALYSIS|SUMMARY|NOTES|RECOMMENDATION)\**"
+    r")\s*$",
+    re.IGNORECASE,
+)
 
 
 def _heading_title(match: re.Match[str]) -> str:
@@ -1475,156 +1471,24 @@ def run_phase(envelope: object) -> dict:
         )
     # The record is checked before any adapter reads the return. A return
     # whose last line is not a record would otherwise reach an adapter with
-    # that line still in its last section and fail as an unparsed section, and
-    # with the fallback on it would reach the other adapters and Jev first.
+    # that line still in its last section and fail as an unparsed section.
     try:
         intervals = _require_intervals(text)
     except ParseError as exc:
         result = _result("failure", f"{backend}: {exc}", text, None)
     else:
-        result = _parse_return(envelope, backend, text, intervals)
+        result = _parse_return(backend, text, intervals)
     if attribution is not None:
         result["attribution"] = attribution
     return result
 
 
-def _parse_return(
-    envelope: dict, backend: str, text: str, intervals: list[dict]
-) -> dict:
-    selected = ADAPTERS[backend]
+def _parse_return(backend: str, text: str, intervals: list[dict]) -> dict:
     try:
-        verdict, findings = selected(text)
+        verdict, findings = ADAPTERS[backend](text)
     except ParseError as exc:
-        # OMP's structured review record is mandatory even with fallback on:
-        # another adapter or Jev would reintroduce a text-derived verdict.
-        # A conflict in any backend likewise cannot be resolved by choosing
-        # one of the verdicts the reviewer wrote.
-        if (
-            backend == OMP_LANE
-            or isinstance(exc, VerdictConflict)
-            or not _jev_fallback_enabled(envelope)
-        ):
-            return _result("failure", f"{backend}: {exc}", text, None)
-        try:
-            parsed = _try_other_adapters(backend, text)
-        except VerdictConflict as exc:
-            return _result("failure", f"{backend}: {exc}", text, None)
-        if parsed is None:
-            return _consult_jev(backend, text, intervals)
-        verdict, findings = parsed
-    source = "regex" if _jev_fallback_enabled(envelope) else None
-    result = _finish(backend, verdict, findings, text, source=source)
-    _attach_intervals(result, intervals)
-    if _jev_shadow_enabled() and result["status"] == "success":
-        _record_jev_shadow(result, verdict, text)
-    return result
-
-
-def _jev_fallback_enabled(envelope: dict) -> bool:
-    adapters = envelope.get("adapters")
-    return isinstance(adapters, dict) and adapters.get("jev_fallback") is True
-
-
-def _try_other_adapters(backend: str, text: str) -> tuple[str, list[dict]] | None:
-    for name, adapter in ADAPTERS.items():
-        if name == backend:
-            continue
-        try:
-            return adapter(text)
-        except VerdictConflict:
-            raise
-        except ParseError:
-            continue
-    return None
-
-
-def _jev_shadow_enabled() -> bool:
-    return os.environ.get("REVIEW_PHASE_JEV_SHADOW") == "1"
-
-
-def _jev_shadow_failure_reason(exc: BaseException) -> str:
-    """Return a short, secret-free classification for an unavailable shadow."""
-    if isinstance(exc, TimeoutError):
-        return "jev: timeout"
-    if not isinstance(exc, JevClosed):
-        return f"jev: unexpected {type(exc).__name__}"
-
-    message = str(exc)
-    if "OP_CONNECT_HOST" in message:
-        return "jev: OP_CONNECT_HOST unresolvable"
-    if "OP_CONNECT_TOKEN" in message:
-        return "jev: OP_CONNECT_TOKEN unresolvable"
-    if "could not resolve secret" in message:
-        return "jev: could not resolve secret"
-    if message == "jev: could not load op-resolve":
-        return message
-    if message.startswith("jev: Connect request ") and " failed:" in message:
-        return "jev: Connect connection failed"
-    connect_http_status = re.match(r"jev: Connect returned HTTP (\d{3})\b", message)
-    if connect_http_status:
-        return f"jev: Connect HTTP {connect_http_status.group(1)}"
-    if message.startswith("jev: vault not found:"):
-        return "jev: vault not found"
-    if message.startswith("jev: item not found:"):
-        return "jev: item not found"
-    if message == "jev: malformed response":
-        return message
-    if message == "jev: request failed":
-        return message
-    if message == "jev: timeout":
-        return message
-    if message.startswith("jev: choice "):
-        return "jev: choice is not APPROVE or REQUEST_CHANGES"
-    if message.startswith("jev: confidence ") and " below floor " in message:
-        return "jev: confidence below floor"
-    if message.startswith("jev: confidence "):
-        return "jev: invalid confidence"
-    http_status = re.match(r"jev: HTTP (\d{3})\b", message)
-    if http_status:
-        return f"jev: HTTP {http_status.group(1)}"
-    return "jev: unavailable (JevClosed)"
-
-
-def _record_jev_shadow(result: dict, regex_verdict: str, text: str) -> None:
-    """Add advisory Jev metadata without changing the regex phase result."""
-    jev_reason = None
-    try:
-        payload = trim_payload(text)
-        client = JevClient()
-        jev_verdict, confidence = client.decide(payload)
-        if jev_verdict not in (APPROVED, CHANGES_REQUESTED):
-            raise ValueError("unknown Jev verdict")
-        if (
-            not isinstance(confidence, (int, float))
-            or isinstance(confidence, bool)
-            or not math.isfinite(confidence)
-        ):
-            raise ValueError("invalid Jev confidence")
-    except (JevClosed, TimeoutError) as exc:
-        jev_verdict, confidence = "unavailable", None
-        jev_reason = _jev_shadow_failure_reason(exc)
-    except Exception as exc:
-        jev_verdict, confidence = "unavailable", None
-        jev_reason = _jev_shadow_failure_reason(exc)
-
-    result["jev_verdict"] = jev_verdict
-    result["confidence"] = confidence
-    result["agrees_with_regex"] = (
-        jev_verdict == regex_verdict if jev_verdict != "unavailable" else None
-    )
-    result["jev_reason"] = jev_reason
-
-
-def _consult_jev(backend: str, text: str, intervals: list[dict]) -> dict:
-    """Ask Jev for the verdict; `intervals` is the record run_phase checked."""
-    try:
-        client = JevClient()
-        verdict, confidence = client.decide(text)
-    except JevClosed as exc:
-        return _result("failure", str(exc), text, None)
-    except Exception:
-        return _result("failure", "jev: request failed", text, None)
-    result = _finish(backend, verdict, [], text, source="jev", confidence=confidence)
+        return _result("failure", f"{backend}: {exc}", text, None)
+    result = _finish(backend, verdict, findings, text)
     return _attach_intervals(result, intervals)
 
 
@@ -1633,9 +1497,6 @@ def _finish(
     verdict: str,
     findings: list[dict],
     text: str,
-    *,
-    source: str | None = None,
-    confidence: float | None = None,
 ) -> dict:
     document = {
         "schema": SCHEMA_ID,
@@ -1653,10 +1514,6 @@ def _finish(
         )
     summary = f"{backend}: {verdict}, {len(findings)} finding(s)"
     result = _result("success", summary, text, copy.deepcopy(document))
-    if source is not None:
-        result["verdict_source"] = source
-    if confidence is not None:
-        result["confidence"] = confidence
     return result
 
 

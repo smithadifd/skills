@@ -46,7 +46,7 @@ worked example above is the shape it expects, verbatim. The closing
 `review_interval_missing`. The grammar and every refusal are in
 `references/structured-interval.md`. A return that states
 two different verdicts, in either order, is a failure for the `claude-fresh`
-and `grok-notools` backends, even with `adapters.jev_fallback` on.
+and `grok-notools` backends.
 
 For a review run through `omp -p --model <id> --thinking=<level>`, append this
 output contract to the reviewer prompt. Parse the reply with `--backend omp`,
@@ -109,13 +109,6 @@ value.
 The model and thinking level are required caller inputs. The level is one of `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `auto`. The result
 records both, with the lane name, as `attribution`.
-
-`REVIEW_PHASE_JEV_SHADOW=1` enables an advisory TypeSafe pass on parse-success
-returns. It sends only `jev_client.trim_payload`'s FINDINGS/VERDICT payload and
-records `jev_verdict`, `confidence`, `agrees_with_regex`, and `jev_reason` on
-the phase result. `jev_reason` is a secret-free failure classification when
-Jev is unavailable and null otherwise; the selected adapter's verdict and
-verbatim `review.md` remain authoritative. Absent/unset is the exact base path.
 
 Do NOT comment on:
 - Style, formatting, naming conventions
