@@ -2031,6 +2031,10 @@ def test_clean_sentence_without_a_verdict_line_still_refuses(sentence):
         "No bugs found and the retry is wrong.",
         "No bugs found in the parser.",
         "No bugs, security issues, or regressions introduced by the round 4 delta",
+        # A clean-looking first sentence followed by more text on the one line.
+        "No bugs found. The retry is wrong.",
+        "No bugs, security issues, or regressions introduced by the round 4 delta. "
+        "But see the retry path.",
     ],
 )
 def test_sentence_that_could_carry_a_finding_is_not_clean(prose):
