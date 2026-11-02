@@ -1923,6 +1923,132 @@ def test_foreign_prose_beside_a_grok_finding_refuses():
         review_phase.parse_grok_notools(text)
 
 
+
+# --- the `Resolved carried:` line -------------------------------------------
+
+CARRIED_ID = "skills/review/review_phase.py:423@0123456789abcdef"
+OTHER_CARRIED_ID = "a.py:7@fedcba9876543210"
+
+
+def _round_two_block(carried_line: str, minor: str | None = None) -> str:
+    """A round-2 delta review: the carried line sits after the Minor-notes bullets."""
+    if minor is None:
+        minor = "- `a.py:1` — a note\n- `b.py:2` — another note"
+    return (
+        "## Verdict: APPROVE\n\n"
+        "### Issues\n- none\n\n"
+        f"### Minor notes\n{minor}\n\n"
+        f"{carried_line}\n\n"
+        "INTERVAL: none\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "carried_line",
+    [
+        pytest.param(f"Resolved carried: {CARRIED_ID}", id="one-id"),
+        pytest.param(f"Resolved carried: {CARRIED_ID}, {OTHER_CARRIED_ID}", id="two-ids"),
+        pytest.param("Resolved carried: none", id="none"),
+        pytest.param(f"`Resolved carried: {CARRIED_ID}`", id="backticked"),
+    ],
+)
+def test_round_two_resolved_carried_after_minor_notes_parses(carried_line):
+    text = _round_two_block(carried_line)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert [f["description"] for f in findings] == ["a note", "another note"]
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+
+
+def test_resolved_carried_alone_in_a_section_is_not_content():
+    # The carried line is the only line under Minor notes: it must not count
+    # as content that failed to parse.
+    text = _round_two_block(f"Resolved carried: {CARRIED_ID}", minor="")
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert findings == []
+
+
+@pytest.mark.parametrize(
+    "carried_line",
+    [
+        pytest.param("Resolved carried: none, but the retry is wrong.", id="none-but"),
+        pytest.param(f"Resolved carried: {CARRIED_ID} and the retry is wrong", id="id-then-prose"),
+        pytest.param("Resolved carried: the retry fix", id="not-an-id"),
+        pytest.param(f"Resolved carried: {CARRIED_ID},", id="trailing-comma"),
+        pytest.param(f"resolved carried: {CARRIED_ID}", id="lowercase-label"),
+    ],
+)
+def test_malformed_resolved_carried_line_is_still_foreign_prose(carried_line):
+    with pytest.raises(review_phase.ParseError, match="MINOR NOTES"):
+        review_phase.parse_claude_fresh(_round_two_block(carried_line))
+
+
+def test_resolved_carried_line_does_not_stand_in_for_a_verdict():
+    text = f"### Issues\n- none\n\nResolved carried: {CARRIED_ID}\n"
+    with pytest.raises(review_phase.ParseError, match="no verdict"):
+        review_phase.parse_claude_fresh(text)
+
+
+# --- the clean-sentence family under a findings section ---------------------
+
+CLEAN_SENTENCES = [
+    "No bugs, security issues, or regressions introduced by the round 4 delta.",
+    "No bugs found.",
+    "No issues found in this PR.",
+    "No bugs or regressions introduced by the delta.",
+]
+
+
+@pytest.mark.parametrize("sentence", CLEAN_SENTENCES)
+def test_clean_sentence_under_issues_parses_clean(sentence):
+    text = _claude_approve_with("Checked.", issues=sentence)
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "approved"
+    assert findings == []
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+
+
+@pytest.mark.parametrize("sentence", CLEAN_SENTENCES)
+def test_clean_sentence_without_a_verdict_line_still_refuses(sentence):
+    text = f"### Summary\nLooks fine.\n\n### Issues\n{sentence}\n"
+    with pytest.raises(review_phase.ParseError, match="no verdict"):
+        review_phase.parse_claude_fresh(text)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "No bugs found, but see below",
+        "No bugs, but the retry is wrong.",
+        "None of the bugs were fixed.",
+        "No bugs, security issues, or regressions introduced by the round 4 delta, "
+        "but the retry is wrong.",
+        "No bugs introduced by the delta except the retry.",
+        "No bugs found in the parser; the retry is wrong.",
+        "No bugs found and the retry is wrong.",
+        "No bugs found in the parser.",
+        "No bugs, security issues, or regressions introduced by the round 4 delta",
+    ],
+)
+def test_sentence_that_could_carry_a_finding_is_not_clean(prose):
+    text = _claude_approve_with("Checked.", issues=prose)
+    with pytest.raises(review_phase.ParseError, match="ISSUES"):
+        review_phase.parse_claude_fresh(text)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "failure"
+    assert "ISSUES" in result["reason"]
+
+
+def test_bulleted_clean_sentence_is_a_finding_not_a_clean_marker():
+    sentence = "No bugs, security issues, or regressions introduced by the round 4 delta."
+    text = _claude_approve_with("Checked.", issues=f"- {sentence}")
+    _, findings = review_phase.parse_claude_fresh(text)
+    assert [f["description"] for f in findings] == [sentence]
+
+
 # --- (c) end to end through run_phase ----------------------------------------
 
 
