@@ -352,11 +352,63 @@ _NONE_BULLET = re.compile(
     re.IGNORECASE,
 )
 _CLEAN_SENTINEL = re.compile(r"^\W*No bugs or security issues found\.?\W*$", re.IGNORECASE)
+# A clean sentence: a closed grammar, never a free-text tail. It opens on
+# `No bugs` or `No issues`, may list more finding nouns from a fixed vocabulary
+# (`No bugs, security issues, or regressions`), may add one participle and one
+# `in|by|from the|this [round N] delta|change|...` phrase, and ends in a period.
+# Anything else (`No bugs, but the retry is wrong.`, `No bugs found, but see
+# below`, `None of the bugs were fixed.`) is prose: a word outside the grammar
+# could carry a finding, so it never reads as clean. Only a non-bullet line
+# can be one (see `_is_clean_marker`), and it never stands in for a missing
+# verdict: `_CLEAN_SENTINEL` alone does that.
+_CLEAN_NOUN = (
+    r"(?:security\s+issues|correctness\s+issues|blocking\s+issues|bugs|issues"
+    r"|regressions|problems|findings|requirement\s+gaps)"
+)
+_CLEAN_SENTENCE = re.compile(
+    rf"^No\s+(?:bugs|issues)(?:,\s+{_CLEAN_NOUN})*(?:,?\s+(?:or|and|nor)\s+{_CLEAN_NOUN})?"
+    r"(?:\s+(?:found|introduced|detected|identified|observed|remain))?"
+    r"(?:\s+(?:in|by|from)\s+(?:the|this)\s+(?:round\s+\d+\s+)?"
+    r"(?:delta|change|changes|diff|patch|pr|commit|update))?"
+    r"\.$",
+    re.IGNORECASE,
+)
 
 
-def _is_clean_marker(text: str) -> bool:
+def _is_clean_marker(text: str, *, prose: bool = False) -> bool:
+    """True when `text` is a clean marker.
+
+    `prose` is true only for a non-bullet line; only such a line may be a
+    clean sentence (`_CLEAN_SENTENCE`). A bullet's text never is.
+    """
     stripped = text.strip()
-    return bool(_NONE_BULLET.match(stripped) or _CLEAN_SENTINEL.match(stripped))
+    if _NONE_BULLET.match(stripped) or _CLEAN_SENTINEL.match(stripped):
+        return True
+    return prose and bool(_CLEAN_SENTENCE.match(stripped))
+
+
+# The `Resolved carried:` line a round-2+ review brief asks for: `none`, or
+# comma-separated carried ids `<path>:<line>@<16 hex>`, optionally in one pair
+# of backticks. It names fixed carried findings and carries no finding of its
+# own, so `_bullets` skips it in any section. Any other text after the label
+# is not this line and parses as before (foreign prose).
+_RESOLVED_CARRIED_FORM = re.compile(r"Resolved carried: (\S.*)")
+_RESOLVED_CARRIED_ID = re.compile(r"\S+:[1-9][0-9]*@[0-9a-f]{16}")
+
+
+def _is_resolved_carried(line: str) -> bool:
+    stripped = line.strip()
+    if len(stripped) > 1 and stripped.startswith("`") and stripped.endswith("`"):
+        stripped = stripped[1:-1].strip()
+    form = _RESOLVED_CARRIED_FORM.fullmatch(stripped)
+    if form is None:
+        return False
+    value = form.group(1).strip()
+    if value == "none":
+        return True
+    return all(
+        _RESOLVED_CARRIED_ID.fullmatch(token.strip()) is not None for token in value.split(",")
+    )
 
 _PLACEHOLDER_BULLET = re.compile(r"^<[^>]*>$")
 _TAG = re.compile(r"^\[(BUG|SECURITY)\]\s*", re.IGNORECASE)
@@ -398,7 +450,8 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
     line but none of it survived as a real finding and the section was not an
     explicit clean sentinel (`- none` or `No bugs or security issues found.`).
     The caller should treat that as a parse failure, never a silent zero and
-    never a silently dropped paragraph.
+    never a silently dropped paragraph. A well-formed `Resolved carried:` line
+    is skipped as if blank: it is neither content nor prose.
     """
     bullets: list[str] = []
     had_content = False
@@ -409,6 +462,9 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
         line = lines[i]
         if _HEADING.match(line):
             break
+        if _is_resolved_carried(line):
+            i += 1
+            continue
         if line.strip():
             had_content = True
         matched = _BULLET.match(line)
@@ -420,7 +476,7 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
             # Any other non-bullet line, before or after a bullet, is prose: a
             # clean marker, or foreign prose that refuses the section (`- none`
             # then a paragraph, or a finding then a paragraph).
-            if _is_clean_marker(line):
+            if _is_clean_marker(line, prose=True):
                 saw_clean = True
             else:
                 saw_foreign_prose = True
