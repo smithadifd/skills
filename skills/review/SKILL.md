@@ -26,7 +26,8 @@ finding across several bullets.
   `- [BUG] skills/example/tool.py:41 — the retry loop drops the last item on
   a short read. Add a length check before the final iteration. [reach:
   <lane|concurrent|user|owner> (<one-clause reason>); breaks:
-  <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]`
+  <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>; fix:
+  <local|structural>; weight: <h|m|l>/<h|m|l>/<h|m|l>]`
   (`lane` is anything the change's author wrote or controls: its branch and
   branch name, every file it commits, the builder's report, the PR body, and
   the temp roots its sandbox allows; `concurrent` is another session, thread or

@@ -1,0 +1,1 @@
+[reach: <word> (<reason>); breaks: <word>; evidence: <word>; fix: <local|structural>; weight: <h|m|l>/<h|m|l>/<h|m|l>; if-minor]

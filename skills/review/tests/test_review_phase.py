@@ -51,6 +51,47 @@ RUBRIC_TAG_GROUP = (
     "[reach: <lane|concurrent|user|owner> (<one-clause reason>); "
     "breaks: <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]"
 )
+# The same group with the two optional clauses, in the order the caller's
+# tooling parses them: `fix` then `weight`, both after `evidence`.
+RUBRIC_TAG_GROUP_FIVE = (
+    "[reach: <lane|concurrent|user|owner> (<one-clause reason>); "
+    "breaks: <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>; "
+    "fix: <local|structural>; weight: <h|m|l>/<h|m|l>/<h|m|l>]"
+)
+# The tag-group shape line the reviewer agent states. A caller that pins this
+# repository compares its own copy of the line with the fixture file.
+REVIEWER_TAG_SHAPE = (
+    "[reach: <word> (<reason>); breaks: <word>; evidence: <word>; "
+    "fix: <local|structural>; weight: <h|m|l>/<h|m|l>/<h|m|l>; if-minor]"
+)
+REVIEWER_TAG_SHAPE_FIXTURE = FIXTURES / "reviewer-tag-shape.txt"
+# The delta-review sentences for blind rounds: a round-2+ reviewer is not
+# shown earlier findings and does not settle them.
+BLIND_DELTA_SENTENCES = (
+    "Review the change since the last reviewed commit as a first reading.",
+    "Do not look for, restate or settle earlier rounds' findings: you are not "
+    "shown them, and the tooling that reads your verdict reconciles your findings "
+    "against the earlier receipts by file and line.",
+    "Report every finding the delta causes that you can reproduce at the head, run "
+    "the regression check on whatever the delta changed, and tag a finding in code "
+    "the delta did not touch as a NIT unless it is a regression the delta causes.",
+    "A probed data-loss, fail-open or bypass finding is a BUG wherever it sits; do "
+    "not soften it because the code is outside the delta.",
+)
+# When to write `fix:` and `weight:`, and which evidence an Issues bullet
+# needs, in the caller tooling's own words.
+TAG_CLAUSE_RULES = (
+    "End a block-cell bullet's group with fix: local when the fix is a missed "
+    "branch or line under the row's stated rule, or fix: structural when it "
+    "changes the extraction or decision rule (parse instead of match, a different "
+    "input, a different invariant).",
+    "A nit or harden bullet may carry weight: <importance>/<effort>/<risk>, each "
+    "h, m or l; a nit with importance or risk m or h becomes a follow-up ticket, "
+    "the rest are recorded and dropped.",
+    "Raise an Issues bullet only with evidence: probed or evidence: quoted; a "
+    "requirement gap or a breaks: docs finding goes under Minor notes; leave out "
+    "anything else you did not run.",
+)
 
 ENVELOPE_KEYS = ("repo/ref", "inputs", "constraints", "harness_root", "adapters", "budget")
 
@@ -286,24 +327,24 @@ def test_reviewer_agent_issues_shape_carries_the_group():
     text = REVIEWER_AGENT.read_text()
     assert (
         "- `path/to/file.js:42` — [specific issue and why it matters] "
-        + RUBRIC_TAG_GROUP
+        + RUBRIC_TAG_GROUP_FIVE
+    ) in text
+    assert (
+        "- `path/to/other.js:17` — [specific issue] " + RUBRIC_TAG_GROUP
     ) in text
     required_rules = (
-        "A finding the brief lists as hardened stays hardened.",
-        "A residual that bypasses a guard remains `breaks: gate`, which is block at every reach.",
-        "Every Issue ends with exactly one tag group in the fixed order `reach`, `breaks`, `evidence`.",
+        "A finding that bypasses a guard is `breaks: gate`, which is block at every reach.",
+        "Every Issue ends with exactly one tag group, its clauses in this fixed order: `" + REVIEWER_TAG_SHAPE + "`.",
+        "`fix`, `weight` and `if-minor` are optional: leave out each one that does not apply, and keep the others in this order.",
         "The parenthesized reach reason is one clause, never one word.",
-        "For each earlier finding, state **fixed**, or re-tag its standing residual with its truthful three tags and report it again under **Issues**; the tooling that reads your verdict assigns its cell (block, harden or nit) from those tags, so a harden residual carries its Hardening obligation into the merge.",
-        'Only a finding the brief lists as hardened stays on the "Earlier findings" line of **Evidence** and is not reported again, unless the delta made it worse; then report it under **Issues** with its new tags and say how.',
-        "Never treat an earlier finding about data loss, a check that fails open, or a bypassed guard as fixed unless the delta shows the fix holds. While the residual stands, re-tag it at its real `breaks` (`data` for data loss, or `gate` for a fails-open check or bypassed guard) and report it under **Issues**. The tooling that reads your verdict decides the cell, including at owner reach.",
+        "Tag it at its real `breaks` (`data` for data loss, or `gate` for a fails-open check or bypassed guard); the tooling that reads your verdict decides the cell, including at owner reach.",
         "| reach \\ breaks | gate | data | avail | docs | evidence |",
         "| lane, concurrent, user | block | block | harden | nit | harden |",
         "| owner | block | harden | harden | nit | harden |",
         "The tooling that reads your verdict, not the reviewer, applies three adjustments to the base table: `guard-file` (a `breaks: evidence` finding in a file the caller treats as a guard becomes block), `unprobed` (a block finding that rests on `evidence: read` becomes harden) and `unlocated` (a harden finding that names no usable file and line becomes block); the reviewer cannot see that tooling's guard set or adapter result.",
-        "Earlier findings (round 2+): [each one — fixed, reported again under **Issues** with its three tags, or still hardened only when the brief lists it as hardened; include the line]",
         "A finding must be caused by the change, not merely located in code the change touched.",
         "Do not tag a BUG: an already-privileged actor (a human with the account or repo write, or an unsandboxed same-user process) with no gate effect; an ordering gap with no bypass; behaviour the base already had.",
-        "A finding with `evidence: read` is reported under **Issues** with that tag; the tooling that reads your verdict hardens it as `unprobed`. Only `evidence: probed` (a reproducing command) or `evidence: quoted` (a quoted file fact such as a pattern list or a config line) can block under that tooling's rule.",
+        "`evidence: probed` is a reproducing command; `evidence: quoted` is a quoted file fact such as a pattern list or a config line.",
         "Mark a harden finding if-minor only when its fix is about one line; never a one-word reason.",
         "reach: lane covers anything the change's author wrote or controls: its branch and branch name, every file it commits, the builder's report, the PR body, and the temp roots its sandbox allows. Code execution on the operator's machine is breaks: gate at any reach.",
         "reach: concurrent covers another session, thread or process following the protocol at the same time; reach: user covers an operator flow or input; reach: owner covers only a human with the account or repo write, or an unsandboxed same-user process.",
@@ -314,6 +355,41 @@ def test_reviewer_agent_issues_shape_carries_the_group():
     assert "is listed as hardened on the" not in text
     assert "Never downgrade or drop an earlier finding" not in text
     assert "fixed / partly fixed / not fixed" not in text
+    assert "is reported under **Issues** with that tag" not in text
+
+
+def _delta_review_section(text: str) -> str:
+    section = re.search(
+        r"^## Delta review \(round 2 and later\)\n(.*?)^## ",
+        text,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert section, "agents/reviewer.md has no Delta review section"
+    return section.group(1)
+
+
+def test_reviewer_contract_is_blind_on_delta_rounds():
+    text = REVIEWER_AGENT.read_text()
+    section = _delta_review_section(text)
+    for sentence in BLIND_DELTA_SENTENCES:
+        assert sentence in section, f"Delta review lacks: {sentence}"
+    # The base-cell table and the three-adjustment paragraph stay in the section.
+    assert "| reach \\ breaks | gate | data | avail | docs | evidence |" in section
+    assert "applies three adjustments to the base table" in section
+    # Nothing asks the reviewer to settle, restate or mark earlier findings.
+    unmarked = re.sub(r"[*_`]", "", text).lower()
+    assert "state fixed" not in unmarked
+    assert "earlier findings (round 2+)" not in unmarked
+    assert "for each earlier finding" not in unmarked
+    assert "earlier findings" not in unmarked.replace("earlier rounds' findings", "")
+
+
+def test_bullet_shape_names_fix_and_weight():
+    assert REVIEWER_TAG_SHAPE_FIXTURE.read_text() == REVIEWER_TAG_SHAPE + "\n"
+    text = REVIEWER_AGENT.read_text()
+    assert f"`{REVIEWER_TAG_SHAPE}`" in text
+    for rule in TAG_CLAUSE_RULES:
+        assert f"- {rule}" in text, f"reviewer rules lack: {rule}"
 
 
 def test_review_skill_bug_shape_carries_the_group():
@@ -321,7 +397,40 @@ def test_review_skill_bug_shape_carries_the_group():
     match = re.search(r"e\.g\.\s*`- (\[BUG\][^`]*)`", skill_md, re.DOTALL)
     assert match, "SKILL.md's Output format section no longer carries a worked example"
     example = re.sub(r"\s+", " ", match.group(1)).strip()
-    assert example.endswith(RUBRIC_TAG_GROUP)
+    assert example.endswith(RUBRIC_TAG_GROUP_FIVE)
+
+
+def test_adapter_stays_tag_blind_with_five_clauses():
+    group = (
+        "[reach: lane (the builder names the branch it pushes); breaks: gate; "
+        "evidence: probed; fix: structural; weight: h/m/l]"
+    )
+    description = "the guard matches the branch name instead of parsing it"
+    text = (
+        "## Verdict: REQUEST CHANGES\n\n"
+        "### Issues\n"
+        f"- `scripts/guard.py:41` — {description} {group}\n\n"
+        "### Evidence\n"
+        "- Ran: pytest -q — 3 passed\n\n"
+        "INTERVAL: none\n"
+    )
+    verdict, findings = review_phase.parse_claude_fresh(text)
+    assert verdict == "changes_requested"
+    assert findings == [
+        {
+            "file": "scripts/guard.py",
+            "line": 41,
+            "rule": "issue",
+            "description": f"{description} {group}",
+            "severity": "error",
+        }
+    ]
+    assert findings[0]["description"].endswith(group)
+    result = review_phase.run_phase(_envelope("claude-fresh", text))
+    assert result["status"] == "success", result["reason"]
+    recorded = result["artifacts"]["findings.json"]["findings"]
+    assert len(recorded) == 1
+    assert recorded[0]["description"].endswith(group)
 
 
 def test_adapter_leaves_the_tag_group_in_the_description():
