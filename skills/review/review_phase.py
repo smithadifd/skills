@@ -387,7 +387,9 @@ def _is_clean_marker(text: str, *, prose: bool = False) -> bool:
     return prose and bool(_CLEAN_SENTENCE.match(stripped))
 
 
-# The `Resolved carried:` line a round-2+ review brief asks for: `none`, or
+# The `Resolved carried:` line that older round-2+ review briefs asked for.
+# The blind round-2+ contract no longer asks for it; the parser is kept so
+# legacy outputs still parse. Its form is `none`, or
 # comma-separated carried ids `<path>:<line>@<16 hex>`, optionally in one pair
 # of backticks. It names fixed carried findings and carries no finding of its
 # own, so `_bullets` skips it in any section. Any other text after the label
