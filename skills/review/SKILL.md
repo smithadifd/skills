@@ -26,13 +26,18 @@ finding across several bullets.
   `- [BUG] skills/example/tool.py:41 — the retry loop drops the last item on
   a short read. Add a length check before the final iteration. [reach:
   <lane|concurrent|user|owner> (<one-clause reason>); breaks:
-  <gate|data|avail|docs|evidence>; evidence: <probed|quoted|read>]`
+  <gate|data|avail|docs|evidence>; evidence: <probed|quoted>; fix:
+  <local|structural>; weight: <h|m|l>/<h|m|l>/<h|m|l>]`
   (`lane` is anything the change's author wrote or controls: its branch and
   branch name, every file it commits, the builder's report, the PR body, and
   the temp roots its sandbox allows; `concurrent` is another session, thread or
   process following the same protocol at the same time; `user` is an operator
   flow or input; `owner` is only a human with account or repo write, or an
-  unsandboxed same-user process.)
+  unsandboxed same-user process.) `fix` and `weight` are both optional:
+  `fix` goes on a blocking finding and says whether the fix is a missed
+  branch or line (`local`) or a change to the decision rule (`structural`);
+  `weight` is importance/effort/risk, may go on any finding after `fix`, and
+  decides whether a minor finding becomes a ticket.
 - If nothing found: "No bugs or security issues found."
 - End the review with an `INTERVAL:` line, the last line of the reply:
   `INTERVAL: none`, or one measured record per interval the verdict relies on
