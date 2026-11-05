@@ -12,6 +12,13 @@ fail() {
 
 skill_paths=(skills/*)
 ((${#skill_paths[@]} > 0)) || fail 'no skills were discovered'
+# `skills/_lib` is shared code, not a skill: it has no SKILL.md and installs
+# beside every skill. Everything below that counts skills leaves it out.
+real_skill_paths=()
+for skill_path in "${skill_paths[@]}"; do
+  [ "${skill_path##*/}" = "_lib" ] || real_skill_paths+=("$skill_path")
+done
+((${#real_skill_paths[@]} > 0)) || fail 'no skills were discovered'
 
 agent_paths=()
 for agent_path in agents/*.md; do
@@ -29,20 +36,23 @@ check_install_all() {
     skill_name=${skill_path##*/}
     [ -d "$home/.claude/skills/$skill_name" ] || fail "install-all did not install discovered skill: $skill_name"
   done
+  [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || fail 'install-all did not install the shared _lib beside the skills'
   printf 'PASS: install-all installed every discovered skill\n'
 }
 
 check_install_one() {
   local home selected skill_path
-  selected=${skill_paths[0]##*/}
+  selected=${real_skill_paths[0]##*/}
   home=$(mktemp -d)
   HOME="$home" ./install.sh "$selected"
 
   shopt -s nullglob dotglob
+  # The selected skill and the shared `_lib` beside it, and nothing else.
   local installed=("$home/.claude/skills"/*)
-  ((${#installed[@]} == 1)) || fail "install-one installed ${#installed[@]} entries instead of exactly one: $selected"
-  [ "${installed[0]##*/}" = "$selected" ] || fail "install-one installed ${installed[0]##*/} instead of: $selected"
-  for skill_path in "${skill_paths[@]}"; do
+  ((${#installed[@]} == 2)) || fail "install-one installed ${#installed[@]} entries instead of the skill and _lib: $selected"
+  [ -d "$home/.claude/skills/$selected" ] || fail "install-one did not install: $selected"
+  [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || fail "install-one did not install the shared _lib beside: $selected"
+  for skill_path in "${real_skill_paths[@]}"; do
     [ -d "$skill_path" ] || continue
     if [ "${skill_path##*/}" != "$selected" ] && [ -e "$home/.claude/skills/${skill_path##*/}" ]; then
       fail "install-one also installed unrequested skill: ${skill_path##*/}"

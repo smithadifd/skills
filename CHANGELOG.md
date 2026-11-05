@@ -1,0 +1,36 @@
+# Changelog
+
+Release notes for the `sdlc` plugin, newest first.
+
+## 0.11.0
+
+Three skills now keep what they produce in your ledger, and the plugin tells each new session where the work stands. All of it is off until you set one key. With the key unset, every skill and the plugin behave exactly as they did in 0.10.0, and the new session-start hook prints nothing.
+
+### The switch
+
+The key is `ledger_cli` in the `topic` skill's config: put it in `~/.claude/skill-config/topic.json` (it overrides the shipped `skills/topic/config.json`). Set it to the path or name of your ledger command. Unset, null or empty means off. There is no second setting.
+
+### What changes when it is on
+
+- **sharpen** links the brief it wrote to the open topic item. When you ratify the brief, it records your words and an election that quotes them, instead of a plain note. If you ratify with a bare click and no words, it records nothing, because there are no words to quote.
+- **shape** now always saves its ranked brief as `shape-<slug>-<date>.md` in the same folder sharpen writes to, so it outlives the session. With the ledger on, it also links the file to the open topic item.
+- **topic** ends its close with the ledger's own resume summary (`resume --item <id>`) as the last line.
+- **Session start.** A new hook runs the ledger's `resume --brief` and prints what it returns, so the session opens with the current state. If the ledger command is missing, is older than v0.1.1 (no `resume`), or fails, the hook prints nothing and never blocks a session. It also adds `LEDGER_SESSION` (the session id) and, unless you already set it, `LEDGER_AGENT=claude-code` to the session's own environment file. It writes no other file and never touches your settings.
+
+The `resume` verb, used by the session-start hook and the topic close, needs ledger v0.1.1 or later.
+
+### Also in this release
+
+- A small shared folder, `skills/_lib`, now holds the code that finds the ledger command. It is not a skill. `install.sh` installs it beside the skills.
+- `topic` reads the same `ledger_cli` key as before; only where the reading lives has changed.
+
+### Upgrading
+
+From the marketplace:
+
+```sh
+claude plugin marketplace update skills
+claude plugin update sdlc@skills
+```
+
+Then start a new session (or run `/reload-plugins` in an open one) to load the new version. If you installed with `install.sh` instead, pull the repository and run `./install.sh --all` again; the session-start hook is part of the plugin only.

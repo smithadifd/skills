@@ -1,7 +1,7 @@
 ---
 name: shape
 kind: portable
-version: 1.1.0
+version: 1.2.0
 description: >
   Adversarially pressure-test a proposed direction BEFORE any code is written: parallel
   read-only sub-agents over one approach — unknowns, edge cases, alternatives + tradeoffs,
@@ -25,11 +25,12 @@ job is to surface what the proposer, mid-commitment, cannot see. The deliverable
 is a single ranked brief of the things worth resolving *before* the first line
 of code, not a code change.
 
-**This skill mutates nothing.** No commits, no branches, no files in the user's
-repos, no PRs. Sub-agents are read-only. The one and only artifact is the
-synthesized brief you hand back to the user (printed inline; optionally saved to
-a scratch path if the user asks). Say so if the user seems to expect a build —
-`/shape` ends *before* implementation begins.
+**This skill changes no code and no repo.** No commits, no branches, no PRs.
+Sub-agents are read-only. The one and only artifact is the synthesized brief:
+you print it inline and always save it as one file, `shape-<slug>-<YYYY-MM-DD>.md`,
+in the roadmaps directory sharpen resolves (§ Saving the brief), so it outlives the
+session. Say so if the user seems to expect a build — `/shape` ends *before*
+implementation begins.
 
 ## When it fits (and when it doesn't)
 
@@ -161,10 +162,29 @@ Keep the brief tight. A red-team that returns 40 undifferentiated worries has
 failed at its actual job, which is *prioritization*: telling the user the three
 things that matter before the thirty that don't.
 
+## Saving the brief (always)
+
+After printing the brief, save it. Pipe the whole brief to
+`python3 ${CLAUDE_SKILL_DIR}/save_brief.py --slug <slug>` (a lowercase,
+hyphenated name for the proposal). It writes `shape-<slug>-<YYYY-MM-DD>.md` into
+the roadmaps directory from sharpen's `paths.py` (the same resolution, reused),
+prints the file's absolute path, and refuses to overwrite an earlier brief: pick a
+different slug then. Tell the person the path. If sharpen is not installed beside
+this skill the script says so and saves nothing; the printed brief stands.
+
+When the ledger is on, link the brief to the open item. Run
+`python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`; if it prints
+`{"ledger_cli": null}`, pass no item and stop there. If it names a CLI, add
+`--item <item>` to the same command: the topic item `topic-<slug>` the session is
+on, or ask once which item. The script then runs
+`<ledger_cli> link <item> --rel url --target <the saved path>`. A failing CLI
+leaves the file in place and exits 1 with one line; report it.
+
 ## Safety rails
 
 - **Read-only, always.** No agent commits, branches, opens a PR, edits a file in
-  the user's repos, or runs anything with side effects. If a lens needs to
+  the user's repos, or runs anything with side effects. The main loop's one write
+  is the saved brief. If a lens needs to
   *prove* something empirically, it may run throwaway experiments in a scratch
   dir only — never against the real system, never mutating state.
 - **Frame a real proposal, not a strawman.** If the input is too vague to

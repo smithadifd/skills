@@ -76,12 +76,12 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 | `pr` | Prepares a pull request for the current branch using the project's conventions. | Needs the GitHub CLI (`gh`) |
 | `retro` | Reads a session and proposes changes to its environment, such as hooks, checks and instruction files. Edits to skills or rules are shown as diffs and only applied after you approve them. | Yes (Python 3) |
 | `review` | Checks code changes for bugs and security problems. | Yes; Python 3 for the optional structured output |
-| `shape` | Tests a proposed design for risks and missing considerations before implementation. | Yes |
-| `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. | Yes (Python 3); `config.json` can point it at your own routing documents |
+| `shape` | Tests a proposed design for risks and missing considerations before implementation, and saves the ranked brief as a dated file. | Yes (Python 3 to save the brief; it finds the folder through `sharpen`) |
+| `sharpen` | Asks focused questions to clarify requirements and records the answers in a brief. | Yes (Python 3); `config.json` can point it at your own routing documents; with a ledger CLI configured, it links the brief to the open topic and records your ratification as an election |
 | `tdd` | Applies a test-first loop when you change behavior yourself: a failing test, the smallest passing change, then a refactor, with the red-then-green evidence handed to the reviewer. | Yes |
 | `teach` | Explains how a codebase works with a system overview, component tour, and traced example. | Yes; the optional HTML output uses a separate `artifact-design` skill |
 | `ticket` | Takes one ticket from intake through a plan, review rounds and an approved outward step to close, stopping for your approval before building and before anything leaves the machine, and keeps a resume card in the repository's ignored scratch. | Needs Python 3 and the `researcher`, `builder-core` and `reviewer` agents; works with a local JSON ticket, and live tickets come through your tracker's connector; with `TICKET_LEDGER_CLI` set, the resume card is kept as the events of one item in an external ledger CLI that meets the contract in its `SKILL.md` |
-| `topic` | Keeps the notes for an ongoing, focused discussion in one file. | Yes (Python 3); `config.json` can set the notes directory or route topics to an external ledger CLI, where each thread is one ledger item and no note file is written |
+| `topic` | Keeps the notes for an ongoing, focused discussion in one file. | Yes (Python 3); `config.json` can set the notes directory or route topics to an external ledger CLI, where each thread is one ledger item and no note file is written; its close then ends with the ledger's resume summary |
 
 ## Agents
 
@@ -107,7 +107,9 @@ claude plugin install sdlc@skills
 
 A plugin install prefixes every command with the plugin's name, so a command written here as `/review` is invoked with that prefix. Update with `claude plugin update sdlc`.
 
-The alternative is `install.sh`, which copies skills into `~/.claude/skills/` and agents into `~/.claude/agents/` with no marketplace involved. Use one route, not both.
+The alternative is `install.sh`, which copies skills into `~/.claude/skills/` and agents into `~/.claude/agents/` with no marketplace involved. Use one route, not both. It also installs `_lib` beside the skills: a small shared folder (it is not a skill) that finds the optional ledger CLI.
+
+**The ledger setting and the session-start hook.** One key, `ledger_cli` in the `topic` skill's config (`~/.claude/skill-config/topic.json` over the shipped file), switches the ledger on for `topic`, `sharpen` and `shape`. Unset, they behave as they always did. The plugin also carries a `SessionStart` hook (`hooks/hooks.json`): with the key unset it prints nothing; with it set it prints the ledger's `resume --brief` and tags the session, and a CLI that fails or lacks `resume` is silent. The release notes for each version are in [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
 ./install.sh pr                  # one skill        (--all for every skill)

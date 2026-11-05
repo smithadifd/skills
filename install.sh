@@ -31,9 +31,8 @@ require_skill() {
   exit 1
 }
 
-install_one() {
+copy_skill_dir() {
   skill_name=$1
-  require_skill "$skill_name"
   mkdir -p -- "$install_dir"
   if [ -e "$install_dir/$skill_name" ]; then
     rm -r -- "$install_dir/$skill_name"
@@ -42,6 +41,17 @@ install_one() {
   cp -R -- "$skills_dir/$skill_name/." "$install_dir/$skill_name/"
   find "$install_dir/$skill_name" \( -name __pycache__ -o -name .pytest_cache \) -type d -prune -exec rm -r {} +
   find "$install_dir/$skill_name" -name '*.pyc' -type f -exec rm -f {} +
+}
+
+install_one() {
+  skill_name=$1
+  require_skill "$skill_name"
+  copy_skill_dir "$skill_name"
+  # `_lib` is not a skill: it holds the helper the skills share (the ledger CLI
+  # setting). A skill reaches it as ../_lib, so it is installed beside every skill.
+  if [ "$skill_name" != "_lib" ] && [ -d "$skills_dir/_lib" ]; then
+    copy_skill_dir _lib
+  fi
   printf 'Installed %s\n' "$skill_name"
 }
 
