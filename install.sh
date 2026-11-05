@@ -32,7 +32,8 @@ require_skill() {
 }
 
 copy_skill_dir() {
-  skill_name=$1
+  # Local: the caller's skill_name must survive the nested `_lib` copy.
+  local skill_name=$1
   mkdir -p -- "$install_dir"
   if [ -e "$install_dir/$skill_name" ]; then
     rm -r -- "$install_dir/$skill_name"

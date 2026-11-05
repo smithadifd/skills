@@ -93,6 +93,17 @@ def test_a_cli_without_resume_is_one_stderr_line_and_no_stdout(rig):
     assert "resume" in proc.stderr
 
 
+@pytest.mark.parametrize("value", [["fakeledger"], 7, True, {"a": 1}])
+def test_a_non_string_key_is_one_stderr_line_exit_one_and_no_stdout(rig, value):
+    rig.configure(value)
+    proc = rig.run()
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert len(proc.stderr.splitlines()) == 1
+    assert "ledger_cli" in proc.stderr
+    assert rig.calls() == []
+
+
 def test_a_missing_binary_is_one_stderr_line(rig):
     rig.configure(str(rig.bin / "no-such-ledger"))
     proc = rig.run()
