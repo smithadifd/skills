@@ -38,8 +38,8 @@ print("ok")
 
 class Rig:
     def __init__(self, tmp_path):
-        self.home = tmp_path / "home"
-        self.home.mkdir()
+        self.fake_home = tmp_path / "home"
+        self.fake_home.mkdir()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.log = tmp_path / "calls.log"
@@ -50,7 +50,7 @@ class Rig:
         self.hook = HOOK
 
     def configure(self, value="fakeledger"):
-        path = self.home / ".claude" / "skill-config"
+        path = self.fake_home / ".claude" / "skill-config"
         path.mkdir(parents=True, exist_ok=True)
         (path / "topic.json").write_text(json.dumps({"ledger_cli": value}), encoding="utf-8")
 
@@ -60,7 +60,7 @@ class Rig:
             for k, v in os.environ.items()
             if not k.startswith("LEDGER_") and k != "CLAUDE_ENV_FILE"
         }
-        env["HOME"] = str(self.home)
+        env["HOME"] = str(self.fake_home)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_LEDGER_LOG"] = str(self.log)
         env["FAKE_LEDGER_MODE"] = mode
@@ -139,11 +139,11 @@ def test_a_missing_binary_prints_nothing_and_exits_zero(rig):
 
 def test_the_session_id_is_written_to_the_env_file_only_when_one_is_set(rig):
     rig.configure()
-    before = sorted(str(q) for q in rig.home.rglob("*"))
+    before = sorted(str(q) for q in rig.fake_home.rglob("*"))
     proc = rig.run(env_file=False)
     assert proc.returncode == 0
     assert not rig.env_file.exists()
-    assert sorted(str(q) for q in rig.home.rglob("*")) == before, "no file may be written without CLAUDE_ENV_FILE"
+    assert sorted(str(q) for q in rig.fake_home.rglob("*")) == before, "no file may be written without CLAUDE_ENV_FILE"
     proc = rig.run(env_file=True)
     assert proc.returncode == 0
     lines = rig.env_file.read_text(encoding="utf-8").splitlines()
@@ -222,12 +222,12 @@ def test_it_writes_no_file_but_the_env_file(rig, tmp_path):
     def tree(root):
         return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
 
-    before_plugin, before_home = tree(plugin), tree(rig.home)
+    before_plugin, before_home = tree(plugin), tree(rig.fake_home)
     proc = rig.run()
     assert proc.returncode == 0
     assert proc.stdout == "BRIEF: 2 open items\nnext: LC15\n"
     assert tree(plugin) == before_plugin
-    assert tree(rig.home) == before_home
+    assert tree(rig.fake_home) == before_home
     assert rig.env_file.exists()
 
 

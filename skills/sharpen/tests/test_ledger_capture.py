@@ -34,8 +34,8 @@ QUOTE = "Ratified as written"
 class Rig:
     def __init__(self, tmp_path):
         self.tmp = tmp_path
-        self.home = tmp_path / "home"
-        self.home.mkdir()
+        self.fake_home = tmp_path / "home"
+        self.fake_home.mkdir()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.log = tmp_path / "calls.log"
@@ -47,13 +47,13 @@ class Rig:
         self.brief.write_text("# Sharpening brief — demo\n", encoding="utf-8")
 
     def configure(self, value="fakeledger"):
-        path = self.home / ".claude" / "skill-config"
+        path = self.fake_home / ".claude" / "skill-config"
         path.mkdir(parents=True, exist_ok=True)
         (path / "topic.json").write_text(json.dumps({"ledger_cli": value}), encoding="utf-8")
 
     def run(self, *args, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
-        env["HOME"] = str(self.home)
+        env["HOME"] = str(self.fake_home)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_LEDGER_LOG"] = str(self.log)
         env.update(extra_env or {})
@@ -105,7 +105,7 @@ def test_a_relative_brief_path_is_made_absolute(rig):
         cwd=rig.brief.parent,
         env={
             **{k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")},
-            "HOME": str(rig.home),
+            "HOME": str(rig.fake_home),
             "PATH": f"{rig.bin}{os.pathsep}{os.environ.get('PATH', '')}",
             "FAKE_LEDGER_LOG": str(rig.log),
         },

@@ -28,8 +28,8 @@ sys.stdout.write("topic-demo: 1 open, next step LC15\\n  (second line)\\n")
 
 class Rig:
     def __init__(self, tmp_path):
-        self.home = tmp_path / "home"
-        self.home.mkdir()
+        self.fake_home = tmp_path / "home"
+        self.fake_home.mkdir()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.log = tmp_path / "calls.log"
@@ -38,13 +38,13 @@ class Rig:
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 
     def configure(self, value="fakeledger"):
-        config = self.home / ".claude" / "skill-config"
+        config = self.fake_home / ".claude" / "skill-config"
         config.mkdir(parents=True, exist_ok=True)
         (config / "topic.json").write_text(json.dumps({"ledger_cli": value}), encoding="utf-8")
 
     def run(self, mode="ok"):
         env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
-        env["HOME"] = str(self.home)
+        env["HOME"] = str(self.fake_home)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_LEDGER_LOG"] = str(self.log)
         env["FAKE_LEDGER_MODE"] = mode

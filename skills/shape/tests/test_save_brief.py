@@ -29,8 +29,8 @@ BRIEF = "# Shape brief\n\nVerdict: Proceed with changes.\n"
 
 class Rig:
     def __init__(self, tmp_path):
-        self.home = tmp_path / "home"
-        self.home.mkdir()
+        self.fake_home = tmp_path / "home"
+        self.fake_home.mkdir()
         self.roadmaps = tmp_path / "roadmaps"
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
@@ -38,7 +38,7 @@ class Rig:
         fake = self.bin / "fakeledger"
         fake.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-        config = self.home / ".claude" / "skill-config"
+        config = self.fake_home / ".claude" / "skill-config"
         config.mkdir(parents=True)
         (config / "sharpen.json").write_text(
             json.dumps({"notes_root": {"roadmaps": str(self.roadmaps)}}), encoding="utf-8"
@@ -46,12 +46,12 @@ class Rig:
         self.script = SAVE
 
     def configure(self, value="fakeledger"):
-        config = self.home / ".claude" / "skill-config"
+        config = self.fake_home / ".claude" / "skill-config"
         (config / "topic.json").write_text(json.dumps({"ledger_cli": value}), encoding="utf-8")
 
     def run(self, *args, stdin=BRIEF, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
-        env["HOME"] = str(self.home)
+        env["HOME"] = str(self.fake_home)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_LEDGER_LOG"] = str(self.log)
         env.update(extra_env or {})
