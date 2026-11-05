@@ -1,7 +1,7 @@
 ---
 name: sharpen
 kind: portable
-version: 2.0.1
+version: 2.1.0
 description: >
   Run a conversational requirements interview — the step between a settled direction and
   a buildable plan. Interviews the user ONE probing question at a time (never a batch,
@@ -310,6 +310,40 @@ the two to make a decision look better sourced than it is. When `process_standar
 defines a citation grammar for briefs, follow it exactly and neither extend nor
 reorder its fields.
 
+## Ledger capture (only when a ledger CLI is configured)
+
+Run `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`. It prints
+`{"ledger_cli": <path or null>}`: the topic skill's `ledger_cli` key. When it is
+`null`, skip this whole section; nothing here applies and sharpen behaves exactly
+as written elsewhere. No other setting switches this on.
+
+When it names a CLI, the brief is also recorded on the open item. That item is the
+topic item `topic-<slug>` the session is working on. If you cannot tell which,
+ask once, in one plain question. If the person names none, skip the ledger steps
+and say so in one line.
+
+1. **After the brief file is written** (§ 2), link it:
+   `python3 ${CLAUDE_SKILL_DIR}/ledger_capture.py link --item <item> --brief <absolute path of the brief>`.
+   That runs `<ledger_cli> link <item> --rel url --target <the path>`.
+2. **When the person ratifies** (§ 3), after the stamp is written, record the
+   ratification as an election, not a note:
+   `python3 ${CLAUDE_SKILL_DIR}/ledger_capture.py ratify --item <item> --brief <path> --words "<the person's ratifying message, as they wrote it>" --quote "<the phrase that ratifies>"`.
+   The script first captures their words as an `utterance.captured` event, then
+   runs `<ledger_cli> elect` with the question `Ratify <brief file name>`, the
+   choice `ratified` against `not-ratified`, the brief's path as the scope, the
+   captured event as the quote reference and your phrase as the quote. The phrase
+   must be a verbatim substring of the words; the script refuses (exit 2) and
+   records nothing when it is not. A bare click with no words of theirs leaves
+   nothing to capture: skip the election and say so; never write words for them.
+3. **A failed call** prints one stderr line and exits 1. Report it. The brief and
+   its stamp stand on their own. If the election failed after the words were
+   captured, the line names the captured event; rerun the same command adding
+   `--quote-ref <that id>` to retry the election alone. Rerunning without it is
+   also safe: the capture carries an idempotency key, so it returns the same event.
+
+These are ledger calls, not files; the one-file rule in the safety rails is
+unchanged.
+
 ## Session mechanics
 
 - **Who runs it:** the user invokes it, or a session that scheduled one opens
@@ -334,7 +368,8 @@ reorder its fields.
   is the exact defect this skill exists to replace.
 - **One file, ever.** The mini-brief under the resolved `roadmaps` directory.
   Never an existing plan or tracker, never the direction record, never a
-  standard, never code, never a wrapper/plist/secret/deploy.
+  standard, never code, never a wrapper/plist/secret/deploy. (The calls under
+  Ledger capture write to the ledger, not to a file.)
 - **Refuse a choice-class topic** (§ the refusal rule) and hand back the
   drafted choice. Over-routing costs the same scarce channel as under-routing.
 - **Unratified means unconfirmed — and unreadable means unratified.** Nothing is
@@ -400,6 +435,8 @@ on an existing plan.
 | `skills/sharpen/SKILL.md` | this playbook |
 | `skills/sharpen/config.json` | directory keys, filename pattern, optional source filenames, commit behavior |
 | `skills/sharpen/paths.py` | executable resolver for the write directory and optional sources |
+| `skills/sharpen/ledger_capture.py` | links the brief and records its ratification in the ledger, when a ledger CLI is configured |
+| `skills/_lib/ledger_cli.py` | resolves the ledger CLI setting shared with topic, shape and the session-start hook |
 | `<roadmaps>/sharpen-<slug>-<date>.md` | the mini-brief — the ONLY file this skill writes |
 | `<standards>/process.md` (`process_standard`) | optional install-specific process and citation rules; local fallback above |
 | `<roadmaps>/direction.md` (`direction_record`) | optional quote-freshness boundary; conservative local fallback above |

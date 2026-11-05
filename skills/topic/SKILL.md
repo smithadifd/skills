@@ -1,7 +1,7 @@
 ---
 name: topic
 kind: portable
-version: 1.3.0
+version: 1.4.0
 description: >
   Open, resume, or close a session note for a one-off, attended piece of work
   that will outlive the sitting. Resolves the thread's note file (project repo
@@ -72,6 +72,7 @@ used:
 | `card <id>` | a readable summary of the item and its notes |
 | `link <id> --rel url --target <path>` | attaches a link to the item |
 | `state <id> --status closed` | closes the item |
+| `resume --item <id>` | the item's resume summary, printed as the last line of a close (ledger v0.1.1 or later) |
 
 - **Open or resume:** `python3 ${CLAUDE_SKILL_DIR}/ledger_item.py --open <slug> --ask <words>`.
   It prints the item id, `created` or `resumed`, and the executable. It creates
@@ -110,6 +111,16 @@ used:
   surface>` or `PARKED <date>: <reason>`. The rules under At close apply
   unchanged. Name the tier with `Close tier: LITE` or `Close tier: FULL`.
   A closed thread gets `<ledger_cli> state <item> --status closed`.
+- **Last line of the close:** run `python3 ${CLAUDE_SKILL_DIR}/resume_line.py <item>`
+  and print its output, exactly as it came back, as the last line of the close
+  (it runs `<ledger_cli> resume --item <item>`; `resume` needs ledger v0.1.1 or
+  later). If it exits nonzero, say its one stderr line and stop: the close itself
+  is already done. With `ledger_cli` unset the script prints nothing, and the
+  close is as it always was.
+- **Where the shared setting is read:** `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`
+  prints `{"ledger_cli": <path or null>}`, the same value `ledger_item.py` uses.
+  The sharpen and shape skills and the plugin's session-start hook read it from
+  there too, so one key in this skill's config switches the ledger on for all of them.
 
 ## File resolution
 

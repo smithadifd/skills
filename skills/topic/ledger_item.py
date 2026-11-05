@@ -5,7 +5,8 @@ The ledger route is switched on by `config.json`'s `ledger_cli` key: the path
 or name of an external ledger CLI that implements the contract in `SKILL.md`. Absent, null or empty means off. The key
 is read the same way `topics_dir` is: an explicit `--config` file alone, or
 else the shipped `config.json` with `~/.claude/skill-config/topic.json` laid
-over it.
+over it. The reading itself lives in `skills/_lib/ledger_cli.py`, shared with
+sharpen, shape and the session-start hook.
 
     python3 ledger_item.py --open <slug> --ask <text> [--config <path>]
 
@@ -48,16 +49,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 HERE = Path(__file__).resolve().parent
-CONFIG_PATH = HERE / "config.json"
-OVERRIDE_PATH = "~/.claude/skill-config/topic.json"
-CONFIG_KEY = "ledger_cli"
 ITEM_TYPE = "topic"
 ITEM_PREFIX = "topic-"
 TIMEOUT_SECONDS = 60
@@ -96,45 +93,34 @@ def _load_topics_dir():
     return module
 
 
-def _read_object(path: Path, required: bool) -> dict[str, Any]:
-    """A JSON object from `path`, or `{}` with one stderr line when unusable."""
+def _load_ledger_cli():
+    """The shared resolver, `skills/_lib/ledger_cli.py`, beside this skill's directory."""
+    path = HERE.parent / "_lib" / "ledger_cli.py"
     try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        if required:
-            sys.stderr.write(f"topic: could not read {path} — {CONFIG_KEY} is unset\n")
-        return {}
-    except (OSError, UnicodeDecodeError) as exc:
-        sys.stderr.write(f"topic: could not read {path} ({exc}) — ignoring it\n")
-        return {}
-    try:
-        data = json.loads(text)
-    except ValueError as exc:
-        sys.stderr.write(f"topic: {path} is not valid JSON ({exc}) — ignoring it\n")
-        return {}
-    if not isinstance(data, dict):
-        sys.stderr.write(f"topic: {path} is not a JSON object — ignoring it\n")
-        return {}
-    return data
+        spec = importlib.util.spec_from_file_location("topic_ledger_item_ledger_cli", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (OSError, ImportError) as exc:
+        raise LedgerError(
+            f"the shared resolver {path} is missing ({exc}); reinstall the skills "
+            "(`install.sh` installs it beside them)"
+        )
+    return module
 
 
 def configured_cli(config_path: Optional[Path] = None) -> Optional[str]:
-    """The `ledger_cli` setting, or None when it is off."""
-    if config_path is not None:
-        config = _read_object(Path(config_path), True)
-    else:
-        config = _read_object(CONFIG_PATH, True)
-        config = {**config, **_read_object(Path(OVERRIDE_PATH).expanduser(), False)}
-    value = config.get(CONFIG_KEY)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise LedgerError(
-            f"{CONFIG_KEY} must be a string naming the ledger executable, "
-            f"got {type(value).__name__}"
+    """The `ledger_cli` setting, or None when it is off.
+
+    Read by `skills/_lib/ledger_cli.py`: an explicit `config_path` alone, else the
+    shipped config with the per-skill override file laid over it.
+    """
+    ledger_cli = _load_ledger_cli()
+    try:
+        return ledger_cli.resolve(
+            config_path, who="topic", strict=True, required_shipped=True
         )
-    value = value.strip()
-    return os.path.expanduser(value) if value else None
+    except ledger_cli.ConfigError as exc:
+        raise LedgerError(str(exc))
 
 
 def _one_line(text: str) -> str:
