@@ -272,6 +272,51 @@ def test_the_imported_directory_is_opened_through_the_ticket_descriptor_without_
     assert list((tmp_path / "elsewhere").iterdir()) == []
 
 
+def test_a_ledger_item_that_reads_back_differently_leaves_the_card_in_place(repo, fake, capsys):
+    put_fixture(repo)
+    kept = (repo / ".ticket" / f"{CLOSED}.md").read_bytes()
+    # The write lands, then the read-back export omits the closing event: the item no longer replays as the card.
+    fake.script("export-item", commit=True, drop_events=1)
+    code, lines, _ = run(capsys, "import-cards", str(repo))
+    assert code == 1
+    assert lines == [f"skipped {CLOSED}: the ledger item reads differently from the card, so the card was left in place"]
+    assert (repo / ".ticket" / f"{CLOSED}.md").read_bytes() == kept
+    assert not (repo / ".ticket" / "imported" / f"{CLOSED}.md").exists()
+
+
+def test_a_card_whose_replay_differs_before_the_write_writes_nothing(repo, fake, capsys, monkeypatch):
+    # No real card reaches this guard (the mapping either replays equal or raises); the fold is patched to drift.
+    put_fixture(repo)
+    kept = (repo / ".ticket" / f"{CLOSED}.md").read_bytes()
+    real = ticket._ledger_card
+
+    def drifting(events, key, title):
+        card, rest = real(events, key, title)
+        return {**card, "title": card["title"] + " (drift)"}, rest
+
+    monkeypatch.setattr(ticket, "_ledger_card", drifting)
+    code, lines, _ = run(capsys, "import-cards", str(repo))
+    assert code == 1
+    assert lines == [f"skipped {CLOSED}: the card cannot be replayed through the ledger mapping (differs in title)"]
+    assert fake.events() == [] and fake.appends() == []
+    assert (repo / ".ticket" / f"{CLOSED}.md").read_bytes() == kept
+    assert not (repo / ".ticket" / "imported").exists()
+
+
+def test_a_dry_run_and_a_real_run_agree_when_the_moved_aside_name_is_taken(repo, fake, capsys):
+    put_fixture(repo)
+    (repo / ".ticket" / "imported").mkdir()
+    (repo / ".ticket" / "imported" / f"{CLOSED}.md").write_text("an earlier card\n", encoding="utf-8")
+    kept = snapshot(repo)
+    dry_code, dry_lines, _ = run(capsys, "import-cards", str(repo), "--dry-run")
+    assert snapshot(repo) == kept and fake.events() == []
+    real_code, real_lines, _ = run(capsys, "import-cards", str(repo))
+    assert (dry_code, dry_lines) == (real_code, real_lines) == (1, real_lines)
+    assert real_lines[0].startswith(f"skipped {CLOSED}: .ticket/imported/{CLOSED}.md already exists")
+    # The real run takes the card's lock, as it always does; nothing else changes.
+    assert {k: v for k, v in snapshot(repo).items() if not k.endswith(".lock")} == kept and fake.events() == []
+
+
 # --- Dry run, and the refusals before a card is read -----------------------------------------------------
 
 
@@ -332,6 +377,14 @@ def test_find_cards_lists_nested_repositories_and_skips_imported_and_links(tmp_p
     assert (code, lines) == (0, [])
     monkeypatch.chdir(shallow)
     assert run(capsys, "find-cards")[:2] == (0, [os.getcwd()])
+
+
+def test_find_cards_skips_a_root_that_is_a_link(tmp_path, capsys):
+    real = make_repo(tmp_path / "real")
+    put_fixture(real)
+    os.symlink(real, tmp_path / "link")
+    assert run(capsys, "find-cards", str(tmp_path / "link"))[:2] == (0, [])
+    assert run(capsys, "find-cards", str(tmp_path / "link"), str(real))[:2] == (0, [str(real)])
 
 
 # --- The notice /ticket prints on the ledger store ------------------------------------------------------

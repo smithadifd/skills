@@ -724,10 +724,12 @@ ledger write is confirmed.
   1 when any card was skipped, 2 on usage (a repository that is not a directory) or a store refusal
   (`TICKET_LEDGER_CLI` unset, or a CLI that fails the 6.2 capability probe), before any card is read.
   `--dry-run` reads and validates, takes no lock it would have to create, writes nothing, creates no
-  directory and moves nothing.
+  directory and moves nothing; it checks the moved-aside name too, so a taken
+  `.ticket/imported/<key>.md` is the same `skipped` line as in a real run.
 - `find-cards [<root>...]` prints, one absolute path per line and sorted, every git repository under
   the roots (default: the current directory) whose `.ticket/` holds at least one regular `*.md` file.
-  Links are not followed; `.git`, `node_modules` and `.ticket` (so `.ticket/imported`) are not entered.
+  Links are not followed (a root that is itself a link is skipped, silently); `.git`, `node_modules` and
+  `.ticket` (so `.ticket/imported`) are not entered.
   It exits 0 whether or not it found any, and 2 for a root that is not a directory.
 
 **The mapping.** One batch per card, written with one `append-many ... --expect-revision none`, in this

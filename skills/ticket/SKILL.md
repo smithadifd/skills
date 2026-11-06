@@ -105,8 +105,8 @@ folder or by its full path:
 - `python3 ${CLAUDE_SKILL_DIR}/ticket.py find-cards [<root>...]` lists, one
   absolute path per line, every git repository under the roots (default: the
   current directory) whose `.ticket/` holds a card that is not imported yet.
-  It follows no links, skips `.git`, `node_modules` and `.ticket/imported`, and
-  exits 0 whether or not it found any.
+  It follows no links (a root that is itself a link is skipped), skips `.git`,
+  `node_modules` and `.ticket/imported`, and exits 0 whether or not it found any.
 - `python3 ${CLAUDE_SKILL_DIR}/ticket.py import-cards <repo>... [--dry-run]`
   writes each card as the events of one ledger item and moves the card to
   `.ticket/imported/<key>.md`. Closed cards import as history; an open card
@@ -114,8 +114,9 @@ folder or by its full path:
   Each card prints one line: `imported <key>`, `already imported <key>`, or
   `skipped <key>: <reason>`. A card the reader or a validator refuses (or an older
   card format) is left where it is and named, never half-imported. A rerun
-  writes nothing. `--dry-run` writes and moves nothing and prints `would import
-  <key>`. Exit 0 when every card imported or was already imported, 1 when any
+  writes nothing. `--dry-run` writes and moves nothing, prints `would import
+  <key>`, and reports the same `skipped` a real run would for a taken
+  `.ticket/imported/<key>.md`. Exit 0 when every card imported or was already imported, 1 when any
   was skipped, 2 when `TICKET_LEDGER_CLI` is unset or its CLI fails the
   capability probe (before any card is read).
   `.ticket/imported/` must be git-ignored like the card; if it is not, the

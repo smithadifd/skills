@@ -2287,6 +2287,8 @@ def find_cards(roots: Sequence[str | Path]) -> list[str]:
 
     found: set[str] = set()
     for root in roots:
+        if os.path.islink(root):
+            continue  # a root that is itself a link is not followed either
         for current, names, files in os.walk(root, followlinks=False):
             if ".git" in names or ".git" in files:
                 if ".ticket" in names and _leftover_cards(Path(current)):
@@ -2456,17 +2458,25 @@ def _same_history(events: Sequence[Mapping[str, Any]], batch: Sequence[Mapping[s
     return shape(events) == shape(batch)
 
 
-def _imported_directory(directory: int, name: str) -> int:
-    """``.ticket/imported/`` created if need be and opened through ``directory`` without following a link; the card's new name must be free."""
+def _imported_directory(directory: int, name: str, *, create: bool = True) -> int | None:
+    """``.ticket/imported/`` created if need be and opened through ``directory`` without following a link; the card's new name must be free.
 
-    try:
-        os.mkdir(IMPORTED_DIRECTORY, 0o700, dir_fd=directory)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/ cannot be created ({exc})") from exc
+    With ``create`` false nothing is created: None comes back when the directory does not exist yet.
+    """
+
+    if create:
+        try:
+            os.mkdir(IMPORTED_DIRECTORY, 0o700, dir_fd=directory)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/ cannot be created ({exc})") from exc
     try:
         moved = os.open(IMPORTED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/ is not a plain directory (it vanished)") from None
     except OSError as exc:
         raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/ is not a plain directory ({exc})") from exc
     try:
@@ -2516,8 +2526,13 @@ def _import_locked(store: MarkdownStore, directory: int, name: str, cli: str, dr
     if events is not None and not _same_history(events, batch):
         raise _Skip("ledger item exists with different history")
     if dry_run:
+        # The real run's destination check, without creating the directory.
+        free = _imported_directory(directory, name, create=False)
+        if free is not None:
+            os.close(free)
         return f"already imported {key}" if events is not None else f"would import {key}"
     moved = _imported_directory(directory, name)
+    assert moved is not None
     try:
         if events is None:
             try:
