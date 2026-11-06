@@ -691,6 +691,94 @@ the capability probe), else the markdown store. An empty value counts as unset. 
 selects the same way. A selected CLI that fails the capability probe is refused `ledger_incompatible`
 before anything is read or written, and the `release` command exits 2.
 
+### 6.4 Importing markdown cards into the ledger
+
+A machine that ran `/ticket` on the markdown store holds `.ticket/<key>.md` cards. When it switches to
+the ledger store those cards would be stranded, so two verbs carry them across. Neither adds a ledger
+schema or an event kind: an import writes the events of 6.2 and nothing else.
+
+**The invariant.** A card is imported whole or not at all. After the import the ledger store's `read()`
+of the item equals the markdown store's `read()` of the card (card dictionary equality, the close stamp
+trusted per 6.2.4 for a closed card). A rerun writes no event. A card is moved aside (hard-linked into `.ticket/imported/` without replacing a file, then unlinked; a name that appeared in the gap is `skipped <key>: imported copy already exists` and the card stays; a stop between the link and the unlink is finished by a rerun, which unlinks the card only when `.ticket/imported/<key>.md` is the same file, same device and inode) only after its
+ledger write is confirmed.
+
+**The verbs.** Both are `python3 <skill-dir>/ticket.py ...`.
+
+- `import-cards <repo>... [--dry-run]` prints one line per card, in file-name order:
+
+  | Line | Meaning |
+  |---|---|
+  | `imported <key>` | the card's events were written, the item reads back equal to the card, the card moved to `.ticket/imported/<key>.md` |
+  | `already imported <key>` | the ledger already holds exactly this card's events (a stop between the write and the move); the card is moved aside, nothing is written |
+  | `skipped <key>: <reason>` | the card was left in place and nothing was written for it; it makes the run exit 1 |
+  | `would import <key>` | `--dry-run` only: what a real run would write |
+
+  The reasons are: `malformed: ...` (the markdown store's reader or a write-time validator refused the
+  card, a file that holds no card block, or a card whose key is not its file name), `unknown card frame
+  version v<N>` (an older or newer `ticket-card` frame; only v2 imports, so the section 7 non-goal
+  stands), `ledger item exists with different history`, ``.ticket/imported/ is not git-ignored ...``,
+  `the card's lock is held by another process ...`, `the card cannot be replayed through the ledger
+  mapping ...`, and the refusals of the moved-aside directory and of the ledger's own answer. A `.ticket`
+  that is a link or not a directory is reported as `skipped .ticket: ...`.
+  Exit status: 0 when every card imported or was already imported (a repository with no card counts),
+  1 when any card was skipped, 2 on usage (a repository that is not a directory) or a store refusal
+  (`TICKET_LEDGER_CLI` unset, or a CLI that fails the 6.2 capability probe), before any card is read.
+  `--dry-run` reads and validates, takes no lock it would have to create, writes nothing, creates no
+  directory and moves nothing; it checks the moved-aside name too, so a taken
+  `.ticket/imported/<key>.md` is the same `skipped` line as in a real run.
+- `find-cards [<root>...]` prints, one absolute path per line and sorted, every git repository under
+  the roots (default: the current directory) whose `.ticket/` holds at least one regular `*.md` file.
+  Links are not followed (a root that is itself a link is skipped, silently, however it is spelled: a trailing slash or `/.` does not change that; `..` is left to the OS, so `dir/link/..` is the link target's parent); `.git`, `node_modules` and
+  `.ticket` (so `.ticket/imported`) are not entered.
+  It exits 0 whether or not it found any, and 2 for a root that is not a directory.
+
+**The mapping.** One batch per card, written with one `append-many ... --expect-revision none`, in this
+order: `item.created` (key `ticket-item/K/created`, as a claim on a new item); for a card with a live
+pass, `session.opened` for that pass (key `ticket-pass/K/P/claimed`, so a later `/ticket K` resumes
+with `open(pass_id=P)` on the ledger store); the plan as a `ticket-plan:v2` note; each decision, then
+each review, as `ticket-decision:v2` and `ticket-review:v2` notes; each tried record as `item.tried`; each
+stamp, in order, as `item.stopped`; for a closed card, the closing `item.state`. When the card's last
+stamp is a close stamp, the last stop and the state take the close keys of 6.2 (`ticket-close/K/P/T/stop`
+and `.../state`) with `P` and `T` taken from the card's digest, so the close reads as trusted; any
+other event's key is `ticket-import/K/<digest>/<n>`. `<digest>` is the first 32 hex characters of the
+SHA-256 of the card's canonical JSON, `n` the event's index: the keys come from the card's content, never
+from a random value, so the same card is the same batch.
+
+**Replay is checked before and after.** Before anything is written the batch is folded in memory by the
+ledger store's own normalizer and compared with the card. A card that the mapping cannot reproduce
+exactly (a closed card that holds a live pass, a close stamp anywhere but last on a closed card, a host or
+start time the claim's purpose text cannot carry) is `skipped ... cannot be replayed`, never imported
+approximately. After the write the item is read back through `LedgerStore.read()` and compared with the
+card again.
+
+**Failure path after each step, and concurrent writers.** Each row says what a rerun does.
+
+| Stop after | State | A rerun |
+|---|---|---|
+| nothing read, or the ignore check, probe or lock refused | nothing written, nothing moved | the same refusal until the cause is fixed |
+| the batch was refused or lost | the ledger holds all of the batch or none of it (`append-many` is atomic; an ambiguous answer is resolved by the batch's last key as in 6.2.4) | writes the batch again under the same keys, or finds it landed |
+| the ledger write landed, the move did not | the item is in the ledger, the card is still in `.ticket/` | prints `already imported <key>` and moves the card; writes nothing |
+| the move landed | the card is in `.ticket/imported/` | finds no card in `.ticket/`; writes nothing |
+
+The writers of a card are a `/ticket` pass (it holds the card's `flock` while it writes) and another import.
+The import takes the same `flock` without waiting, after the ignore check and through the same `.ticket/`
+directory descriptor, so a card another process is writing is skipped, not raced. The ledger side is the
+`--expect-revision none` of the batch: an item that appears between the existence check and the write loses
+the race (`stale`) and the card is skipped. The destination `.ticket/imported/<key>.md` must not exist
+(the move never overwrites), and `.ticket/imported/` is created and opened through the `.ticket/`
+descriptor without following a link, before the ledger write, so the move cannot fail for that reason
+after the write. `.ticket/imported/`, like the card and its lock, must be git-ignored; if it is not, the
+repository's cards are all `skipped` and no ignore file is edited.
+
+An item that already exists is imported over only when its exported events are exactly this card's batch
+(same keys, kinds and payloads). Anything else, including the same key in two repositories with different
+cards, is `ledger item exists with different history`: never a merge, never a second item.
+
+**The notice.** When a pass opens on the ledger store and `<repo>/.ticket/` holds unimported `*.md`
+cards, `TicketPass.open` adds one line to `reconciliation`: it names the exact command
+(`python3 <skill-dir>/ticket.py import-cards <repo>`, absolute and shell-quoted) and is printed once per
+open. The markdown store never prints it.
+
 ## 7. Non-goals
 
 - Pulling the source during a live pass, or before each outward action.
@@ -698,7 +786,7 @@ before anything is read or written, and the `release` command exits 2.
 - Reopening a closed ticket, or undoing outward actions, on a change.
 - Repairing a corrupt card (an unidentifiable plan, an invalid close, an unreadable block). A person
   does it.
-- Migrating cards of an earlier schema: none exists.
+- Migrating cards of an earlier schema: none exists. The import (6.4) takes v2 cards only; an older frame is `skipped`.
 - A fourth review round.
 - Defending the card against a writer that forges the store's own record shapes (a go decision, a
   close key, a framed ticket note). The store is what the skill trusts.

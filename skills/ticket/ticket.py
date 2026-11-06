@@ -1602,12 +1602,14 @@ class LedgerStore:
     claim, stamps, tried records and the closed status.
     """
 
-    def __init__(self, cli: str | Path, key: str, title: str):
+    def __init__(self, cli: str | Path, key: str, title: str, repo: str | Path | None = None):
         if not _KEY.fullmatch(key):
             raise TicketError(f"unsafe ticket key: {key!r}")
         self.cli = str(cli)
         self.key = key
         self.title = title
+        # The repository the pass works in, when known: only the leftover-card notice reads it.
+        self.repo = None if repo is None else Path(repo).resolve()
         # A stamp's reference to the card: the ledger item itself.
         self.ref = f"ledger/{key}"
         self._pass_id: str | None = None
@@ -1630,6 +1632,16 @@ class LedgerStore:
         """The id of the last pass this handle held that has ended, or None."""
 
         return self._ended
+
+    def leftover_notice(self) -> str | None:
+        """The one line an open prints when the repository still holds unimported markdown cards (design 6.4), else None."""
+
+        if self.repo is None or not _leftover_cards(self.repo):
+            return None
+        return (
+            f"markdown ticket cards remain in {self.repo}/.ticket and are not in the ledger; "
+            f"import them with `{import_command(self.repo)}`"
+        )
 
     def _run(self, *args: str, stdin: str = "") -> _Answer:
         result = subprocess.run([self.cli, "--json", *args], input=stdin, capture_output=True, encoding="utf-8", check=False)
@@ -1832,7 +1844,7 @@ def choose_store(repo: str | Path, key: str, title: str) -> Store:
     cli = os.environ.get(LEDGER_SELECTOR, "")
     if cli:
         _probe_ledger(cli)
-        return LedgerStore(cli, key, title)
+        return LedgerStore(cli, key, title, repo)
     return MarkdownStore(repo, key, title)
 
 
@@ -1930,7 +1942,9 @@ class TicketPass:
         state, flags, identity = _derive(card, ticket, pass_id, key)
         session = cls(ticket, store, card, token, identity)
         session._phase = state
-        session.reconciliation = tuple(flags)
+        notice = getattr(store, "leftover_notice", None)
+        leftover = notice() if callable(notice) else None
+        session.reconciliation = (*flags, leftover) if leftover else tuple(flags)
         if session._identity is not None:
             session._plan = PlanCard.from_snapshot(card["plan"])
             session._plan.review = _passing_final(card, session._identity) if state in ("outward_go", "closed") else None
@@ -2212,6 +2226,418 @@ class TicketPass:
         return MoreInfoExit(destination, waiting, drafted)
 
 
+# --- Importing markdown cards into the ledger (design 6.4) ------------------
+
+IMPORTED_DIRECTORY = "imported"
+_WALK_SKIPPED = frozenset((".git", "node_modules", ".ticket"))
+
+
+def import_command(repo: str | Path) -> str:
+    """The command that imports one repository's markdown cards: every argv element shell-quoted."""
+    return shlex.join(["python3", _SCRIPT, "import-cards", str(repo)])
+
+
+def _open_ticket_directory(repo: Path) -> int | None:
+    """``<repo>/.ticket`` opened without following a link, or None when there is none."""
+
+    try:
+        return os.open(repo / ".ticket", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+
+
+def _card_names(directory: int, *, regular_only: bool) -> list[str]:
+    """The ``*.md`` entries directly in ``.ticket/`` (read through ``directory``), sorted; never ``imported/``."""
+
+    names = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".md"):
+            continue
+        if regular_only:
+            try:
+                if not stat.S_ISREG(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
+                    continue
+            except OSError:
+                continue
+        names.append(name)
+    return names
+
+
+def _leftover_cards(repo: Path) -> list[str]:
+    """The names of the markdown cards a repository holds that are not imported; empty when it cannot be read."""
+
+    try:
+        directory = _open_ticket_directory(repo)
+        if directory is None:
+            return []
+        try:
+            return _card_names(directory, regular_only=True)
+        finally:
+            os.close(directory)
+    except OSError:
+        return []
+
+
+def _root_spelling(root: str | Path) -> str:
+    """``root`` without trailing separators or trailing ``.`` segments, and nothing else changed.
+
+    ``..`` is never collapsed: the OS resolves ``dir/link/..`` through the link, so a lexical collapse
+    would name a different directory.
+    """
+
+    text = os.fspath(root)
+    while True:
+        trimmed = text.rstrip(os.sep)
+        if not trimmed:
+            return os.sep if text else text
+        if trimmed == ".":
+            return trimmed
+        if not trimmed.endswith(os.sep + "."):
+            return trimmed
+        text = trimmed[:-2] or os.sep
+
+
+def find_cards(roots: Sequence[str | Path]) -> list[str]:
+    """Every git repository under ``roots`` whose ``.ticket/`` holds an unimported card, as absolute paths.
+
+    Links are not followed. ``.git``, ``node_modules`` and ``.ticket`` (so
+    ``.ticket/imported``) are not entered. Each path names the directory the OS resolves for the root.
+    """
+
+    found: set[str] = set()
+    for root in roots:
+        root = _root_spelling(root)  # one spelling for the check and the walk
+        if os.path.islink(root):
+            continue  # a root that is itself a link is not followed either
+        for current, names, files in os.walk(root, followlinks=False):
+            if ".git" in names or ".git" in files:
+                if ".ticket" in names and _leftover_cards(Path(current)):
+                    found.add(os.path.realpath(current))  # nothing under the root is a link; no lexical `..` collapse
+            names[:] = [name for name in names if name not in _WALK_SKIPPED]
+    return sorted(found)
+
+
+class _Skip(Exception):
+    """A card that was left in place; the message is the reason printed after its key."""
+
+
+def _import_ignored(store: MarkdownStore) -> None:
+    """The card, its lock and ``.ticket/imported/<key>.md`` must all be git-ignored; no ignore file is edited."""
+
+    try:
+        store._check_ignored()
+    except StoreUnavailable as exc:
+        raise _Skip(_one_line(exc)) from exc
+    moved = Path(".ticket") / IMPORTED_DIRECTORY / store.path.name
+    result = subprocess.run(
+        ["git", "-C", str(store.repo), "check-ignore", "--quiet", "--", moved.as_posix()],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise _Skip(
+            f"{moved.parent.as_posix()}/ is not git-ignored; add `.ticket/` to the repository's ignore rules and "
+            "retry. No ignore file was changed and nothing was written"
+        )
+
+
+def _import_lock(store: MarkdownStore, directory: int, dry_run: bool) -> int | None:
+    """The card's lock, taken without waiting; a lock another process holds skips the card.
+
+    A dry run opens an existing lock for reading and never creates one.
+    """
+
+    if dry_run:
+        try:
+            fd = os.open(store.lock_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise _Skip(f"the card's lock cannot be opened ({exc})") from exc
+    else:
+        try:
+            fd = store._open_lock(directory)
+        except StoreUnavailable as exc:
+            raise _Skip(_one_line(exc)) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _Skip("the card's lock is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException as exc:
+        os.close(fd)
+        if isinstance(exc, BlockingIOError):
+            raise _Skip("the card's lock is held by another process (a live pass may be writing it)") from exc
+        raise
+    return fd
+
+
+def _frame_version(store: MarkdownStore, directory: int) -> str | None:
+    """The version of a ``ticket-card:v<N>`` frame in the card when N is not 2, read without following a link."""
+
+    try:
+        fd = os.open(store.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        with os.fdopen(fd, "rb") as handle:
+            found = re.search(rb"<!-- ticket-card:v([0-9]+)", handle.read())
+    except OSError:
+        return None
+    return found[1].decode() if found and found[1] != b"2" else None
+
+
+def _import_read(store: MarkdownStore, directory: int) -> dict[str, Any]:
+    """The card through the markdown store's own reader and the validators a write runs, or the reason it is skipped."""
+
+    if store._card_mode(directory) is None:
+        raise _Skip("the card is gone")
+    try:
+        card, _ = store._load(directory)
+        if card["plan"] is not None:
+            _validate_event("plan", card["plan"], store.key)
+        for kind, name in (("decision", "decisions"), ("review", "reviews"), ("tried", "tried"), ("stamp", "stamps")):
+            for record in card[name]:
+                _validate_event(kind, record, store.key)
+    except Exception as exc:  # fail closed: whatever the reader or a validator cannot take is left in place
+        version = _frame_version(store, directory)
+        if version is not None:
+            raise _Skip(f"unknown card frame version v{version}; only ticket-card:v2 cards import") from exc
+        raise _Skip(f"malformed: {_one_line(exc)}") from exc
+    return card
+
+
+def _import_batch(card: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The events of one ledger item that replay as ``card`` (design 6.4), keyed by the card's content.
+
+    Every key is derived from the SHA-256 of the card's canonical JSON, so the
+    same card is always the same batch and a rerun replays it.
+    """
+
+    key, closed, stamps = card["key"], card["status"] == "closed", card["stamps"]
+    digest = hashlib.sha256(_canonical(card).encode("utf-8")).hexdigest()
+    if closed and card["pass"] is not None:
+        raise _Skip("a closed card holds a live pass, which the ledger cannot replay")
+    for index, stamp in enumerate(stamps):
+        if stamp["close"] and not (closed and index == len(stamps) - 1 and stamp["phase"] == "close"):
+            raise _Skip("a close stamp is not the last stamp of a closed card, which the ledger cannot replay")
+    trusted = bool(stamps) and closed and stamps[-1]["close"]
+    element = LedgerStore("-", key, card["title"])._element
+    sequence = iter(range(len(stamps) + len(card["decisions"]) + len(card["reviews"]) + len(card["tried"]) + 8))
+
+    def ordinary() -> str:
+        return f"ticket-import/{key}/{digest[:32]}/{next(sequence)}"
+
+    batch = [element("item.created", {"type": "ticket", "title": card["title"]}, f"ticket-item/{key}/created")]
+    if card["pass"] is not None:
+        live = card["pass"]
+        purpose = f"ticket pass {live['id']} on {live['host']} at {live['started_at']}"
+        batch.append(element("session.opened", {"purpose": purpose}, f"ticket-pass/{key}/{live['id']}/claimed"))
+    if card["plan"] is not None:
+        batch.append(element("item.note", {"text": f"ticket-plan:v{_RECORD_VERSION} {_canonical(card['plan'])}"}, ordinary()))
+    for kind, name in (("decision", "decisions"), ("review", "reviews")):
+        for record in card[name]:
+            batch.append(element("item.note", {"text": f"ticket-{kind}:v{_RECORD_VERSION} {_canonical(record)}"}, ordinary()))
+    for record in card["tried"]:
+        batch.append(element("item.tried", dict(record), ordinary()))
+    close = f"ticket-close/{key}/{digest[:16]}/{digest[16:32]}"
+    for stamp in stamps:
+        payload = {"point": stamp["point"], "phase": stamp["phase"], "skills": stamp["next_skills"], "refs": stamp["refs"]}
+        batch.append(element("item.stopped", payload, f"{close}/stop" if stamp["close"] else ordinary()))
+    if closed:
+        batch.append(element("item.state", {"status": "closed"}, f"{close}/state" if trusted else ordinary()))
+    replayed = [{"id": number, **event} for number, event in enumerate(batch, 1)]
+    try:
+        card_back, _ = _ledger_card(replayed, key, card["title"])
+    except StoreUnavailable as exc:
+        raise _Skip(f"the card cannot be replayed through the ledger mapping: {_one_line(exc)}") from exc
+    if card_back != card:
+        differing = ", ".join(name for name in card if card_back.get(name) != card[name])
+        raise _Skip(f"the card cannot be replayed through the ledger mapping (differs in {differing})")
+    return batch
+
+
+def _import_existing(ledger: LedgerStore, key: str) -> list[dict[str, Any]] | None:
+    """The events of the ledger item ``key``, or None when there is no such item; anything unclear skips the card."""
+
+    answer = ledger._run("query", "--item", key)
+    if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+        return None
+    try:
+        if not answer.ok or not any(row["item_id"] == key for row in answer.data["items"]):
+            raise _Skip(f"the ledger's answer about the item is unclear ({answer.code or answer.output})")
+        export = ledger._run("export-item", key)
+        if not export.ok:
+            raise _Skip(f"the ledger's export of the item is unclear ({export.code or export.output})")
+        return list(export.data["events"])
+    except (KeyError, TypeError) as exc:
+        raise _Skip("the ledger's answer about the item is unclear") from exc
+
+
+def _same_history(events: Sequence[Mapping[str, Any]], batch: Sequence[Mapping[str, Any]]) -> bool:
+    def shape(items: Sequence[Mapping[str, Any]]) -> list[tuple[Any, Any, str]]:
+        return [(item.get("idempotency_key"), item.get("kind"), _canonical(item.get("payload"))) for item in items]
+
+    return shape(events) == shape(batch)
+
+
+def _same_file(directory: int, moved: int, name: str) -> bool:
+    """Whether ``.ticket/imported/<name>`` is the card itself (same st_dev and st_ino, no link followed).
+
+    That is a move an earlier run linked and stopped before the unlink; a stat error is a skip that leaves both names.
+    """
+
+    try:
+        card = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        copy = os.stat(name, dir_fd=moved, follow_symlinks=False)
+    except OSError as exc:
+        raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/{name} cannot be compared with the card ({exc}), so both were left as they are") from exc
+    return (card.st_dev, card.st_ino) == (copy.st_dev, copy.st_ino)
+
+
+def _imported_directory(directory: int, name: str, *, create: bool = True) -> int | None:
+    """``.ticket/imported/`` created if need be and opened through ``directory`` without following a link; the card's new name must be free.
+
+    The name may also already be the card itself (a move stopped between the link and the unlink); the caller finishes it.
+    With ``create`` false nothing is created: None comes back when the directory does not exist yet.
+    """
+
+    if create:
+        try:
+            os.mkdir(IMPORTED_DIRECTORY, 0o700, dir_fd=directory)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/ cannot be created ({exc})") from exc
+    try:
+        moved = os.open(IMPORTED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/ is not a plain directory (it vanished)") from None
+    except OSError as exc:
+        raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/ is not a plain directory ({exc})") from exc
+    try:
+        os.stat(name, dir_fd=moved, follow_symlinks=False)
+    except FileNotFoundError:
+        return moved
+    except OSError as exc:
+        os.close(moved)
+        raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/{name} cannot be checked ({exc})") from exc
+    try:
+        if _same_file(directory, moved, name):
+            return moved
+    except _Skip:
+        os.close(moved)
+        raise
+    os.close(moved)
+    raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/{name} already exists, so the card was not moved and nothing was written")
+
+
+def _import_card(repo: Path, name: str, cli: str, dry_run: bool) -> str:
+    """Import one card; returns its output line, or raises ``_Skip`` with the reason it was left in place."""
+
+    key = name[:-3]
+    if not _KEY.fullmatch(key):
+        raise _Skip("the file name is not a safe ticket key")
+    store = MarkdownStore(repo, key, key)
+    try:
+        store._inside_repo()
+        directory = store._open_directory()
+    except StoreUnavailable as exc:
+        raise _Skip(_one_line(exc)) from exc
+    except OSError as exc:
+        raise _Skip(f".ticket cannot be opened without following a link ({exc})") from exc
+    try:
+        # Before the lock: the lock file is not created in a repository that is refused.
+        _import_ignored(store)
+        lock = _import_lock(store, directory, dry_run)
+        try:
+            return _import_locked(store, directory, name, cli, dry_run)
+        finally:
+            if lock is not None:
+                os.close(lock)
+    finally:
+        os.close(directory)
+
+
+def _import_locked(store: MarkdownStore, directory: int, name: str, cli: str, dry_run: bool) -> str:
+    key = store.key
+    card = _import_read(store, directory)
+    batch = _import_batch(card)
+    ledger = LedgerStore(cli, key, card["title"])
+    events = _import_existing(ledger, key)
+    if events is not None and not _same_history(events, batch):
+        raise _Skip("ledger item exists with different history")
+    if dry_run:
+        # The real run's destination check, without creating the directory.
+        free = _imported_directory(directory, name, create=False)
+        if free is not None:
+            os.close(free)
+        return f"already imported {key}" if events is not None else f"would import {key}"
+    moved = _imported_directory(directory, name)
+    assert moved is not None
+    try:
+        if events is None:
+            try:
+                ledger._send(batch, NO_TOKEN)
+            except StoreUnavailable as exc:
+                raise _Skip(f"the ledger did not take the card ({exc.code}): {_one_line(exc)}") from exc
+        try:
+            replayed, _ = LedgerStore(cli, key, card["title"]).read()
+        except (StoreUnavailable, StopIteration, KeyError, TypeError) as exc:
+            raise _Skip(f"the ledger item could not be read back, so the card was left in place: {_one_line(exc)}") from exc
+        if replayed != card:
+            raise _Skip("the ledger item reads differently from the card, so the card was left in place")
+        try:
+            # Published without replacement: link fails if the name exists; only the card itself there finishes the move.
+            os.link(name, name, src_dir_fd=directory, dst_dir_fd=moved, follow_symlinks=False)
+        except FileExistsError as exc:
+            if not _same_file(directory, moved, name):
+                raise _Skip("imported copy already exists") from exc
+        except NotImplementedError as exc:
+            raise _Skip("this platform cannot link between directory descriptors, so the card was left in place") from exc
+        except OSError as exc:
+            raise _Skip(
+                f"the card is in the ledger but could not be moved aside ({exc}); run the import again to retry the move"
+            ) from exc
+        try:
+            os.unlink(name, dir_fd=directory)
+        except OSError as exc:
+            raise _Skip(
+                f"the card is in the ledger and linked as .ticket/{IMPORTED_DIRECTORY}/{name}, but .ticket/{name} could not be "
+                f"removed ({exc}); run the import again to finish the move"
+            ) from exc
+    finally:
+        os.close(moved)
+    return f"already imported {key}" if events is not None else f"imported {key}"
+
+
+def import_repo(repo: str | Path, cli: str, *, dry_run: bool = False, say=print) -> int:
+    """Import every markdown card of one repository, one output line each; returns how many were skipped."""
+
+    repo = Path(repo).resolve()
+    skipped = 0
+    try:
+        directory = _open_ticket_directory(repo)
+    except OSError as exc:
+        say(f"skipped .ticket: it cannot be opened without following a link ({exc})")
+        return 1
+    if directory is None:
+        return 0
+    try:
+        names = _card_names(directory, regular_only=False)
+    finally:
+        os.close(directory)
+    for name in names:
+        try:
+            say(_import_card(repo, name, cli, dry_run))
+        except _Skip as exc:
+            skipped += 1
+            say(f"skipped {name[:-3]}: {_one_line(exc)}")
+        except Exception as exc:  # fail closed: the card stays and the other cards still import
+            skipped += 1
+            say(f"skipped {name[:-3]}: unexpected {type(exc).__name__}: {_one_line(exc)}")
+    return skipped
+
+
 __all__ = [
     "FileTicketSource",
     "GateRequired",
@@ -2227,11 +2653,34 @@ __all__ = [
     "TicketPass",
     "TicketSource",
     "choose_store",
+    "find_cards",
+    "import_command",
+    "import_repo",
 ]
 
 
+def _import_cards_command(repos: Sequence[str], dry_run: bool) -> int:
+    """Exit 0 when every card imported or was already imported, 1 when any was skipped, 2 on usage or a store refusal."""
+
+    cli = os.environ.get(LEDGER_SELECTOR, "")
+    if not cli:
+        print(f"ticket.py: {LEDGER_SELECTOR} is not set; import-cards needs the ledger CLI. No card was read.", file=sys.stderr)
+        return 2
+    try:
+        _probe_ledger(cli)
+    except StoreUnavailable as exc:
+        print(f"ticket.py: {exc}", file=sys.stderr)
+        return 2
+    missing = [repo for repo in repos if not os.path.isdir(repo)]
+    if missing:
+        print(f"ticket.py: not a directory: {', '.join(missing)}. No card was read.", file=sys.stderr)
+        return 2
+    skipped = sum(import_repo(repo, cli, dry_run=dry_run) for repo in repos)
+    return 1 if skipped else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Command line for a person: release the claim a crashed pass left behind."""
+    """Command line for a person: release a crashed pass's claim, import markdown cards, find them."""
 
     parser = argparse.ArgumentParser(prog="ticket.py", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2239,7 +2688,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     release.add_argument("key", help="the ticket key")
     release.add_argument("pass_id", help="the pass id the refusal named")
     release.add_argument("--repo", default=".", help="the repository that holds the markdown card")
+    importing = commands.add_parser(
+        "import-cards", help="import the markdown cards of each repository into the ledger, then move them aside"
+    )
+    importing.add_argument("repos", nargs="+", help="a repository that holds .ticket/<key>.md cards")
+    importing.add_argument("--dry-run", action="store_true", help="read and validate; write nothing, move nothing")
+    finding = commands.add_parser("find-cards", help="list the git repositories under the roots that hold unimported cards")
+    finding.add_argument("roots", nargs="*", help="directories to search (default: the current directory)")
     args = parser.parse_args(argv)
+    if args.command == "find-cards":
+        roots = args.roots or ["."]
+        missing = [root for root in roots if not os.path.isdir(_root_spelling(root))]
+        if missing:
+            print(f"ticket.py: not a directory: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        for repo in find_cards(roots):
+            print(repo)
+        return 0
+    if args.command == "import-cards":
+        return _import_cards_command(args.repos, args.dry_run)
     try:
         store = choose_store(args.repo, args.key, args.key)
     except StoreUnavailable as exc:

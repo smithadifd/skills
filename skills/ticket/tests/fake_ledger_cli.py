@@ -14,7 +14,9 @@ Its state is one JSON file, named by the first argument: the events, every
 call (argv, stdin, exit status and error code), how the help probe answers,
 and a queue of scripted answers. A scripted answer replaces the next answer to
 its verb with any text (an envelope, garbage, or nothing: a lost response)
-and any exit status, after carrying the call out or without it.
+and any exit status, after carrying the call out or without it. A scripted
+``drop_events`` (with ``commit``) tampers with an ``export-item`` answer: it
+omits the newest N events.
 """
 
 import json
@@ -172,6 +174,10 @@ def main():
         if scripted is not None:
             out = scripted.get("stdout", out)
             status = scripted.get("status", status)
+            if scripted.get("drop_events"):  # tamper: the answer omits the newest N events
+                answer = json.loads(out)
+                answer["data"]["events"] = answer["data"]["events"][: -scripted["drop_events"]]
+                out = json.dumps(answer, sort_keys=True) + "\n"
     try:
         call["code"] = (json.loads(out).get("error") or {}).get("code")
     except (ValueError, AttributeError):
