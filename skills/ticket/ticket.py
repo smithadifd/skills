@@ -2278,22 +2278,41 @@ def _leftover_cards(repo: Path) -> list[str]:
         return []
 
 
+def _root_spelling(root: str | Path) -> str:
+    """``root`` without trailing separators or trailing ``.`` segments, and nothing else changed.
+
+    ``..`` is never collapsed: the OS resolves ``dir/link/..`` through the link, so a lexical collapse
+    would name a different directory.
+    """
+
+    text = os.fspath(root)
+    while True:
+        trimmed = text.rstrip(os.sep)
+        if not trimmed:
+            return os.sep if text else text
+        if trimmed == ".":
+            return trimmed
+        if not trimmed.endswith(os.sep + "."):
+            return trimmed
+        text = trimmed[:-2] or os.sep
+
+
 def find_cards(roots: Sequence[str | Path]) -> list[str]:
     """Every git repository under ``roots`` whose ``.ticket/`` holds an unimported card, as absolute paths.
 
     Links are not followed. ``.git``, ``node_modules`` and ``.ticket`` (so
-    ``.ticket/imported``) are not entered.
+    ``.ticket/imported``) are not entered. Each path names the directory the OS resolves for the root.
     """
 
     found: set[str] = set()
     for root in roots:
-        root = os.path.normpath(root)  # one spelling for the check and the walk: no trailing separator or dot segment
+        root = _root_spelling(root)  # one spelling for the check and the walk
         if os.path.islink(root):
             continue  # a root that is itself a link is not followed either
         for current, names, files in os.walk(root, followlinks=False):
             if ".git" in names or ".git" in files:
                 if ".ticket" in names and _leftover_cards(Path(current)):
-                    found.add(os.path.abspath(current))
+                    found.add(os.path.realpath(current))  # nothing under the root is a link; no lexical `..` collapse
             names[:] = [name for name in names if name not in _WALK_SKIPPED]
     return sorted(found)
 
@@ -2459,9 +2478,24 @@ def _same_history(events: Sequence[Mapping[str, Any]], batch: Sequence[Mapping[s
     return shape(events) == shape(batch)
 
 
+def _same_file(directory: int, moved: int, name: str) -> bool:
+    """Whether ``.ticket/imported/<name>`` is the card itself (same st_dev and st_ino, no link followed).
+
+    That is a move an earlier run linked and stopped before the unlink; a stat error is a skip that leaves both names.
+    """
+
+    try:
+        card = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        copy = os.stat(name, dir_fd=moved, follow_symlinks=False)
+    except OSError as exc:
+        raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/{name} cannot be compared with the card ({exc}), so both were left as they are") from exc
+    return (card.st_dev, card.st_ino) == (copy.st_dev, copy.st_ino)
+
+
 def _imported_directory(directory: int, name: str, *, create: bool = True) -> int | None:
     """``.ticket/imported/`` created if need be and opened through ``directory`` without following a link; the card's new name must be free.
 
+    The name may also already be the card itself (a move stopped between the link and the unlink); the caller finishes it.
     With ``create`` false nothing is created: None comes back when the directory does not exist yet.
     """
 
@@ -2487,6 +2521,12 @@ def _imported_directory(directory: int, name: str, *, create: bool = True) -> in
     except OSError as exc:
         os.close(moved)
         raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/{name} cannot be checked ({exc})") from exc
+    try:
+        if _same_file(directory, moved, name):
+            return moved
+    except _Skip:
+        os.close(moved)
+        raise
     os.close(moved)
     raise _Skip(f".ticket/{IMPORTED_DIRECTORY}/{name} already exists, so the card was not moved and nothing was written")
 
@@ -2547,16 +2587,23 @@ def _import_locked(store: MarkdownStore, directory: int, name: str, cli: str, dr
         if replayed != card:
             raise _Skip("the ledger item reads differently from the card, so the card was left in place")
         try:
-            # Published without replacement: link fails if the name appeared since the check, then the card is unlinked.
+            # Published without replacement: link fails if the name exists; only the card itself there finishes the move.
             os.link(name, name, src_dir_fd=directory, dst_dir_fd=moved, follow_symlinks=False)
-            os.unlink(name, dir_fd=directory)
         except FileExistsError as exc:
-            raise _Skip("imported copy already exists") from exc
+            if not _same_file(directory, moved, name):
+                raise _Skip("imported copy already exists") from exc
         except NotImplementedError as exc:
             raise _Skip("this platform cannot link between directory descriptors, so the card was left in place") from exc
         except OSError as exc:
             raise _Skip(
                 f"the card is in the ledger but could not be moved aside ({exc}); run the import again to retry the move"
+            ) from exc
+        try:
+            os.unlink(name, dir_fd=directory)
+        except OSError as exc:
+            raise _Skip(
+                f"the card is in the ledger and linked as .ticket/{IMPORTED_DIRECTORY}/{name}, but .ticket/{name} could not be "
+                f"removed ({exc}); run the import again to finish the move"
             ) from exc
     finally:
         os.close(moved)
@@ -2651,7 +2698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "find-cards":
         roots = args.roots or ["."]
-        missing = [root for root in roots if not os.path.isdir(root)]
+        missing = [root for root in roots if not os.path.isdir(_root_spelling(root))]
         if missing:
             print(f"ticket.py: not a directory: {', '.join(missing)}", file=sys.stderr)
             return 2

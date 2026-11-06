@@ -162,6 +162,51 @@ def test_a_destination_created_between_the_check_and_the_publish_is_not_replaced
     assert card_bytes(repo) == before
 
 
+def test_a_stop_between_the_link_and_the_unlink_is_finished_by_a_rerun(repo, fake, capsys, monkeypatch):
+    build(repo, Source(), "S1")
+    before = card_bytes(repo)
+    copy = repo / ".ticket" / "imported" / f"{KEY}.md"
+    real_unlink = os.unlink
+    calls = []
+
+    def unlink_fails_once(path, *args, **kwargs):
+        calls.append(path)
+        if len(calls) == 1:
+            raise PermissionError(13, "Permission denied", path)
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ticket.os, "unlink", unlink_fails_once)
+        code, lines, _ = run(capsys, "import-cards", str(repo))
+    assert calls[0] == f"{KEY}.md"
+    assert code == 1 and lines[0].startswith(f"skipped {KEY}: the card is in the ledger and linked as .ticket/imported/{KEY}.md")
+    assert lines[0].endswith("run the import again to finish the move")
+    assert card_bytes(repo) == before and copy.read_bytes() == before
+    assert os.stat(card_path(repo)).st_ino == os.stat(copy).st_ino
+    events = fake.events()
+    # The dry run says what the rerun will do and unlinks nothing.
+    assert run(capsys, "import-cards", str(repo), "--dry-run")[:2] == (0, [f"already imported {KEY}"])
+    assert card_bytes(repo) == before
+    code, lines, _ = run(capsys, "import-cards", str(repo))
+    assert (code, lines) == (0, [f"already imported {KEY}"])
+    assert fake.events() == events
+    assert card_bytes(repo) is None and copy.read_bytes() == before
+
+
+def test_a_destination_with_the_cards_bytes_but_another_inode_is_never_taken_for_the_card(repo, fake, capsys):
+    build(repo, Source(), "S1")
+    before = card_bytes(repo)
+    copy = repo / ".ticket" / "imported" / f"{KEY}.md"
+    copy.parent.mkdir()
+    shutil.copyfile(card_path(repo), copy)
+    assert os.stat(card_path(repo)).st_ino != os.stat(copy).st_ino
+    for argv in (("--dry-run",), ()):
+        code, lines, _ = run(capsys, "import-cards", str(repo), *argv)
+        assert code == 1 and lines[0].startswith(f"skipped {KEY}: .ticket/imported/{KEY}.md already exists")
+        assert card_bytes(repo) == before and copy.read_bytes() == before
+    assert fake.events() == []
+
+
 # --- Cards that are refused stay where they are -------------------------------------------------------
 
 
@@ -409,6 +454,20 @@ def test_find_cards_skips_a_root_that_is_a_link(tmp_path, capsys):
     for spelling in ("link/", "link/.", "link//"):
         assert run(capsys, "find-cards", str(tmp_path) + "/" + spelling)[:2] == (0, [])
     assert run(capsys, "find-cards", str(real) + "/")[:2] == (0, [str(real)])
+
+
+def test_find_cards_leaves_a_parent_segment_after_a_link_to_the_os(tmp_path, capsys):
+    # tmp_path/side/link -> tmp_path/far/inner, so side/link/.. is tmp_path/far to the OS (lexically it would be side).
+    far = tmp_path / "far"
+    (far / "inner").mkdir(parents=True)
+    repo = make_repo(far / "repo")
+    put_fixture(repo)
+    side = tmp_path / "side"
+    decoy = make_repo(side / "decoy")
+    put_fixture(decoy)
+    os.symlink(far / "inner", side / "link")
+    for spelling in ("side/link/..", "side/link/../", "side/link/../."):
+        assert run(capsys, "find-cards", str(tmp_path) + "/" + spelling)[:2] == (0, [str(repo)])
 
 
 # --- The notice /ticket prints on the ledger store ------------------------------------------------------
