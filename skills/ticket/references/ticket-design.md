@@ -699,7 +699,7 @@ schema or an event kind: an import writes the events of 6.2 and nothing else.
 
 **The invariant.** A card is imported whole or not at all. After the import the ledger store's `read()`
 of the item equals the markdown store's `read()` of the card (card dictionary equality, the close stamp
-trusted per 6.2.4 for a closed card). A rerun writes no event. A card is moved aside only after its
+trusted per 6.2.4 for a closed card). A rerun writes no event. A card is moved aside (hard-linked into `.ticket/imported/` without replacing a file, then unlinked; a name that appeared in the gap is `skipped <key>: imported copy already exists` and the card stays) only after its
 ledger write is confirmed.
 
 **The verbs.** Both are `python3 <skill-dir>/ticket.py ...`.
@@ -728,7 +728,7 @@ ledger write is confirmed.
   `.ticket/imported/<key>.md` is the same `skipped` line as in a real run.
 - `find-cards [<root>...]` prints, one absolute path per line and sorted, every git repository under
   the roots (default: the current directory) whose `.ticket/` holds at least one regular `*.md` file.
-  Links are not followed (a root that is itself a link is skipped, silently); `.git`, `node_modules` and
+  Links are not followed (a root that is itself a link is skipped, silently, however it is spelled: a trailing slash or `/.` does not change that); `.git`, `node_modules` and
   `.ticket` (so `.ticket/imported`) are not entered.
   It exits 0 whether or not it found any, and 2 for a root that is not a directory.
 

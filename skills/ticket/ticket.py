@@ -2287,6 +2287,7 @@ def find_cards(roots: Sequence[str | Path]) -> list[str]:
 
     found: set[str] = set()
     for root in roots:
+        root = os.path.normpath(root)  # one spelling for the check and the walk: no trailing separator or dot segment
         if os.path.islink(root):
             continue  # a root that is itself a link is not followed either
         for current, names, files in os.walk(root, followlinks=False):
@@ -2546,7 +2547,13 @@ def _import_locked(store: MarkdownStore, directory: int, name: str, cli: str, dr
         if replayed != card:
             raise _Skip("the ledger item reads differently from the card, so the card was left in place")
         try:
-            os.rename(name, name, src_dir_fd=directory, dst_dir_fd=moved)
+            # Published without replacement: link fails if the name appeared since the check, then the card is unlinked.
+            os.link(name, name, src_dir_fd=directory, dst_dir_fd=moved, follow_symlinks=False)
+            os.unlink(name, dir_fd=directory)
+        except FileExistsError as exc:
+            raise _Skip("imported copy already exists") from exc
+        except NotImplementedError as exc:
+            raise _Skip("this platform cannot link between directory descriptors, so the card was left in place") from exc
         except OSError as exc:
             raise _Skip(
                 f"the card is in the ledger but could not be moved aside ({exc}); run the import again to retry the move"

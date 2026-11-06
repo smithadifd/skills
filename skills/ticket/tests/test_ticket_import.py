@@ -125,11 +125,11 @@ def test_a_stop_after_the_ledger_write_is_finished_by_a_rerun(repo, fake, capsys
     build(repo, Source(), "S1")
     before = card_bytes(repo)
 
-    def refuse_rename(*args, **kwargs):
+    def refuse_link(*args, **kwargs):
         raise OSError("disk went away")
 
     with monkeypatch.context() as patch:
-        patch.setattr(ticket.os, "rename", refuse_rename)
+        patch.setattr(ticket.os, "link", refuse_link)
         code, lines, _ = run(capsys, "import-cards", str(repo))
     assert code == 1 and lines[0].startswith(f"skipped {KEY}: the card is in the ledger but could not be moved aside")
     assert card_bytes(repo) == before
@@ -139,6 +139,27 @@ def test_a_stop_after_the_ledger_write_is_finished_by_a_rerun(repo, fake, capsys
     assert (code, lines) == (0, [f"already imported {KEY}"])
     assert fake.events() == events
     assert card_bytes(repo) is None and (repo / ".ticket" / "imported" / f"{KEY}.md").read_bytes() == before
+
+
+def test_a_destination_created_between_the_check_and_the_publish_is_not_replaced(repo, fake, capsys, monkeypatch):
+    build(repo, Source(), "S1")
+    before = card_bytes(repo)
+    real_check = ticket._imported_directory
+
+    def check_then_race(directory, name, **kwargs):
+        moved = real_check(directory, name, **kwargs)  # the absence check passes ...
+        if moved is not None:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=moved)  # ... then the name appears
+            os.write(fd, b"someone else's file\n")
+            os.close(fd)
+        return moved
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ticket, "_imported_directory", check_then_race)
+        code, lines, _ = run(capsys, "import-cards", str(repo))
+    assert (code, lines) == (1, [f"skipped {KEY}: imported copy already exists"])
+    assert (repo / ".ticket" / "imported" / f"{KEY}.md").read_bytes() == b"someone else's file\n"
+    assert card_bytes(repo) == before
 
 
 # --- Cards that are refused stay where they are -------------------------------------------------------
@@ -385,6 +406,9 @@ def test_find_cards_skips_a_root_that_is_a_link(tmp_path, capsys):
     os.symlink(real, tmp_path / "link")
     assert run(capsys, "find-cards", str(tmp_path / "link"))[:2] == (0, [])
     assert run(capsys, "find-cards", str(tmp_path / "link"), str(real))[:2] == (0, [str(real)])
+    for spelling in ("link/", "link/.", "link//"):
+        assert run(capsys, "find-cards", str(tmp_path) + "/" + spelling)[:2] == (0, [])
+    assert run(capsys, "find-cards", str(real) + "/")[:2] == (0, [str(real)])
 
 
 # --- The notice /ticket prints on the ledger store ------------------------------------------------------
