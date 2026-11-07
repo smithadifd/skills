@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import ticket
-from ledger_support import FakeLedger
+from ledger_support import FakeLedger, machine
 from ticket_support import (
     A, B, F8, F9, F10, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass,
     read_card, refusal, store,
@@ -497,6 +497,7 @@ def _release(repo, env):
 def test_I20_store_selection(repo, tmp_path, monkeypatch, case):
     env = {name: value for name, value in os.environ.items() if name != "TICKET_LEDGER_CLI"}
     if case == "empty selector is unset":
+        machine(monkeypatch, tmp_path)  # no ledger on PATH, whatever this machine has installed
         monkeypatch.setenv("TICKET_LEDGER_CLI", "")
         assert isinstance(ticket.choose_store(repo, KEY, TITLE), ticket.MarkdownStore)
     elif case == "selector names the ledger":

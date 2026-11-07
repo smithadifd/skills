@@ -1843,6 +1843,8 @@ LEDGER_OPT_OUT = "none"
 LEDGER_COMMAND = "ledger"
 # The ledger picks no default database: this variable names it.
 LEDGER_DATABASE = "LEDGER_DB"
+# Seconds the capability probe (``append-many --help``) may run before the CLI counts as not running.
+LEDGER_PROBE_TIMEOUT = 10.0
 
 
 @dataclass(frozen=True)
@@ -1906,7 +1908,12 @@ def choose_store(repo: str | Path, key: str, title: str) -> Store:
 
 def _probe_ledger(cli: str) -> None:
     try:
-        result = subprocess.run([cli, "append-many", "--help"], input="", capture_output=True, encoding="utf-8", check=False)
+        result = subprocess.run(
+            [cli, "append-many", "--help"], input="", capture_output=True, encoding="utf-8", errors="replace",
+            check=False, timeout=LEDGER_PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _ledger_incompatible(cli, f"append-many --help did not finish within {LEDGER_PROBE_TIMEOUT:g}s") from exc
     except OSError as exc:
         raise _ledger_incompatible(cli, str(exc)) from exc
     if result.returncode != 0 or "--expect-revision" not in result.stdout:

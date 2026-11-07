@@ -845,6 +845,30 @@ def test_an_incompatible_cli_on_path_gives_markdown_with_a_reason_not_a_refusal(
     assert [call.argv for call in fake.calls()] == [["append-many", "--help"]]
 
 
+def test_a_probe_that_hangs_on_an_auto_found_cli_gives_markdown_and_on_a_named_cli_is_refused(repo, tmp_path, monkeypatch):
+    fake = FakeLedger(tmp_path / "bin")
+    fake.help("hang")
+    machine(monkeypatch, tmp_path, fake)
+    monkeypatch.setattr(ticket, "LEDGER_PROBE_TIMEOUT", 0.5)
+    chosen = ticket.choose_store(repo, KEY, TITLE)
+    assert isinstance(chosen, ticket.MarkdownStore)
+    assert chosen.selection == f"markdown ({fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
+    monkeypatch.setenv("TICKET_LEDGER_CLI", str(fake.path))
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        ticket.choose_store(repo, KEY, TITLE)
+    assert refusal(excinfo) == "ledger_incompatible"
+    assert "did not finish within 0.5s" in str(excinfo.value)
+
+
+def test_a_probe_that_prints_non_utf8_on_an_auto_found_cli_gives_markdown(repo, tmp_path, monkeypatch):
+    fake = FakeLedger(tmp_path / "bin")
+    fake.help("non-utf8")
+    machine(monkeypatch, tmp_path, fake)
+    chosen = ticket.choose_store(repo, KEY, TITLE)
+    assert isinstance(chosen, ticket.MarkdownStore)
+    assert chosen.selection == f"markdown ({fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
+
+
 @pytest.mark.parametrize("database", ["unset", "empty", "missing"])
 def test_a_cli_on_path_without_a_usable_database_gives_markdown_and_is_never_probed(repo, tmp_path, monkeypatch, database):
     fake = FakeLedger(tmp_path / "bin")
