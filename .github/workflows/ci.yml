@@ -11,9 +11,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     env:
-      # The deny list lives in a repository variable, never in a tracked file.
+      # The deny list lives in a repository secret (masked in logs), never in a
+      # tracked file or a variable.
       # The lint and the public-vocabulary tests both read it.
-      NO_PERSON_DENY: ${{ vars.NO_PERSON_DENY }}
+      NO_PERSON_DENY: ${{ secrets.NO_PERSON_DENY }}
       OWNER: ${{ github.repository_owner }}
       REPO: ${{ github.event.repository.name }}
     steps:
