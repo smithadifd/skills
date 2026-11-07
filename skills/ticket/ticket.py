@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -1065,6 +1066,9 @@ class MarkdownStore:
     git-ignored; neither is ever staged or committed.
     """
 
+    # What ``choose_store`` chose and why, printed by ``open``; None on a handle built directly.
+    selection: str | None = None
+
     def __init__(self, repo: str | Path, key: str, title: str):
         if not _KEY.fullmatch(key):
             raise TicketError(f"unsafe ticket key: {key!r}")
@@ -1602,6 +1606,9 @@ class LedgerStore:
     claim, stamps, tried records and the closed status.
     """
 
+    # What ``choose_store`` chose and why, printed by ``open``; None on a handle built directly.
+    selection: str | None = None
+
     def __init__(self, cli: str | Path, key: str, title: str, repo: str | Path | None = None):
         if not _KEY.fullmatch(key):
             raise TicketError(f"unsafe ticket key: {key!r}")
@@ -1830,22 +1837,71 @@ class LedgerStore:
 # --- Store selection (design 6.3) -------------------------------------------
 
 LEDGER_SELECTOR = "TICKET_LEDGER_CLI"
+# The value of ``TICKET_LEDGER_CLI`` that keeps the markdown store whatever is installed.
+LEDGER_OPT_OUT = "none"
+# The name looked up on PATH when ``TICKET_LEDGER_CLI`` is unset or empty.
+LEDGER_COMMAND = "ledger"
+# The ledger picks no default database: this variable names it.
+LEDGER_DATABASE = "LEDGER_DB"
+
+
+@dataclass(frozen=True)
+class Selection:
+    """The store ``TICKET_LEDGER_CLI`` and the machine give: the ledger CLI to use (None for markdown) and why."""
+
+    cli: str | None
+    reason: str
+
+    @property
+    def line(self) -> str:
+        return f"{'ledger' if self.cli else 'markdown'} ({self.reason})"
+
+
+def select_store() -> Selection:
+    """Pick the store from the environment (design 6.3).
+
+    ``TICKET_LEDGER_CLI`` set to ``none`` (any case) is the markdown store. Set
+    to anything else, it names the ledger CLI: one that fails the capability
+    probe is refused ``ledger_incompatible`` rather than falling back. Unset or
+    empty, a ``ledger`` on PATH is used when ``LEDGER_DB`` names an existing
+    database and the CLI passes the same probe; every other case is the
+    markdown store with the reason, never a refusal.
+    """
+
+    value = os.environ.get(LEDGER_SELECTOR, "")
+    if value.strip().lower() == LEDGER_OPT_OUT:
+        return Selection(None, f"{LEDGER_SELECTOR}={LEDGER_OPT_OUT}")
+    if value:
+        _probe_ledger(value)
+        return Selection(value, f"{LEDGER_SELECTOR} names it")
+    found = shutil.which(LEDGER_COMMAND)
+    if found is None:
+        return Selection(None, f"no {LEDGER_COMMAND} CLI on PATH and {LEDGER_SELECTOR} is unset")
+    database = os.environ.get(LEDGER_DATABASE, "")
+    if not database:
+        return Selection(None, f"{found} is on PATH but {LEDGER_DATABASE} is not set, and the ledger picks no default database")
+    if not os.path.isfile(database):
+        return Selection(None, f"{found} is on PATH but {LEDGER_DATABASE} names {_one_line(database)}, which is not a file")
+    try:
+        _probe_ledger(found)
+    except StoreUnavailable:
+        return Selection(None, f"{found} on PATH lacks append-many or --expect-revision, or does not run")
+    return Selection(found, f"{found} found on PATH, {LEDGER_DATABASE} names {_one_line(database)}")
 
 
 def choose_store(repo: str | Path, key: str, title: str) -> Store:
-    """The ledger store when ``TICKET_LEDGER_CLI`` names the ledger's CLI, else the markdown store.
+    """The ledger store or the markdown store, as ``select_store`` decides; the handle carries the chosen store and why.
 
-    An empty value counts as unset. The selected CLI is probed first: one
-    whose ``append-many --help`` does not exit 0 naming ``--expect-revision``
-    is refused ``ledger_incompatible`` before anything is read or written,
-    rather than falling back.
+    An explicitly named CLI that fails the capability probe (its
+    ``append-many --help`` does not exit 0 naming ``--expect-revision``) is
+    refused ``ledger_incompatible`` before anything is read or written. A CLI
+    found on PATH that fails it is not a refusal: the markdown store is chosen.
     """
 
-    cli = os.environ.get(LEDGER_SELECTOR, "")
-    if cli:
-        _probe_ledger(cli)
-        return LedgerStore(cli, key, title, repo)
-    return MarkdownStore(repo, key, title)
+    chosen = select_store()
+    store: Store = LedgerStore(chosen.cli, key, title, repo) if chosen.cli else MarkdownStore(repo, key, title)
+    store.selection = chosen.line
+    return store
 
 
 def _probe_ledger(cli: str) -> None:
@@ -1944,7 +2000,12 @@ class TicketPass:
         session._phase = state
         notice = getattr(store, "leftover_notice", None)
         leftover = notice() if callable(notice) else None
-        session.reconciliation = (*flags, leftover) if leftover else tuple(flags)
+        stored = getattr(store, "selection", None)
+        session.reconciliation = (
+            *((f"store: {stored}",) if stored else ()),
+            *flags,
+            *((leftover,) if leftover else ()),
+        )
         if session._identity is not None:
             session._plan = PlanCard.from_snapshot(card["plan"])
             session._plan.review = _passing_final(card, session._identity) if state in ("outward_go", "closed") else None
@@ -2653,6 +2714,7 @@ __all__ = [
     "TicketPass",
     "TicketSource",
     "choose_store",
+    "select_store",
     "find_cards",
     "import_command",
     "import_repo",
@@ -2662,15 +2724,15 @@ __all__ = [
 def _import_cards_command(repos: Sequence[str], dry_run: bool) -> int:
     """Exit 0 when every card imported or was already imported, 1 when any was skipped, 2 on usage or a store refusal."""
 
-    cli = os.environ.get(LEDGER_SELECTOR, "")
-    if not cli:
-        print(f"ticket.py: {LEDGER_SELECTOR} is not set; import-cards needs the ledger CLI. No card was read.", file=sys.stderr)
-        return 2
     try:
-        _probe_ledger(cli)
+        chosen = select_store()
     except StoreUnavailable as exc:
         print(f"ticket.py: {exc}", file=sys.stderr)
         return 2
+    if chosen.cli is None:
+        print(f"ticket.py: import-cards needs the ledger store, and {chosen.line} was chosen. No card was read.", file=sys.stderr)
+        return 2
+    cli = chosen.cli
     missing = [repo for repo in repos if not os.path.isdir(repo)]
     if missing:
         print(f"ticket.py: not a directory: {', '.join(missing)}. No card was read.", file=sys.stderr)
