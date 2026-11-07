@@ -258,6 +258,33 @@ else
   note_fail "a non-git tree should fail the lint: $out"
 fi
 
+# The deny list reaches CI only through the secrets context. The workflow must
+# map NO_PERSON_DENY from the secret of the same name, and no tracked file may
+# name the variables context for it (the needle is assembled here so this file
+# does not match itself).
+workflow="$repo_dir/.github/workflows/ci.yml"
+needle="vars"".NO_PERSON_""DENY"
+if [ ! -r "$workflow" ]; then
+  note_fail ".github/workflows/ci.yml is unreadable; the deny list source cannot be checked"
+else
+  wf_lines=$(grep -c 'NO_PERSON_DENY:' "$workflow")
+  wf_ok=$(grep -cE '^[[:space:]]+NO_PERSON_DENY: \$\{\{ secrets\.NO_PERSON_DENY \}\}[[:space:]]*$' "$workflow")
+  if [ "$wf_lines" -eq 1 ] && [ "$wf_ok" -eq 1 ]; then
+    printf 'PASS: the workflow reads the deny list from the secrets context\n'
+  else
+    note_fail ".github/workflows/ci.yml must set NO_PERSON_DENY only from the secrets context"
+  fi
+fi
+hits=$(git -C "$repo_dir" grep -IlF -e "$needle")
+grep_status=$?
+if [ "$grep_status" -eq 1 ]; then
+  printf 'PASS: no tracked file reads the deny list from the variables context\n'
+elif [ "$grep_status" -eq 0 ]; then
+  note_fail "tracked file reads the deny list from the variables context: $hits"
+else
+  note_fail "cannot search tracked files for the deny list source"
+fi
+
 # The real tree passes.
 if out=$(bash "$lint" "$repo_dir" 2>&1); then
   printf 'PASS: the repository passes the lint\n'
