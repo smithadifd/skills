@@ -258,24 +258,49 @@ else
   note_fail "a non-git tree should fail the lint: $out"
 fi
 
-# The deny list reaches CI only through the secrets context. The workflow must
-# map NO_PERSON_DENY from the secret of the same name, and no tracked file may
-# name the variables context for it (the needle is assembled here so this file
-# does not match itself).
-workflow="$repo_dir/.github/workflows/ci.yml"
+# The deny list reaches CI only through the secrets context, and no workflow
+# reads the variables context. Rule 1: no workflow file uses the variables
+# context at all (the word, then a dot or an opening square bracket, any case).
+# Rule 2: NO_PERSON_DENY (any case) appears in workflow files only on comment
+# lines or on the single env line that maps it from the secrets context. The
+# needle below is assembled so this file does not match itself.
 needle="vars"".NO_PERSON_""DENY"
-if [ ! -r "$workflow" ]; then
-  note_fail ".github/workflows/ci.yml is unreadable; the deny list source cannot be checked"
-else
-  wf_lines=$(grep -c 'NO_PERSON_DENY:' "$workflow")
-  wf_ok=$(grep -cE '^[[:space:]]+NO_PERSON_DENY: \$\{\{ secrets\.NO_PERSON_DENY \}\}[[:space:]]*$' "$workflow")
-  if [ "$wf_lines" -eq 1 ] && [ "$wf_ok" -eq 1 ]; then
-    printf 'PASS: the workflow reads the deny list from the secrets context\n'
-  else
-    note_fail ".github/workflows/ci.yml must set NO_PERSON_DENY only from the secrets context"
-  fi
+wf_dir="$repo_dir/.github/workflows"
+wf_env=0
+wf_bad=""
+wf_files=$(find "$wf_dir" -type f 2>/dev/null)
+if [ ! -d "$wf_dir" ] || [ -z "$wf_files" ]; then
+  wf_bad="no workflow files found under .github/workflows"
 fi
-hits=$(git -C "$repo_dir" grep -IlF -e "$needle")
+while IFS= read -r wf; do
+  [ -n "$wf" ] || continue
+  if [ ! -r "$wf" ]; then
+    wf_bad="$wf_bad $wf is unreadable;"
+    continue
+  fi
+  vhits=$(grep -inE 'vars[[:space:]]*[.[]' "$wf")
+  [ -z "$vhits" ] || wf_bad="$wf_bad $wf uses the variables context: $vhits;"
+  nhits=$(grep -in 'NO_PERSON_DENY' "$wf" | grep -vE '^[0-9]+:[[:space:]]*#')
+  while IFS= read -r nl; do
+    [ -n "$nl" ] || continue
+    if printf '%s\n' "$nl" | grep -qE '^[0-9]+:[[:space:]]+NO_PERSON_DENY: \$\{\{ secrets\.NO_PERSON_DENY \}\}[[:space:]]*$'; then
+      wf_env=$((wf_env + 1))
+    else
+      wf_bad="$wf_bad $wf line ${nl%%:*} names NO_PERSON_DENY outside the secrets mapping;"
+    fi
+  done <<EOF
+$nhits
+EOF
+done <<EOF
+$wf_files
+EOF
+[ "$wf_env" -eq 1 ] || wf_bad="$wf_bad expected exactly one secrets mapping for NO_PERSON_DENY, found $wf_env;"
+if [ -z "$wf_bad" ]; then
+  printf 'PASS: the workflows read the deny list only from the secrets context\n'
+else
+  note_fail "workflows must read NO_PERSON_DENY only from the secrets context:$wf_bad"
+fi
+hits=$(git -C "$repo_dir" grep -IilF -e "$needle")
 grep_status=$?
 if [ "$grep_status" -eq 1 ]; then
   printf 'PASS: no tracked file reads the deny list from the variables context\n'
