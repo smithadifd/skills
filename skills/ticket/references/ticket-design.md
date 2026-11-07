@@ -4,7 +4,7 @@ The code is checked against `test-matrix.md`: every behavior here maps to a name
 Scope: `skills/ticket/` (the pass, the plan identity, resume, both stores). The ledger CLI it relies on
 is an external CLI that implements the contract in `SKILL.md`, at the version that has `append --expect-revision` and `append-many`.
 Both stores are built: the markdown store (section 6.1) and the ledger store (section 6.2, matrix
-section H). A configured `TICKET_LEDGER_CLI` selects the ledger store (section 6.3).
+section H). A ledger CLI on `PATH` with a database, or a named `TICKET_LEDGER_CLI`, selects the ledger store (section 6.3).
 
 ## 0. The four decisions behind the resume and plan-identity rules
 
@@ -686,10 +686,27 @@ refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once
 
 ### 6.3 Store selection
 
-`choose_store(repo, key, title)`: the ledger store when `TICKET_LEDGER_CLI` names an executable (after
-the capability probe), else the markdown store. An empty value counts as unset. The `release` command
-selects the same way. A selected CLI that fails the capability probe is refused `ledger_incompatible`
-before anything is read or written, and the `release` command exits 2.
+`choose_store(repo, key, title)` reads the environment once (`select_store`) and returns the store with
+the choice and its reason on it:
+
+| `TICKET_LEDGER_CLI` | Other inputs | Store | Reason printed |
+|---|---|---|---|
+| `none`, any case | any | markdown | `TICKET_LEDGER_CLI=none` |
+| any other non-empty value | the CLI passes the capability probe | ledger, that CLI | `TICKET_LEDGER_CLI names it` |
+| any other non-empty value | the CLI fails the probe | refused `ledger_incompatible`, nothing read or written | none (a refusal) |
+| unset or empty | no `ledger` on `PATH` | markdown | `no ledger CLI on PATH and TICKET_LEDGER_CLI is unset` |
+| unset or empty | `ledger` on `PATH`, `LEDGER_DB` unset, empty or not an existing file | markdown | names `LEDGER_DB` (the ledger picks no default database) |
+| unset or empty | `ledger` on `PATH`, `LEDGER_DB` an existing file, probe fails | markdown | `<cli> on PATH lacks append-many or --expect-revision, or does not run` |
+| unset or empty | `ledger` on `PATH`, `LEDGER_DB` an existing file, probe passes | ledger, the CLI found on `PATH` | `<cli> found on PATH, LEDGER_DB names <path>` |
+
+The capability probe is the one of 6.2: `<cli> append-many --help` exits 0 and names `--expect-revision`.
+An explicitly named CLI is the person's own word, so a failure is a refusal; a CLI merely found on `PATH`
+is a guess, so a failure is the markdown store. The default fails closed: anything unreadable or ambiguous
+about the CLI or the database is markdown, with the reason. The `release` and `import-cards` commands
+select the same way (`import-cards` exits 2 with the reason when the choice is markdown).
+
+The open prints the choice: `TicketPass.open` puts `store: <ledger|markdown> (<reason>)` first in
+`reconciliation`. A store built directly, not through `choose_store`, prints no such line.
 
 ### 6.4 Importing markdown cards into the ledger
 
@@ -722,7 +739,7 @@ ledger write is confirmed.
   that is a link or not a directory is reported as `skipped .ticket: ...`.
   Exit status: 0 when every card imported or was already imported (a repository with no card counts),
   1 when any card was skipped, 2 on usage (a repository that is not a directory) or a store refusal
-  (`TICKET_LEDGER_CLI` unset, or a CLI that fails the 6.2 capability probe), before any card is read.
+  (the 6.3 selection gives the markdown store, or a named CLI fails the 6.2 capability probe), before any card is read.
   `--dry-run` reads and validates, takes no lock it would have to create, writes nothing, creates no
   directory and moves nothing; it checks the moved-aside name too, so a taken
   `.ticket/imported/<key>.md` is the same `skipped` line as in a real run.
@@ -774,7 +791,7 @@ An item that already exists is imported over only when its exported events are e
 (same keys, kinds and payloads). Anything else, including the same key in two repositories with different
 cards, is `ledger item exists with different history`: never a merge, never a second item.
 
-**The notice.** When a pass opens on the ledger store and `<repo>/.ticket/` holds unimported `*.md`
+**The notice.** When a pass opens on the ledger store (selected by name or found on `PATH`) and `<repo>/.ticket/` holds unimported `*.md`
 cards, `TicketPass.open` adds one line to `reconciliation`: it names the exact command
 (`python3 <skill-dir>/ticket.py import-cards <repo>`, absolute and shell-quoted) and is printed once per
 open. The markdown store never prints it.

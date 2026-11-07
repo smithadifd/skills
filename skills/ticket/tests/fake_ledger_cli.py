@@ -23,6 +23,7 @@ import json
 import os
 import secrets
 import sys
+import time
 
 EPHEMERAL = ("session.opened", "session.closed", "item.progress")
 FIELDS = ("kind", "payload", "item_id", "idempotency_key", "payload_version", "channel", "provenance_class")
@@ -164,6 +165,17 @@ def main():
     verb = args[0] if args else ""
     call = {"argv": argv, "stdin": stdin}
     state["calls"].append(call)
+    if verb == "append-many" and "--help" in args and state["help"] == "hang":
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        time.sleep(60)
+        return 0
+    if verb == "append-many" and "--help" in args and state["help"] == "non-utf8":
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        sys.stdout.buffer.write(b"usage: ledger append-many \xff\xfe not text\n")
+        sys.stdout.buffer.flush()
+        return 0
     if verb == "append-many" and "--help" in args:
         status, out = HELP[state["help"]]
     else:

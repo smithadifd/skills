@@ -67,16 +67,30 @@ token is a digest of the card as the pass last read or wrote it. If anything
 changed the card since then, another session or a hand edit, the write is
 refused as `stale` and the pass ends. Open it again to see the change.
 
-`choose_store` returns the markdown store unless `TICKET_LEDGER_CLI` names an
-external ledger CLI that implements the contract below (an empty value counts as
-unset; this repository does not ship one); then it returns the ledger store,
-which keeps the card as the events of one ledger item. There the token is the
-item's newest event id, and each step is one `append-many` under
+`choose_store` picks the store from the environment. This repository does not
+ship a ledger CLI; the contract below is what one must implement.
+
+- `TICKET_LEDGER_CLI=none` (any case) always gives the markdown store.
+- `TICKET_LEDGER_CLI` set to anything else names the ledger CLI. A CLI that
+  fails the contract check is refused (`ledger_incompatible`) before anything is
+  read or written; it never falls back.
+- `TICKET_LEDGER_CLI` unset or empty: a `ledger` on `PATH` is used when
+  `LEDGER_DB` names an existing database file (the ledger picks no default
+  database) and the CLI passes the same contract check. Every other case, no
+  `ledger` on `PATH`, no usable `LEDGER_DB`, or a `ledger` that fails the check,
+  gives the markdown store and is never a refusal.
+
+The ledger store keeps the card as the events of one ledger item. There the
+token is the item's newest event id, and each step is one `append-many` under
 `--expect-revision`, so concurrent writers never interleave half a step and a
-lost race is `stale`. A CLI without `append-many` or `--expect-revision` is
-refused (`ledger_incompatible`) before anything is read or written. Any other
-refusal by the CLI is `ledger_refused` and carries the CLI's own code and
-message; never retry it as if it were `stale`.
+lost race is `stale`. Any refusal by the CLI after selection is `ledger_refused`
+and carries the CLI's own code and message; never retry it as if it were `stale`.
+
+The open card says which store was chosen and why: the first line of
+`session.reconciliation` is `store: ledger (<reason>)` or `store: markdown
+(<reason>)`. Read it to the person; a machine that expected the ledger and
+sees `markdown` learns here what to fix (set `LEDGER_DB`, put `ledger` on
+`PATH`), and `TICKET_LEDGER_CLI=none` is how to keep markdown on purpose.
 
 The ledger CLI contract. Every call is `<cli> --json <verb> ...` and the CLI
 prints one JSON envelope, `{"ok": true, "data": ...}` or
@@ -98,9 +112,9 @@ prints one JSON envelope, `{"ok": true, "data": ...}` or
 ## Moving markdown cards into the ledger
 
 A machine that ran `/ticket` before it switched to the ledger store still holds
-`.ticket/<key>.md` cards. After you set `TICKET_LEDGER_CLI` (or after the
-store choice starts picking the ledger), run these once, from this skill's
-folder or by its full path:
+`.ticket/<key>.md` cards. Once the store choice picks the ledger (a ledger on
+`PATH` with `LEDGER_DB` set, or `TICKET_LEDGER_CLI` naming one), run these
+once, from this skill's folder or by its full path:
 
 - `python3 ${CLAUDE_SKILL_DIR}/ticket.py find-cards [<root>...]` lists, one
   absolute path per line, every git repository under the roots (default: the
@@ -117,7 +131,8 @@ folder or by its full path:
   writes nothing. `--dry-run` writes and moves nothing, prints `would import
   <key>`, and reports the same `skipped` a real run would for a taken
   `.ticket/imported/<key>.md`. Exit 0 when every card imported or was already imported, 1 when any
-  was skipped, 2 when `TICKET_LEDGER_CLI` is unset or its CLI fails the
+  was skipped, 2 when the store choice above is not the ledger (`none`, or no
+  usable ledger found; the message names the reason) or the named CLI fails the
   capability probe (before any card is read).
   `.ticket/imported/` must be git-ignored like the card; if it is not, the
   repository is refused and no ignore file is edited.
@@ -156,7 +171,7 @@ the person confirms that session is gone, release it with
 The command a refusal prints is shell-quoted word by word, so it is safe to copy.
 It refuses unless that id is the live claim. It exits 0 when it released the
 claim, 1 when it refused, and 2 when `TICKET_LEDGER_CLI` names an incompatible
-ledger CLI. With the ledger store it releases the claim on the ledger item and
+ledger CLI. It selects the store the same way `choose_store` does. With the ledger store it releases the claim on the ledger item and
 ignores `--repo`.
 
 ## 1. Orient

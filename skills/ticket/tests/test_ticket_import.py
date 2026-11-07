@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 import ticket
-from ledger_support import FakeLedger, open_ledger
+from ledger_support import FakeLedger, machine, open_ledger
 from ticket_support import KEY, TITLE, Source, build, card_bytes, card_path, read_card
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "IC-ZOD-BUMP.md"
@@ -409,10 +409,29 @@ def test_without_a_ledger_cli_that_passes_the_probe_nothing_is_read(repo, fake, 
     code, lines, err = run(capsys, "import-cards", str(repo))
     assert (code, lines) == (2, []) and "lacks append-many or --expect-revision" in err
     assert [call.verb for call in fake.calls()] == ["append-many"] and fake.events() == []
-    monkeypatch.delenv("TICKET_LEDGER_CLI")
+    machine(monkeypatch, repo.parent)  # no ledger on PATH and the variable unset
     code, lines, err = run(capsys, "import-cards", str(repo))
-    assert (code, lines) == (2, []) and "TICKET_LEDGER_CLI is not set" in err
+    assert (code, lines) == (2, []) and "markdown (no ledger CLI on PATH and TICKET_LEDGER_CLI is unset)" in err
     assert (repo / ".ticket" / f"{CLOSED}.md").exists()
+    monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
+    code, lines, err = run(capsys, "import-cards", str(repo))
+    assert (code, lines) == (2, []) and "markdown (TICKET_LEDGER_CLI=none)" in err
+    assert (repo / ".ticket" / f"{CLOSED}.md").exists()
+
+
+def test_import_cards_with_the_variable_unset_uses_the_compatible_cli_on_path(repo, tmp_path, capsys, monkeypatch):
+    put_fixture(repo)
+    ledger = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, ledger)
+    assert run(capsys, "import-cards", str(repo))[:2] == (0, [f"imported {CLOSED}"])
+    assert (repo / ".ticket" / "imported" / f"{CLOSED}.md").exists()
+    assert ledger_card(ledger, CLOSED, TITLE)["status"] == "closed"
+    # ... and the opt-out keeps the cards where they are, though the same CLI is on PATH.
+    put_fixture(repo, "OTHER-1")
+    monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
+    code, lines, err = run(capsys, "import-cards", str(repo))
+    assert (code, lines) == (2, []) and "TICKET_LEDGER_CLI=none" in err
+    assert (repo / ".ticket" / "OTHER-1.md").exists()
 
 
 def test_a_repository_that_is_not_a_directory_is_a_usage_error(repo, fake, capsys, tmp_path):
@@ -485,22 +504,34 @@ def test_an_open_on_the_ledger_store_prints_the_import_command_once(repo, fake, 
     put_fixture(repo)
     put_fixture(repo, "OTHER-1")
     session = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
-    assert session.reconciliation == (import_line(repo),)
+    assert session.reconciliation[1:] == (import_line(repo),)
+    assert session.reconciliation[0].startswith("store: ledger (TICKET_LEDGER_CLI names it)")
     session.end()
     again = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
-    assert again.reconciliation == (import_line(repo),)
+    assert again.reconciliation[1:] == (import_line(repo),)
     again.end()
     assert run(capsys, "import-cards", str(repo))[0] == 1  # OTHER-1 is the closed card under another key: refused
     (repo / ".ticket" / "OTHER-1.md").unlink()
     clean = ticket.TicketPass.open("EK-99", Source(), ticket.choose_store(repo, "EK-99", TITLE))
-    assert clean.reconciliation == ()
+    assert clean.reconciliation[1:] == ()
 
 
-def test_the_notice_is_absent_on_the_markdown_store(repo, monkeypatch):
+def test_the_notice_is_printed_on_an_auto_selected_ledger_store(repo, tmp_path, monkeypatch):
     put_fixture(repo)
-    monkeypatch.delenv("TICKET_LEDGER_CLI", raising=False)
+    ledger = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, ledger)  # TICKET_LEDGER_CLI unset; the CLI is found on PATH
+    store = ticket.choose_store(repo, KEY, TITLE)
+    assert isinstance(store, ticket.LedgerStore)
+    session = ticket.TicketPass.open(KEY, Source(), store)
+    assert session.reconciliation == (f"store: {store.selection}", import_line(repo))
+    session.end()
+
+
+def test_the_notice_is_absent_on_the_markdown_store(repo, tmp_path, monkeypatch):
+    put_fixture(repo)
+    machine(monkeypatch, tmp_path)
     store = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(store, ticket.MarkdownStore)
     session = ticket.TicketPass.open(KEY, Source(), store)
-    assert session.reconciliation == ()
+    assert session.reconciliation == (f"store: {store.selection}",)
     session.end()
