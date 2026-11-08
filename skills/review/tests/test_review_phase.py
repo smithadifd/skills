@@ -2114,8 +2114,9 @@ def test_bullets_continuations_and_exact_clean_markers_parse(issues, description
 
 
 # --- nested sub-bullets -----------------------------------------------------
-# A bullet indented deeper than the section's first bullet joins the bullet
-# before it; bullets at the first bullet's indent each start a finding.
+# A bullet indented at least two characters deeper than the section's first
+# bullet joins the bullet before it; bullets at the first bullet's indent, or
+# one character off it, each start a finding.
 
 
 def _issues_findings(issues: str) -> list[dict]:
@@ -2138,10 +2139,38 @@ def test_sub_bullets_fold_into_their_parent_finding():
     )
 
 
-def test_a_tab_indented_sub_bullet_folds():
-    # A tab counts as one character of indent, deeper than a column-0 parent.
-    findings = _issues_findings("- `a.py:1` — parent issue\n\t- tab sub point")
-    assert [f["description"] for f in findings] == ["parent issue - tab sub point"]
+def test_a_tab_counts_as_one_character_of_indent():
+    # One tab is one character: a sibling of a column-0 parent. Two tabs are
+    # two characters deep, so that bullet folds.
+    one_tab = _issues_findings("- `a.py:1` — parent issue\n\t- tab sibling")
+    assert [f["description"] for f in one_tab] == ["parent issue", "tab sibling"]
+    two_tabs = _issues_findings("- `a.py:1` — parent issue\n\t\t- two-tab sub point")
+    assert [f["description"] for f in two_tabs] == ["parent issue - two-tab sub point"]
+
+
+def test_a_bullet_one_space_deeper_is_a_sibling():
+    # One extra space is not nesting (CommonMark): each bullet is a finding.
+    findings = _issues_findings("- first issue\n - second issue")
+    assert [f["description"] for f in findings] == ["first issue", "second issue"]
+
+
+def test_a_located_sub_bullet_under_a_located_parent_stays_its_own_finding():
+    findings = _issues_findings("- a.py:1 - parent\n  - b.py:2 - separate")
+    assert [(f["rule"], f["file"], f["line"], f["description"]) for f in findings] == [
+        ("issue", "a.py", 1, "parent"),
+        ("issue", "b.py", 2, "separate"),
+    ]
+
+
+def test_a_located_sub_bullet_under_an_unlocated_parent_stays_its_own_finding():
+    findings = _issues_findings(
+        "- Round findings:\n  - `a.py:1` — first issue\n  - `b.py:2` — second issue"
+    )
+    assert [(f["file"], f["line"], f["description"]) for f in findings] == [
+        (None, None, "Round findings:"),
+        ("a.py", 1, "first issue"),
+        ("b.py", 2, "second issue"),
+    ]
 
 
 def test_a_uniformly_indented_list_still_splits_per_bullet():
@@ -2153,6 +2182,9 @@ def test_a_uniformly_indented_list_still_splits_per_bullet():
         ("b.py", 2, "second issue"),
         ("c.py", 3, "third issue"),
     ]
+    # Unlocated bullets, which the locator exemption does not keep apart.
+    findings = _issues_findings("  - first issue\n  - second issue\n  - third issue")
+    assert [f["description"] for f in findings] == ["first issue", "second issue", "third issue"]
 
 
 def test_a_flat_list_is_unchanged():
@@ -2164,6 +2196,9 @@ def test_a_flat_list_is_unchanged():
         ("b.py", 2, "second issue"),
         ("c.py", 3, "third issue"),
     ]
+    # Unlocated bullets, which the locator exemption does not keep apart.
+    findings = _issues_findings("- first issue\n- second issue\n- third issue")
+    assert [f["description"] for f in findings] == ["first issue", "second issue", "third issue"]
 
 
 def test_a_tagged_sub_bullet_starts_its_own_finding():
@@ -2181,10 +2216,15 @@ def test_a_tagged_sub_bullet_starts_its_own_finding():
 
 
 @pytest.mark.parametrize("marker", ["- none", "- <finding>"], ids=["clean-marker", "placeholder"])
-def test_a_sub_bullet_under_a_marker_bullet_is_not_folded_into_it(marker):
-    findings = _issues_findings(f"{marker}\n  - a.py:7 — harden")
+@pytest.mark.parametrize(
+    "sub, description",
+    [("a.py:7 — harden", "harden"), ("harden `a.py:7`", "harden `a.py:7`")],
+    ids=["located", "unlocated"],
+)
+def test_a_sub_bullet_under_a_marker_bullet_is_not_folded_into_it(marker, sub, description):
+    findings = _issues_findings(f"{marker}\n  - {sub}")
     assert [(f["rule"], f["file"], f["line"], f["description"]) for f in findings] == [
-        ("issue", "a.py", 7, "harden"),
+        ("issue", "a.py", 7, description),
     ]
 
 
