@@ -455,19 +455,23 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
     never a silently dropped paragraph. A well-formed `Resolved carried:` line
     is skipped as if blank: it is neither content nor prose.
 
-    A bullet indented deeper than the section's first bullet is a sub-bullet:
-    it joins the preceding bullet the way an indented paragraph line does,
-    never starting a finding of its own. Indent is the count of leading
-    whitespace characters (a tab is one). Two cases keep a deeper bullet as
-    its own entry: one whose text opens with a `[BUG]` or `[SECURITY]` tag (an
-    open bug is never folded into a note), and any deeper bullet under a clean
-    marker or placeholder bullet (folding into the marker would hide it).
+    A bullet indented at least two characters deeper than the section's
+    first bullet is a sub-bullet: it joins the preceding bullet the way an
+    indented paragraph line does, never starting a finding of its own. Indent
+    is the count of leading whitespace characters (a tab is one); a bullet one
+    character deeper is a sibling, as in CommonMark. Three cases keep a deeper
+    bullet as its own entry: one whose text opens with a `[BUG]` or
+    `[SECURITY]` tag (an open bug is never folded into a note), one whose text
+    opens with its own `path:line` locator (folding would lose its file and
+    line), and any deeper bullet under a clean marker or placeholder bullet
+    (folding into the marker would hide it).
     """
     bullets: list[str] = []
     had_content = False
     saw_clean = False
     saw_foreign_prose = False
-    # Indent of the section's first bullet; deeper bullets are sub-bullets.
+    # Indent of the section's first bullet; a bullet at least two characters
+    # deeper is a sub-bullet.
     ref_indent: int | None = None
     # Whether the latest bullet at the reference level may take sub-bullets:
     # false after a clean marker or placeholder, so a sub-bullet under one
@@ -489,8 +493,8 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
             indent = len(line) - len(line.lstrip())
             if ref_indent is None:
                 ref_indent = indent
-            deeper = bool(bullets) and indent > ref_indent
-            if deeper and fold_ok and not _TAG.match(text):
+            deeper = bool(bullets) and indent >= ref_indent + 2
+            if deeper and fold_ok and not (_TAG.match(text) or _LOCATOR.match(text)):
                 bullets[-1] = bullets[-1] + " " + line.strip()
             else:
                 bullets.append(text)
