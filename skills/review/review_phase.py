@@ -454,11 +454,25 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
     The caller should treat that as a parse failure, never a silent zero and
     never a silently dropped paragraph. A well-formed `Resolved carried:` line
     is skipped as if blank: it is neither content nor prose.
+
+    A bullet indented deeper than the section's first bullet is a sub-bullet:
+    it joins the preceding bullet the way an indented paragraph line does,
+    never starting a finding of its own. Indent is the count of leading
+    whitespace characters (a tab is one). Two cases keep a deeper bullet as
+    its own entry: one whose text opens with a `[BUG]` or `[SECURITY]` tag (an
+    open bug is never folded into a note), and any deeper bullet under a clean
+    marker or placeholder bullet (folding into the marker would hide it).
     """
     bullets: list[str] = []
     had_content = False
     saw_clean = False
     saw_foreign_prose = False
+    # Indent of the section's first bullet; deeper bullets are sub-bullets.
+    ref_indent: int | None = None
+    # Whether the latest bullet at the reference level may take sub-bullets:
+    # false after a clean marker or placeholder, so a sub-bullet under one
+    # stays its own entry exactly as before.
+    fold_ok = False
     i = start
     while i < len(lines):
         line = lines[i]
@@ -471,7 +485,17 @@ def _bullets(lines: list[str], start: int) -> tuple[list[str], bool, int]:
             had_content = True
         matched = _BULLET.match(line)
         if matched:
-            bullets.append(matched.group(1))
+            text = matched.group(1)
+            indent = len(line) - len(line.lstrip())
+            if ref_indent is None:
+                ref_indent = indent
+            deeper = bool(bullets) and indent > ref_indent
+            if deeper and fold_ok and not _TAG.match(text):
+                bullets[-1] = bullets[-1] + " " + line.strip()
+            else:
+                bullets.append(text)
+                if not deeper:
+                    fold_ok = not (_is_clean_marker(text) or _PLACEHOLDER_BULLET.match(text))
         elif bullets and line.startswith((" ", "\t")) and line.strip():
             bullets[-1] = bullets[-1] + " " + line.strip()
         elif line.strip():
