@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""SessionStart hook: print the ledger's session-start brief, and tag the session for it.
+"""SessionStart hook: report ledger state and tag the session for ledger writes.
 
 Resolves the ledger CLI the way every skill does (`skills/_lib/ledger_cli.py`,
-the topic skill's `ledger_cli` key). With none configured it prints nothing and
-exits 0, so the plugin behaves exactly as before.
+the topic skill's `ledger_cli` key). With none configured it prints nothing,
+writes nothing and exits 0.
 
-With one, it runs `<ledger_cli> resume --brief` and prints that command's stdout,
-which Claude Code adds to the session's context. If the command fails in any way
-(the program is missing, an older ledger has no `resume`, a non-zero exit, a
-timeout) it prints nothing. Either way the exit status is 0: a session start must
-never be blocked, and the hook adds no noise.
+With one, it runs `<ledger_cli> resume --brief`. Success prints `ledger <version>`
+when `<ledger_cli> --version` succeeds, followed by the brief. Failure prints one
+bounded `ledger session-start: ...` line naming a non-zero exit, a program that
+could not run, or a timeout. Every path exits 0 so session start never blocks.
 
-If `CLAUDE_ENV_FILE` is set (Claude Code gives a SessionStart hook the session's
-own env file) and a CLI is configured, it appends `export LEDGER_SESSION=<id>`
-(the `session_id` from the hook's stdin JSON), and `export LEDGER_AGENT=claude-code`
-only when `LEDGER_AGENT` is not already set in the hook's environment. That file
-is the only file the hook writes; it never touches settings files.
+If `CLAUDE_ENV_FILE` is set and a CLI is configured, the hook appends shell-quoted
+exports for a non-empty stdin `session_id` and `model` (the latter may also be an
+object with a string `id`). It supplies `LEDGER_AGENT=claude-code` and
+`LEDGER_HARNESS=claude-code` only when each variable is absent from the hook's
+environment, and likewise leaves an existing `LEDGER_MODEL` alone. That file is
+the only file the hook writes; it never touches settings files.
 
 Python 3 stdlib only.
 """
@@ -36,15 +36,31 @@ sys.dont_write_bytecode = True
 HOOK_DIR = Path(__file__).resolve().parent
 LEDGER_CLI_PATH = HOOK_DIR.parent / "skills" / "_lib" / "ledger_cli.py"
 TIMEOUT_SECONDS = 20
+MAX_DETAIL_CHARS = 240
 
 
-def _session_id() -> str | None:
+def _input_data() -> dict:
     try:
         data = json.loads(sys.stdin.read())
     except (ValueError, OSError):
-        return None
-    value = data.get("session_id") if isinstance(data, dict) else None
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _nonempty_string(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _model_id(data: dict) -> str | None:
+    value = data.get("model")
+    if isinstance(value, dict):
+        value = value.get("id")
+    return _nonempty_string(value)
+
+
+def _one_line(value: str, limit: int = MAX_DETAIL_CHARS) -> str:
+    line = next((line.strip() for line in value.splitlines() if line.strip()), "")
+    return line[:limit]
 
 
 def _resolve_cli() -> str | None:
@@ -56,7 +72,8 @@ def _resolve_cli() -> str | None:
     return module.resolve(quiet=True)
 
 
-def _brief(cli: str) -> str:
+def _brief(cli: str) -> tuple[str, str]:
+    command = f"{_one_line(cli)} resume --brief"
     try:
         proc = subprocess.run(
             [cli, "resume", "--brief"],
@@ -67,17 +84,52 @@ def _brief(cli: str) -> str:
             stdin=subprocess.DEVNULL,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        seconds = f"{TIMEOUT_SECONDS:g}"
+        return "", f"ledger session-start: {command} timed out after {seconds}s\n"
+    except OSError as exc:
+        reason = _one_line(exc.strerror or str(exc)) or "unknown error"
+        return "", f"ledger session-start: {command} could not run: {reason}\n"
+    except subprocess.SubprocessError as exc:
+        reason = _one_line(str(exc)) or "subprocess error"
+        return "", f"ledger session-start: {command} could not run: {reason}\n"
+    if proc.returncode != 0:
+        detail = _one_line(proc.stderr) or "no stderr"
+        return "", f"ledger session-start: {command} exited {proc.returncode}: {detail}\n"
+    return proc.stdout, ""
+
+
+def _version(cli: str) -> str:
+    try:
+        proc = subprocess.run(
+            [cli, "--version"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
     except (OSError, subprocess.SubprocessError):
         return ""
-    return proc.stdout if proc.returncode == 0 else ""
+    if proc.returncode != 0:
+        return ""
+    version = _one_line(proc.stdout)
+    if not version:
+        return ""
+    return f"{version if version.startswith('ledger ') else f'ledger {version}'}\n"
 
 
-def _tag_session(env_file: str, session_id: str | None) -> None:
+def _tag_session(env_file: str, session_id: str | None, model_id: str | None) -> None:
     lines = []
     if session_id:
         lines.append(f"export LEDGER_SESSION={shlex.quote(session_id)}\n")
     if "LEDGER_AGENT" not in os.environ:
         lines.append("export LEDGER_AGENT=claude-code\n")
+    if "LEDGER_HARNESS" not in os.environ:
+        lines.append("export LEDGER_HARNESS=claude-code\n")
+    if model_id and "LEDGER_MODEL" not in os.environ:
+        lines.append(f"export LEDGER_MODEL={shlex.quote(model_id)}\n")
     if not lines:
         return
     with open(env_file, "a", encoding="utf-8") as handle:
@@ -85,18 +137,23 @@ def _tag_session(env_file: str, session_id: str | None) -> None:
 
 
 def main() -> int:
-    session_id = _session_id()
+    data = _input_data()
+    session_id = _nonempty_string(data.get("session_id"))
+    model_id = _model_id(data)
     cli = _resolve_cli()
     if not cli:
         return 0
-    output = _brief(cli)
+    output, diagnostic = _brief(cli)
     env_file = os.environ.get("CLAUDE_ENV_FILE")
     if env_file:
         try:
-            _tag_session(env_file, session_id)
+            _tag_session(env_file, session_id, model_id)
         except OSError:
             pass
-    if output:
+    if diagnostic:
+        sys.stdout.write(diagnostic)
+    elif output:
+        sys.stdout.write(_version(cli))
         sys.stdout.write(output)
     return 0
 

@@ -1,4 +1,4 @@
-"""The plugin's SessionStart hook: silent unless a ledger CLI resolves, never fails."""
+"""The plugin's SessionStart hook: reports ledger state without blocking startup."""
 
 import json
 import os
@@ -21,10 +21,22 @@ argv = sys.argv[1:]
 with open(os.environ["FAKE_LEDGER_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(argv) + "\\n")
 mode = os.environ.get("FAKE_LEDGER_MODE", "ok")
+if argv == ["--version"]:
+    if mode == "versionfail":
+        sys.stderr.write("no version here\\n")
+        raise SystemExit(2)
+    sys.stdout.write("ledger 0.1.14\\n")
+    raise SystemExit(0)
 if mode == "fail":
     sys.stdout.write("PARTIAL OUTPUT\\n")
-    sys.stderr.write("boom\\n")
+    sys.stderr.write("\\nboom\\nmore detail\\n")
     raise SystemExit(3)
+if mode == "longfail":
+    sys.stderr.write("x" * 400 + "\\n")
+    raise SystemExit(4)
+if mode == "timeout":
+    import time
+    time.sleep(1)
 if argv[0] == "resume":
     if mode == "noresume":
         sys.stdout.write("usage: ledger <verb>\\n")
@@ -48,6 +60,16 @@ class Rig:
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         self.env_file = tmp_path / "claude-env"
         self.hook = HOOK
+
+    def use_hook_copy(self, timeout):
+        plugin = self.fake_home.parent / "plugin"
+        (plugin / "hooks").mkdir(parents=True)
+        source = HOOK.read_text(encoding="utf-8")
+        source = source.replace("TIMEOUT_SECONDS = 20", f"TIMEOUT_SECONDS = {timeout}")
+        (plugin / "hooks" / "session-start.py").write_text(source, encoding="utf-8")
+        (plugin / "skills" / "_lib").mkdir(parents=True)
+        shutil.copy(REPO_ROOT / "skills" / "_lib" / "ledger_cli.py", plugin / "skills" / "_lib" / "ledger_cli.py")
+        self.hook = plugin / "hooks" / "session-start.py"
 
     def configure(self, value="fakeledger"):
         path = self.fake_home / ".claude" / "skill-config"
@@ -107,34 +129,58 @@ def test_an_unset_or_unusable_setting_is_the_same_as_none(rig, value):
     assert not rig.env_file.exists()
 
 
-def test_it_prints_the_resume_brief_when_the_cli_succeeds(rig):
+def test_success_prints_the_version_line_then_the_resume_brief(rig):
     rig.configure()
     proc = rig.run()
     assert proc.returncode == 0
+    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
+    assert rig.calls() == [["resume", "--brief"], ["--version"]]
+
+
+def test_a_failed_version_call_does_not_hide_the_brief(rig):
+    rig.configure()
+    proc = rig.run(mode="versionfail")
+    assert proc.returncode == 0
     assert proc.stdout == "BRIEF: 2 open items\nnext: LC15\n"
-    assert rig.calls() == [["resume", "--brief"]]
+    assert rig.calls() == [["resume", "--brief"], ["--version"]]
 
 
-def test_a_cli_that_exits_nonzero_prints_nothing_and_exits_zero(rig):
+def test_a_cli_that_exits_nonzero_prints_one_bounded_failure_line_and_exits_zero(rig):
     rig.configure()
     proc = rig.run(mode="fail")
     assert proc.returncode == 0
-    assert proc.stdout == ""
+    assert proc.stdout == "ledger session-start: fakeledger resume --brief exited 3: boom\n"
     assert rig.calls() == [["resume", "--brief"]]
 
+    proc = rig.run(mode="longfail")
+    assert proc.returncode == 0
+    assert proc.stdout.startswith("ledger session-start: fakeledger resume --brief exited 4: ")
+    assert proc.stdout.endswith("\n")
+    assert len(proc.stdout.splitlines()) == 1
+    assert len(proc.stdout) <= 320
 
-def test_an_older_ledger_without_resume_prints_nothing_and_exits_zero(rig):
+
+def test_an_older_ledger_without_resume_names_the_failure_and_exits_zero(rig):
     rig.configure()
     proc = rig.run(mode="noresume")
     assert proc.returncode == 0
-    assert proc.stdout == ""
+    assert proc.stdout == "ledger session-start: fakeledger resume --brief exited 2: unknown verb: resume\n"
 
 
-def test_a_missing_binary_prints_nothing_and_exits_zero(rig):
-    rig.configure(str(rig.bin / "no-such-ledger"))
+def test_a_missing_binary_names_the_failure_and_exits_zero(rig):
+    missing = str(rig.bin / "no-such-ledger")
+    rig.configure(missing)
     proc = rig.run()
     assert proc.returncode == 0
-    assert proc.stdout == ""
+    assert proc.stdout == f"ledger session-start: {missing} resume --brief could not run: No such file or directory\n"
+
+
+def test_a_timeout_names_the_failure_and_exits_zero(rig):
+    rig.use_hook_copy(0.01)
+    rig.configure()
+    proc = rig.run(mode="timeout")
+    assert proc.returncode == 0
+    assert proc.stdout == "ledger session-start: fakeledger resume --brief timed out after 0.01s\n"
 
 
 def test_the_session_id_is_written_to_the_env_file_only_when_one_is_set(rig):
@@ -150,18 +196,46 @@ def test_the_session_id_is_written_to_the_env_file_only_when_one_is_set(rig):
     assert "export LEDGER_SESSION=sess-1" in lines
 
 
-def test_the_agent_is_set_only_when_the_hook_environment_has_none(rig):
+def test_the_agent_and_harness_are_set_only_when_the_hook_environment_has_none(rig):
     rig.configure()
     rig.run()
     assert rig.env_file.read_text(encoding="utf-8").splitlines() == [
         "export LEDGER_SESSION=sess-1",
         "export LEDGER_AGENT=claude-code",
+        "export LEDGER_HARNESS=claude-code",
     ]
     rig.env_file.unlink()
-    rig.run(extra_env={"LEDGER_AGENT": "someone-else"})
+    rig.run(extra_env={"LEDGER_AGENT": "someone-else", "LEDGER_HARNESS": "other-harness"})
     assert rig.env_file.read_text(encoding="utf-8").splitlines() == [
         "export LEDGER_SESSION=sess-1",
     ]
+
+
+def test_model_string_and_object_id_are_shell_quoted(rig):
+    rig.configure()
+    for model in ["model one'", {"id": "model two'"}]:
+        rig.run(stdin=json.dumps({"session_id": "sess-1", "model": model}))
+        lines = rig.env_file.read_text(encoding="utf-8").splitlines()
+        model_id = model if isinstance(model, str) else model["id"]
+        assert f"export LEDGER_MODEL={shlex.quote(model_id)}" in lines
+        rig.env_file.unlink()
+
+
+def test_model_is_omitted_when_absent_empty_invalid_or_already_set(rig):
+    rig.configure()
+    for model in [None, "", "  ", {}, {"id": ""}, {"id": 3}, 3]:
+        payload = {"session_id": "sess-1"}
+        if model is not None:
+            payload["model"] = model
+        rig.run(stdin=json.dumps(payload))
+        assert "LEDGER_MODEL" not in rig.env_file.read_text(encoding="utf-8")
+        rig.env_file.unlink()
+
+    rig.run(
+        stdin=json.dumps({"session_id": "sess-1", "model": "new-model"}),
+        extra_env={"LEDGER_MODEL": "existing-model"},
+    )
+    assert "LEDGER_MODEL" not in rig.env_file.read_text(encoding="utf-8")
 
 
 def test_the_session_id_is_shell_quoted(rig):
@@ -185,7 +259,7 @@ def test_bad_stdin_still_prints_the_brief_and_writes_no_session(rig, stdin):
     rig.configure()
     proc = rig.run(stdin=stdin)
     assert proc.returncode == 0
-    assert proc.stdout == "BRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
     text = rig.env_file.read_text(encoding="utf-8")
     assert "LEDGER_SESSION" not in text
 
@@ -201,7 +275,7 @@ def test_an_unwritable_env_file_does_not_fail_the_session(rig, tmp_path):
     rig.configure()
     proc = rig.run(extra_env={"CLAUDE_ENV_FILE": str(tmp_path / "no-dir" / "env")})
     assert proc.returncode == 0
-    assert proc.stdout == "BRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
 
 
 def test_it_writes_no_file_but_the_env_file(rig, tmp_path):
@@ -225,7 +299,7 @@ def test_it_writes_no_file_but_the_env_file(rig, tmp_path):
     before_plugin, before_home = tree(plugin), tree(rig.fake_home)
     proc = rig.run()
     assert proc.returncode == 0
-    assert proc.stdout == "BRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
     assert tree(plugin) == before_plugin
     assert tree(rig.fake_home) == before_home
     assert rig.env_file.exists()
