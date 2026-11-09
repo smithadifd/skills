@@ -2217,14 +2217,23 @@ def test_a_tagged_sub_bullet_starts_its_own_finding():
 
 @pytest.mark.parametrize("marker", ["- none", "- <finding>"], ids=["clean-marker", "placeholder"])
 @pytest.mark.parametrize(
-    "sub, description",
-    [("a.py:7 — harden", "harden"), ("harden `a.py:7`", "harden `a.py:7`")],
-    ids=["located", "unlocated"],
+    "subs, expected",
+    [
+        (["a.py:7 — harden"], [("a.py", 7, "harden")]),
+        (["harden `a.py:7`"], [("a.py", 7, "harden `a.py:7`")]),
+        # A kept (located) sub-bullet must not re-arm folding for the one after
+        # it: the unlocated sibling stays its own entry too.
+        (
+            ["a.py:7 — harden", "more detail"],
+            [("a.py", 7, "harden"), (None, None, "more detail")],
+        ),
+    ],
+    ids=["located", "unlocated", "located-then-unlocated"],
 )
-def test_a_sub_bullet_under_a_marker_bullet_is_not_folded_into_it(marker, sub, description):
-    findings = _issues_findings(f"{marker}\n  - {sub}")
+def test_a_sub_bullet_under_a_marker_bullet_is_not_folded_into_it(marker, subs, expected):
+    findings = _issues_findings(marker + "".join(f"\n  - {sub}" for sub in subs))
     assert [(f["rule"], f["file"], f["line"], f["description"]) for f in findings] == [
-        ("issue", "a.py", 7, description),
+        ("issue", file, line, description) for file, line, description in expected
     ]
 
 
