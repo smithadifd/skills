@@ -28,7 +28,7 @@ With `TICKET_LEDGER_CLI` unset or empty, `ticket` now looks for a `ledger` on yo
    ```
 
    If you installed with `install.sh` instead, pull the repository and run `./install.sh --all` again; the session-start hook is part of the plugin only.
-2. Upgrade the ledger CLI itself. The install or upgrade command is in the README of the [ledger repository](https://github.com/smithadifd/ledger).
+2. Upgrade the ledger CLI itself, with the install or upgrade command from the ledger project's own README.
 3. Add this `env` block to `~/.claude/settings.json` (merge it with any `env` block already there):
 
    ```json
