@@ -171,6 +171,23 @@ def test_version_probe_shares_the_resume_deadline_and_cannot_hide_the_brief(monk
     assert timeouts[1] < timeouts[0], "version probe must use only the deadline remaining after resume"
 
 
+def test_version_is_not_run_once_the_deadline_has_passed(monkeypatch):
+    spec = importlib.util.spec_from_file_location("session_start_expired", HOOK)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    invocations = []
+
+    def run(args, **kwargs):
+        invocations.append(args)
+        return subprocess.CompletedProcess(args, 0, "ledger 0.1.14\n", "")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    assert module._version("fakeledger", time.monotonic() - 1) == ""
+    assert invocations == [], "no --version call once the shared deadline has passed"
+
+
 def test_a_cli_that_exits_nonzero_prints_one_bounded_failure_line_and_exits_zero(rig):
     rig.configure()
     proc = rig.run(mode="fail")

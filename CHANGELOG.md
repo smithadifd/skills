@@ -2,11 +2,13 @@
 
 Release notes for the `sdlc` plugin, newest first.
 
-## Unreleased
+## 0.12.0
+
+This is the first tagged release (repository tag v1.2.0) that carries the session-start hook, the shared `_lib` folder and the ledger features listed under 0.11.0. The 0.11.0 notes below were written but never tagged; the previous tag, v1.1.1, is plugin 0.10.0 and has no hook.
 
 ### Session start reports ledger failures and supplies write identity
 
-When `ledger_cli` is configured, the `SessionStart` hook now prints one bounded `ledger session-start: ...` line when `resume --brief` exits non-zero, cannot run or times out; it still exits 0 and never blocks session start. On success it prints the ledger version before the brief when the CLI's version call succeeds. The session environment gains `LEDGER_HARNESS=claude-code` when unset and `LEDGER_MODEL` from a non-empty hook input model id when unset, alongside the existing `LEDGER_SESSION` and `LEDGER_AGENT`; values are shell-quoted. `LEDGER_OPERATOR` remains operator configuration and is not set by the hook.
+When `ledger_cli` is configured, the `SessionStart` hook now prints one bounded `ledger session-start: ...` line when `resume --brief` exits non-zero, cannot run or times out; it still exits 0 and never blocks session start. When the brief is non-empty it prints the ledger version line (when the CLI's version call succeeds) and then the brief; an empty brief prints nothing. The session environment gains `LEDGER_HARNESS=claude-code` when unset and `LEDGER_MODEL` from a non-empty hook input model id when unset, alongside the existing `LEDGER_SESSION` and `LEDGER_AGENT`; values are shell-quoted. `LEDGER_SESSION` is always written from a non-empty input `session_id`; `LEDGER_AGENT`, `LEDGER_HARNESS` and `LEDGER_MODEL` are left alone when already set. `LEDGER_OPERATOR` remains operator configuration and is not set by the hook.
 
 ### `ticket` uses the ledger by default when one is installed
 
@@ -15,6 +17,33 @@ With `TICKET_LEDGER_CLI` unset or empty, `ticket` now looks for a `ledger` on yo
 ### Carrying existing ticket cards into the ledger
 
 `ticket` has two new commands for a machine that ran it before switching to the ledger. `ticket.py import-cards <repo>` writes each `.ticket/<key>.md` card into the ledger as one item and moves the card to `.ticket/imported/<key>.md`; an open card keeps its pass so it resumes from the ledger, a card it cannot read is left in place and named, and running it again writes nothing. `ticket.py find-cards` lists the repositories that still hold cards. When a ticket opens on the ledger and the repository still holds cards, the open now prints the exact import command once.
+
+### Upgrading
+
+1. Update the plugin from the marketplace, then start a new session (or run `/reload-plugins` in an open one) to load the new version:
+
+   ```sh
+   claude plugin marketplace update skills
+   claude plugin update sdlc@skills
+   ```
+
+   If you installed with `install.sh` instead, pull the repository and run `./install.sh --all` again; the session-start hook is part of the plugin only.
+2. Upgrade the ledger CLI itself, with the install or upgrade command from the ledger project's own README.
+3. Add this `env` block to `~/.claude/settings.json` (merge it with any `env` block already there):
+
+   ```json
+   {
+     "env": {
+       "LEDGER_DB": "/absolute/path/to/home/.local/share/ledger/<system>.db",
+       "LEDGER_HARNESS": "claude-code",
+       "LEDGER_OPERATOR": "<your name>"
+     }
+   }
+   ```
+
+   `LEDGER_DB` must be an absolute path; do not rely on `~` being expanded in the settings file. `LEDGER_HARNESS` is optional, because the hook supplies `claude-code` when it is unset. `LEDGER_OPERATOR` is the human the writes are attributed to, and the hook never sets it.
+4. Delete any ledger instructions you copied by hand into `~/.claude/CLAUDE.md`: the session-start hook now prints the ledger's own contract at the start of every session, and hand-copied prose goes stale and contradicts it.
+5. Check it: a new session's first lines show `ledger <version>` and the brief, or one `ledger session-start: ...` line naming what failed.
 
 ## 0.11.0
 

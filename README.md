@@ -109,7 +109,27 @@ A plugin install prefixes every command with the plugin's name, so a command wri
 
 The alternative is `install.sh`, which copies skills into `~/.claude/skills/` and agents into `~/.claude/agents/` with no marketplace involved. Use one route, not both. It also installs `_lib` beside the skills: a small shared folder (it is not a skill) that finds the optional ledger CLI.
 
-**The ledger setting and the session-start hook.** One key, `ledger_cli` in the `topic` skill's config (`~/.claude/skill-config/topic.json` over the shipped file), switches the ledger on for `topic`, `sharpen` and `shape`. Unset, they behave as they always did. The plugin also carries a `SessionStart` hook (`hooks/hooks.json`): with the key unset it prints nothing and writes nothing; with it set, success prints the ledger version and `resume --brief`, while failure prints one bounded line naming the failed command without blocking session start. The hook tags the session's environment with `LEDGER_SESSION`, `LEDGER_AGENT=claude-code`, `LEDGER_HARNESS=claude-code` and, when Claude Code supplies a model id, `LEDGER_MODEL`; it leaves any of those identity variables already present in the hook environment alone. It does not set `LEDGER_OPERATOR`: put that human identity in the `env` block of `~/.claude/settings.json`. The release notes for each version are in [CHANGELOG.md](CHANGELOG.md).
+**The ledger setting and the session-start hook.** One key, `ledger_cli` in the `topic` skill's config (`~/.claude/skill-config/topic.json` over the shipped file), switches the ledger on for `topic`, `sharpen` and `shape`. Unset, they behave as they always did. The plugin also carries a `SessionStart` hook (`hooks/hooks.json`): with the key unset it prints nothing and writes nothing; with it set, a non-empty `resume --brief` prints the ledger version line and then the brief (an empty brief prints nothing), while failure prints one bounded line naming the failed command without blocking session start. The hook tags the session's environment with `LEDGER_SESSION` (always, from the input session id), `LEDGER_AGENT=claude-code`, `LEDGER_HARNESS=claude-code` and, when Claude Code supplies a model id, `LEDGER_MODEL`; it leaves `LEDGER_AGENT`, `LEDGER_HARNESS` and `LEDGER_MODEL` alone when they are already present in the hook environment. It does not set `LEDGER_OPERATOR`: put that human identity in the `env` block of `~/.claude/settings.json`. The release notes for each version are in [CHANGELOG.md](CHANGELOG.md).
+
+**Using the ledger.** Plugin 0.12.0 (tag v1.2.0) is the first release whose session-start hook prints the ledger contract. To use it:
+
+1. Install the ledger CLI, following the install command in the ledger project's own README.
+2. Set `ledger_cli` as described above.
+3. Add this `env` block to `~/.claude/settings.json`:
+
+   ```json
+   {
+     "env": {
+       "LEDGER_DB": "/absolute/path/to/home/.local/share/ledger/<system>.db",
+       "LEDGER_HARNESS": "claude-code",
+       "LEDGER_OPERATOR": "<your name>"
+     }
+   }
+   ```
+
+   `LEDGER_DB` names the database file, conventionally under `~/.local/share/ledger/` with one file per system; write it as an absolute path, because `~` is not expanded in the settings file. The first `ledger new` creates the database, so there is no separate init step. `LEDGER_HARNESS` is optional, because the hook supplies `claude-code` when it is unset; setting it here only makes it explicit. `LEDGER_OPERATOR` is the human the writes are attributed to, and the hook never sets it.
+
+Already installed? Follow the 0.12.0 [Upgrading](CHANGELOG.md#upgrading) steps in the changelog.
 
 ```sh
 ./install.sh pr                  # one skill        (--all for every skill)
