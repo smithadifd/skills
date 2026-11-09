@@ -5,16 +5,18 @@ Resolves the ledger CLI the way every skill does (`skills/_lib/ledger_cli.py`,
 the topic skill's `ledger_cli` key). With none configured it prints nothing,
 writes nothing and exits 0.
 
-With one, it runs `<ledger_cli> resume --brief`. Success prints `ledger <version>`
-when `<ledger_cli> --version` succeeds, followed by the brief. Failure prints one
+With one, it runs `<ledger_cli> resume --brief`. When that succeeds with a non-empty
+brief, it prints `ledger <version>` (when `<ledger_cli> --version` succeeds)
+followed by the brief; an empty brief prints nothing. Failure prints one
 bounded `ledger session-start: ...` line naming a non-zero exit, a program that
 could not run, or a timeout. Every path exits 0 so session start never blocks.
 
 If `CLAUDE_ENV_FILE` is set and a CLI is configured, the hook appends shell-quoted
 exports for a non-empty stdin `session_id` and `model` (the latter may also be an
-object with a string `id`). It supplies `LEDGER_AGENT=claude-code` and
-`LEDGER_HARNESS=claude-code` only when each variable is absent from the hook's
-environment, and likewise leaves an existing `LEDGER_MODEL` alone. That file is
+object with a string `id`). `LEDGER_SESSION` is always written from a non-empty
+`session_id`. It supplies `LEDGER_AGENT=claude-code` and `LEDGER_HARNESS=claude-code`
+only when each variable is absent from the hook's environment, and likewise leaves
+an existing `LEDGER_MODEL` alone. That file is
 the only file the hook writes; it never touches settings files.
 
 Python 3 stdlib only.
