@@ -2113,6 +2113,161 @@ def test_bullets_continuations_and_exact_clean_markers_parse(issues, description
     assert [f["description"] for f in findings] == descriptions
 
 
+# --- nested sub-bullets -----------------------------------------------------
+# A bullet indented at least two characters deeper than the section's first
+# bullet joins the bullet before it; bullets at the first bullet's indent, or
+# one character off it, each start a finding.
+
+
+def _issues_findings(issues: str) -> list[dict]:
+    verdict, findings = review_phase.parse_claude_fresh(
+        _claude_approve_with("Checked.", issues=issues)
+    )
+    assert verdict == "approved"
+    return findings
+
+
+def test_sub_bullets_fold_into_their_parent_finding():
+    findings = _issues_findings(
+        "- `a.py:1` — parent issue\n  - first sub point\n  - second sub point"
+    )
+    assert len(findings) == 1
+    assert findings[0]["file"] == "a.py"
+    assert findings[0]["line"] == 1
+    assert findings[0]["description"] == (
+        "parent issue - first sub point - second sub point"
+    )
+
+
+def test_a_tab_counts_as_one_character_of_indent():
+    # One tab is one character: a sibling of a column-0 parent. Two tabs are
+    # two characters deep, so that bullet folds.
+    one_tab = _issues_findings("- `a.py:1` — parent issue\n\t- tab sibling")
+    assert [f["description"] for f in one_tab] == ["parent issue", "tab sibling"]
+    two_tabs = _issues_findings("- `a.py:1` — parent issue\n\t\t- two-tab sub point")
+    assert [f["description"] for f in two_tabs] == ["parent issue - two-tab sub point"]
+
+
+def test_a_bullet_one_space_deeper_is_a_sibling():
+    # One extra space is not nesting (CommonMark): each bullet is a finding.
+    findings = _issues_findings("- first issue\n - second issue")
+    assert [f["description"] for f in findings] == ["first issue", "second issue"]
+
+
+def test_a_located_sub_bullet_under_a_located_parent_stays_its_own_finding():
+    findings = _issues_findings("- a.py:1 - parent\n  - b.py:2 - separate")
+    assert [(f["rule"], f["file"], f["line"], f["description"]) for f in findings] == [
+        ("issue", "a.py", 1, "parent"),
+        ("issue", "b.py", 2, "separate"),
+    ]
+
+
+def test_a_located_sub_bullet_under_an_unlocated_parent_stays_its_own_finding():
+    findings = _issues_findings(
+        "- Round findings:\n  - `a.py:1` — first issue\n  - `b.py:2` — second issue"
+    )
+    assert [(f["file"], f["line"], f["description"]) for f in findings] == [
+        (None, None, "Round findings:"),
+        ("a.py", 1, "first issue"),
+        ("b.py", 2, "second issue"),
+    ]
+
+
+def test_a_uniformly_indented_list_still_splits_per_bullet():
+    findings = _issues_findings(
+        "  - `a.py:1` — first issue\n  - `b.py:2` — second issue\n  - `c.py:3` — third issue"
+    )
+    assert [(f["file"], f["line"], f["description"]) for f in findings] == [
+        ("a.py", 1, "first issue"),
+        ("b.py", 2, "second issue"),
+        ("c.py", 3, "third issue"),
+    ]
+    # Unlocated bullets, which the locator exemption does not keep apart.
+    findings = _issues_findings("  - first issue\n  - second issue\n  - third issue")
+    assert [f["description"] for f in findings] == ["first issue", "second issue", "third issue"]
+
+
+def test_a_flat_list_is_unchanged():
+    findings = _issues_findings(
+        "- `a.py:1` — first issue\n- `b.py:2` — second issue\n- `c.py:3` — third issue"
+    )
+    assert [(f["file"], f["line"], f["description"]) for f in findings] == [
+        ("a.py", 1, "first issue"),
+        ("b.py", 2, "second issue"),
+        ("c.py", 3, "third issue"),
+    ]
+    # Unlocated bullets, which the locator exemption does not keep apart.
+    findings = _issues_findings("- first issue\n- second issue\n- third issue")
+    assert [f["description"] for f in findings] == ["first issue", "second issue", "third issue"]
+
+
+def test_a_tagged_sub_bullet_starts_its_own_finding():
+    # An open [BUG] nested under a minor note is never folded into the note.
+    text = (
+        "## Verdict: APPROVE\n\n### Issues\n- none\n\n"
+        "### Minor notes\n- a note\n  - [BUG] `a.py:3` — real bug\n  - more detail\n\n"
+        "INTERVAL: none\n"
+    )
+    _, findings = review_phase.parse_claude_fresh(text)
+    assert [(f["rule"], f["file"], f["line"], f["description"]) for f in findings] == [
+        ("minor", None, None, "a note"),
+        ("bug", "a.py", 3, "real bug - more detail"),
+    ]
+
+
+@pytest.mark.parametrize("marker", ["- none", "- <finding>"], ids=["clean-marker", "placeholder"])
+@pytest.mark.parametrize(
+    "subs, expected",
+    [
+        (["a.py:7 — harden"], [("a.py", 7, "harden")]),
+        (["harden `a.py:7`"], [("a.py", 7, "harden `a.py:7`")]),
+        # A kept (located) sub-bullet must not re-arm folding for the one after
+        # it: the unlocated sibling stays its own entry too.
+        (
+            ["a.py:7 — harden", "more detail"],
+            [("a.py", 7, "harden"), (None, None, "more detail")],
+        ),
+    ],
+    ids=["located", "unlocated", "located-then-unlocated"],
+)
+def test_a_sub_bullet_under_a_marker_bullet_is_not_folded_into_it(marker, subs, expected):
+    findings = _issues_findings(marker + "".join(f"\n  - {sub}" for sub in subs))
+    assert [(f["rule"], f["file"], f["line"], f["description"]) for f in findings] == [
+        ("issue", file, line, description) for file, line, description in expected
+    ]
+
+
+# Raw reviewer outputs whose findings use indented sub-bullets.
+# (fixture, verdict, total findings, Issues findings as (file, line), minor notes)
+NESTED_BULLET_FIXTURES = {
+    "nested-bullets-r2.md": (
+        "changes_requested",
+        5,
+        [("designs/LS5a/design.md", 416)],
+        4,
+    ),
+    "nested-bullets-r3.md": ("approved", 4, [], 4),
+}
+_REACH_TAG_GROUP = re.compile(r"\[reach: [^\]]*\]$")
+
+
+@pytest.mark.parametrize(
+    "name, verdict, total, issues, minor_count",
+    [(name, *case) for name, case in NESTED_BULLET_FIXTURES.items()],
+    ids=list(NESTED_BULLET_FIXTURES),
+)
+def test_nested_bullet_fixtures_keep_tag_and_location(name, verdict, total, issues, minor_count):
+    text = (FIXTURES / name).read_text(encoding="utf-8")
+    parsed_verdict, findings = review_phase.parse_claude_fresh(text)
+    assert parsed_verdict == verdict
+    assert len(findings) == total
+    issue_findings = [f for f in findings if f["rule"] == "issue"]
+    assert [(f["file"], f["line"]) for f in issue_findings] == issues
+    for finding in issue_findings:
+        assert _REACH_TAG_GROUP.search(finding["description"]), finding["description"]
+    assert len([f for f in findings if f["rule"] == "minor"]) == minor_count
+
+
 def test_foreign_prose_beside_a_minor_note_refuses():
     text = (
         "## Verdict: APPROVE\n\n### Issues\n- none\n\n"
