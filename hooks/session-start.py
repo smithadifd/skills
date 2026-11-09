@@ -28,6 +28,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # The hook runs inside the plugin's install directory: write nothing there.
@@ -72,7 +73,7 @@ def _resolve_cli() -> str | None:
     return module.resolve(quiet=True)
 
 
-def _brief(cli: str) -> tuple[str, str]:
+def _brief(cli: str, deadline: float) -> tuple[str, str]:
     command = f"{_one_line(cli)} resume --brief"
     try:
         proc = subprocess.run(
@@ -80,7 +81,7 @@ def _brief(cli: str) -> tuple[str, str]:
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=TIMEOUT_SECONDS,
+            timeout=max(0, deadline - time.monotonic()),
             stdin=subprocess.DEVNULL,
             check=False,
         )
@@ -99,14 +100,17 @@ def _brief(cli: str) -> tuple[str, str]:
     return proc.stdout, ""
 
 
-def _version(cli: str) -> str:
+def _version(cli: str, deadline: float) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return ""
     try:
         proc = subprocess.run(
             [cli, "--version"],
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=TIMEOUT_SECONDS,
+            timeout=remaining,
             stdin=subprocess.DEVNULL,
             check=False,
         )
@@ -143,7 +147,8 @@ def main() -> int:
     cli = _resolve_cli()
     if not cli:
         return 0
-    output, diagnostic = _brief(cli)
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    output, diagnostic = _brief(cli, deadline)
     env_file = os.environ.get("CLAUDE_ENV_FILE")
     if env_file:
         try:
@@ -153,7 +158,7 @@ def main() -> int:
     if diagnostic:
         sys.stdout.write(diagnostic)
     elif output:
-        sys.stdout.write(_version(cli))
+        sys.stdout.write(_version(cli, deadline))
         sys.stdout.write(output)
     return 0
 

@@ -1,5 +1,6 @@
 """The plugin's SessionStart hook: reports ledger state without blocking startup."""
 
+import importlib.util
 import json
 import os
 import shlex
@@ -7,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -143,6 +145,30 @@ def test_a_failed_version_call_does_not_hide_the_brief(rig):
     assert proc.returncode == 0
     assert proc.stdout == "BRIEF: 2 open items\nnext: LC15\n"
     assert rig.calls() == [["resume", "--brief"], ["--version"]]
+
+
+def test_version_probe_shares_the_resume_deadline_and_cannot_hide_the_brief(monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("session_start_deadline", HOOK)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    timeouts = []
+
+    def run(args, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        if args[1:] == ["resume", "--brief"]:
+            time.sleep(0.01)
+            return subprocess.CompletedProcess(args, 0, "BRIEF: ready\n", "")
+        return subprocess.CompletedProcess(args, 2, "", "version unavailable\n")
+
+    monkeypatch.setattr(module, "_input_data", lambda: {})
+    monkeypatch.setattr(module, "_resolve_cli", lambda: "fakeledger")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.delenv("CLAUDE_ENV_FILE", raising=False)
+
+    assert module.main() == 0
+    assert capsys.readouterr().out == "BRIEF: ready\n"
+    assert timeouts[1] < timeouts[0], "version probe must use only the deadline remaining after resume"
 
 
 def test_a_cli_that_exits_nonzero_prints_one_bounded_failure_line_and_exits_zero(rig):
