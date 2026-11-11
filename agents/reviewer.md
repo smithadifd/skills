@@ -119,6 +119,7 @@ Callers may parse this block, so keep its shape:
 
 **Rules:**
 - Be specific: every issue must include a file path and line number.
+- Every bullet under Issues carries a `file:line` locator in its `` `path:line` — `` prefix.
 - Do not nitpick style if it matches the surrounding code conventions.
 - Do not suggest improvements beyond what was asked — report only correctness and requirement gaps.
 - Never approve code with a security vulnerability or data loss risk without explicitly flagging it, even if the rest looks fine.

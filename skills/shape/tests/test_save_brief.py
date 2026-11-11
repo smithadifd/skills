@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -185,3 +187,83 @@ def test_skill_text_always_saves_and_names_the_helper():
     assert "shape-<slug>-<YYYY-MM-DD>.md" in text
     assert "../_lib/ledger_cli.py" in text
     assert "mutates nothing" not in text
+
+
+def install_layout(tmp_path, with_sharpen=True):
+    """A plugin installed the way the marketplace lays it out: the whole plugin
+    under a versioned cache directory, `skills/<name>` beside `skills/_lib`."""
+    root = tmp_path / "plugins" / "cache" / "skills" / "sdlc" / "0.12.0"
+    (root / ".claude-plugin").mkdir(parents=True)
+    for name in ("plugin.json", "marketplace.json"):
+        shutil.copy(REPO_ROOT / ".claude-plugin" / name, root / ".claude-plugin" / name)
+    ignore = shutil.ignore_patterns("tests", "__pycache__")
+    for skill in sorted((REPO_ROOT / "skills").iterdir()):
+        if not skill.is_dir() or (skill.name == "sharpen" and not with_sharpen):
+            continue
+        shutil.copytree(skill, root / "skills" / skill.name, ignore=ignore)
+    return root
+
+
+def saved_command(skill_dir, slug):
+    """The save command exactly as SKILL.md writes it, with `${CLAUDE_SKILL_DIR}`
+    resolved to the installed skill directory and the slug filled in."""
+    text = SKILL_DOC.read_text(encoding="utf-8")
+    found = re.findall(r"`(python3 \$\{CLAUDE_SKILL_DIR\}/save_brief\.py[^`]*)`", text)
+    assert len(found) == 1, f"SKILL.md names the save command {len(found)} times"
+    resolved = found[0].replace("${CLAUDE_SKILL_DIR}", str(skill_dir)).replace("<slug>", slug)
+    argv = shlex.split(resolved)
+    assert argv[0] == "python3"
+    return Path(argv[1]), argv[2:]
+
+
+def test_the_save_step_from_a_marketplace_install_writes_the_brief_at_the_printed_path(
+    rig, tmp_path, monkeypatch
+):
+    root = install_layout(tmp_path)
+    skill_dir = root / "skills" / "shape"
+    script, args = saved_command(skill_dir, "new-cache")
+    assert script == skill_dir / "save_brief.py"
+    assert script.is_file(), f"SKILL.md points at {script}, which the install does not have"
+    before = sorted(str(p) for p in root.rglob("*"))
+    rig.script = script
+    monkeypatch.chdir(tmp_path)
+    proc = rig.run(*args, "--date", "2026-11-04")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    lines = proc.stdout.splitlines()
+    assert len(lines) == 1, proc.stdout
+    saved = Path(lines[0])
+    assert saved.is_absolute() and saved.is_file()
+    assert saved == (rig.roadmaps / "shape-new-cache-2026-11-04.md").resolve()
+    assert saved.read_text(encoding="utf-8") == BRIEF
+    assert sorted(str(p) for p in root.rglob("*")) == before, "the save wrote into the install"
+
+
+def test_a_skipped_save_from_an_install_without_sharpen_names_the_reason_in_one_line(
+    rig, tmp_path, monkeypatch
+):
+    root = install_layout(tmp_path, with_sharpen=False)
+    assert not (root / "skills" / "sharpen").exists()
+    script, args = saved_command(root / "skills" / "shape", "new-cache")
+    rig.script = script
+    monkeypatch.chdir(tmp_path)
+    proc = rig.run(*args, "--date", "2026-11-04")
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    lines = proc.stderr.splitlines()
+    assert len(lines) == 1, proc.stderr
+    assert lines[0].startswith("shape: ")
+    assert "sharpen" in lines[0] and "not installed" in lines[0]
+    assert rig.files() == []
+
+
+def test_the_skill_ends_its_final_message_with_what_became_of_the_save():
+    text = " ".join(SKILL_DOC.read_text(encoding="utf-8").split())
+    assert "End the final message with the outcome of the save, always." in text
+    for form in (
+        "`Brief saved: <absolute path>`",
+        "`Brief saved, not linked: <absolute path>; <the script's reason>`",
+        "`Brief NOT saved: <the script's reason, verbatim>`",
+    ):
+        assert form in text, f"SKILL.md lacks the final-message form {form}"
+    assert "sharpen missing included" in text

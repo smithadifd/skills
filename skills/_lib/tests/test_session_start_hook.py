@@ -36,6 +36,8 @@ if mode == "fail":
 if mode == "longfail":
     sys.stderr.write("x" * 400 + "\\n")
     raise SystemExit(4)
+if mode == "emptybrief" and argv[0] == "resume":
+    raise SystemExit(0)
 if mode == "timeout":
     import time
     time.sleep(1)
@@ -137,6 +139,15 @@ def test_success_prints_the_version_line_then_the_resume_brief(rig):
     assert proc.returncode == 0
     assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
     assert rig.calls() == [["resume", "--brief"], ["--version"]]
+
+
+def test_an_empty_brief_prints_nothing_and_skips_the_version_call(rig):
+    rig.configure()
+    proc = rig.run(mode="emptybrief")
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    assert rig.calls() == [["resume", "--brief"]]
 
 
 def test_a_failed_version_call_does_not_hide_the_brief(rig):
@@ -251,6 +262,16 @@ def test_the_agent_and_harness_are_set_only_when_the_hook_environment_has_none(r
     rig.run(extra_env={"LEDGER_AGENT": "someone-else", "LEDGER_HARNESS": "other-harness"})
     assert rig.env_file.read_text(encoding="utf-8").splitlines() == [
         "export LEDGER_SESSION=sess-1",
+    ]
+
+
+def test_the_session_id_is_written_even_when_the_hook_environment_already_has_one(rig):
+    rig.configure()
+    rig.run(extra_env={"LEDGER_SESSION": "stale-session"})
+    assert rig.env_file.read_text(encoding="utf-8").splitlines() == [
+        "export LEDGER_SESSION=sess-1",
+        "export LEDGER_AGENT=claude-code",
+        "export LEDGER_HARNESS=claude-code",
     ]
 
 
