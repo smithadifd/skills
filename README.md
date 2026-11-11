@@ -113,7 +113,7 @@ The alternative is `install.sh`, which copies skills into `~/.claude/skills/` an
 
 **Using the ledger.** Plugin 0.12.0 (tag v1.2.0) is the first release whose session-start hook prints the ledger contract. To use it:
 
-1. Install the ledger CLI, following the install command in the ledger project's own README.
+1. Install the ledger CLI, following the install command in the README of the [ledger repository](../../../ledger), which sits beside this one under the same GitHub owner.
 2. Set `ledger_cli` as described above.
 3. Add this `env` block to `~/.claude/settings.json`:
 
