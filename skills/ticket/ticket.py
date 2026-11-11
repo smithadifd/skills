@@ -228,9 +228,13 @@ class PlanCard:
     It carries no ``passes`` field. ``review`` is the passing review round of
     this plan that the pass read from the card, or None; ``render`` derives
     each criterion's ``passes`` from it. In the same way ``reached`` names the
-    steps the card's stored events prove were done (``_reached_steps``); the
-    pass sets it, and ``render`` shows those steps complete whatever the
-    presented snapshot said. The snapshot itself is never changed.
+    steps the card's stored events prove were done (``_reached_steps``). It is
+    None on a plan not yet stored (built here, never presented), which renders
+    the statuses its author set; a stored plan (``from_snapshot``, or one the
+    pass presented) holds a set the pass keeps current, and ``render`` shows a
+    step of it complete only when the set names it, skipped when the snapshot
+    skipped it, and pending otherwise, whatever the snapshot's status says. The
+    snapshot itself is never changed.
     """
 
     def __init__(self, ticket: Ticket):
@@ -241,7 +245,8 @@ class PlanCard:
         self.diff_statement: str | None = None
         self.open_questions: list[str] = []
         self.review: Mapping[str, Any] | None = None
-        self.reached: frozenset[str] = frozenset()
+        # None until the plan is stored: an unsynchronized plan renders as its author set it.
+        self.reached: frozenset[str] | None = None
 
     @property
     def acceptance_criteria(self) -> tuple[str, ...]:
@@ -310,15 +315,19 @@ class PlanCard:
         plan.diff_statement = snapshot.get("diff_statement")
         plan.open_questions = list(snapshot["open_questions"])
         plan.review = None
+        # A stored plan: nothing is proven until the pass sets the steps its card's events reach.
         plan.reached = frozenset()
         return plan
 
     def rendered_status(self, step: PlanStep) -> str:
-        """A skipped step stays skipped; a step the stored events prove was done is complete; any other keeps its presented status."""
+        """A skipped step stays skipped. On a stored plan a step is complete only when the stored events prove it
+        and pending otherwise, whatever the snapshot says; a plan not yet stored shows its author's status (design 3.6)."""
 
         if step.status == "skipped":
             return "skipped"
-        return "complete" if step.name in self.reached else step.status
+        if self.reached is None:
+            return step.status
+        return "complete" if step.name in self.reached else "pending"
 
     def render(self) -> str:
         passing = self.review
@@ -787,8 +796,8 @@ def _reached_steps(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]
     """The plan steps the card's stored events prove were done, from the events alone (design 3.5).
 
     A pure function of the card, as ``_passing_final`` is for the criteria. A
-    step this cannot place is left out, so it renders as the snapshot
-    presented it, never complete:
+    step this cannot place is left out, so it renders pending (or skipped,
+    when the snapshot skipped it), never complete:
 
     - ``orient`` and ``research``: a plan was presented, which a pass reaches only through both.
     - ``plan``: a plan go of the pass that presented the plan covers its identity.
@@ -817,6 +826,17 @@ def _reached_steps(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]
     if card["status"] == "closed" and _has_go(card, "outward", identity, key):
         reached.add("outward")
     return frozenset(reached)
+
+
+def _holds_nothing(card: Mapping[str, Any]) -> bool:
+    """Whether a card stores nothing but claims: open, no plan, no record (design 6.3).
+
+    The blank card is one; so is a ledger item whose only events are a claim
+    and its release, which a pass leaves when it finds a markdown card after its
+    claim landed (``LedgerStore.apply``).
+    """
+
+    return card["status"] == "open" and card["plan"] is None and not any(card[name] for name in _CARD_LISTS)
 
 
 # --- Changes (design 4.2, 4.3) and flags (4.6) ------------------------------
@@ -1361,6 +1381,9 @@ class MarkdownStore:
                 raise _stale(self.key, "the card on disk changed")
             mine = binding[1] if joining else self._pass_id
             _check_pass(self.key, card["pass"], mine, self._ended)
+            if binding is not None and not joining and current == NO_TOKEN:
+                # This claim creates the card: under the lock, before the save, ask the ledger (design 6.3).
+                _refuse_card_in_ledger(self.key, self.title)
             card = _fold(card, events)
             if not joining:
                 self._save(card, directory)
@@ -1700,23 +1723,19 @@ class LedgerStore:
         )
 
     def refuse_stranded_card(self, token: str) -> None:
-        """Refuse an open whose ticket has no ledger item but has a markdown card in this repository (design 6.4).
+        """Refuse an open whose ledger card stores nothing but claims while this repository holds its markdown card (design 6.3).
 
         ``choose_store`` picks the store on every open, so a ticket started on
         the markdown store can reach a ledger that has never seen it. Starting
         there would open a second card beside the first; the open stops
-        instead, writes nothing, and names the import command.
+        instead, writes nothing, and names the import command. A ledger item
+        that holds only a released claim (left by ``apply`` when a markdown
+        card appeared after its claim) is refused the same way.
         """
 
-        if token != NO_TOKEN or self.repo is None or not _markdown_card_exists(self.repo, self.key):
+        if self.repo is None or not _holds_nothing(self._card) or not _markdown_card_exists(self.repo, self.key):
             return
-        raise StoreUnavailable(
-            f"ticket {self.key} has no card in the ledger, but its markdown card {self.repo}/.ticket/{self.key}.md exists "
-            "(it was started on the markdown store, and this open chose the ledger store). Nothing was written and the "
-            f"pass was not started, so no fresh card is begun beside it. Import the card with `{import_command(self.repo)}` "
-            "and open the ticket again.",
-            code="card_not_imported",
-        )
+        raise _card_not_imported(self.repo, self.key, "Nothing was written and the pass was not started", token != NO_TOKEN)
 
     def _run(self, *args: str, stdin: str = "") -> _Answer:
         result = subprocess.run([self.cli, "--json", *args], input=stdin, capture_output=True, encoding="utf-8", check=False)
@@ -1784,8 +1803,11 @@ class LedgerStore:
                 raise _handle_used(self.key, self._pass_id or self._ended)
             _check_pass(self.key, self._card["pass"], binding[1] if joining else self._pass_id, self._ended)
             if not joining:
+                fresh = binding is not None and _holds_nothing(self._card)
                 token = self._send(self._batch(token, events), token)
                 self._card = _fold(self._card, events)
+                if fresh and self.repo is not None and _markdown_card_exists(self.repo, self.key, locked=True):
+                    self._withdraw(binding[1])
             if binding is not None:
                 self._pass_id, self._ended = binding[1], None
             return token
@@ -1806,6 +1828,29 @@ class LedgerStore:
                 self._send([self._released(mine)], None)
             except StoreUnavailable as exc:
                 print(f"ticket.py: the release of pass {mine} did not land: {exc}", file=sys.stderr)
+
+    def _withdraw(self, claim: str) -> None:
+        """Release a claim that just landed because a markdown card appeared for the ticket, then refuse (design 6.3).
+
+        The open's own check saw no markdown card before the claim; a markdown
+        pass created one before the post-claim check took the card's lock. The
+        claim is released, the handle counts as ended, and the open is refused
+        ``card_not_imported``. A release that does not land is named in the
+        message with the command a person runs.
+        """
+
+        self._pass_id, self._ended = None, claim
+        try:
+            self._send([self._released(claim)], None)
+        except StoreUnavailable as exc:
+            detail = (
+                f"The claim of pass {claim} landed and its release did not ({exc.code}), so a person runs "
+                f"`{release_command(self.key, claim)}`"
+            )
+        else:
+            self._card = {**self._card, "pass": None}
+            detail = f"The claim of pass {claim} landed before the card was seen and was released, and the pass was not started"
+        raise _card_not_imported(self.repo, self.key, detail, True)
 
     def clear_pass(self, pass_id: str) -> None:
         """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim."""
@@ -1959,6 +2004,52 @@ def select_store() -> Selection:
     return Selection(found, f"{found} found on PATH, {LEDGER_DATABASE} names {_one_line(database)}")
 
 
+def _reachable_ledger() -> str | None:
+    """The ledger CLI this process could reach whatever store was chosen, or None (design 6.3).
+
+    The CLI ``TICKET_LEDGER_CLI`` names (unless it is ``none``), else a
+    ``ledger`` on PATH while ``LEDGER_DB`` names an existing file; either must
+    pass the capability probe. ``none`` keeps the markdown store but does not
+    hide a ledger this process can reach.
+    """
+
+    value = os.environ.get(LEDGER_SELECTOR, "")
+    if value and value.strip().lower() != LEDGER_OPT_OUT:
+        cli: str | None = value
+    else:
+        cli = shutil.which(LEDGER_COMMAND)
+        database = os.environ.get(LEDGER_DATABASE, "")
+        if cli is None or not database or not os.path.isfile(database):
+            return None
+    try:
+        _probe_ledger(cli)
+    except StoreUnavailable:
+        return None
+    return cli
+
+
+def _refuse_card_in_ledger(key: str, title: str) -> None:
+    """Refuse a markdown claim that would create a card while a reachable ledger holds an item for the key (design 6.3).
+
+    The markdown store runs it under the card's lock, before the save. A
+    ledger refusal is not swallowed: the claim fails with it and nothing is
+    written.
+    """
+
+    cli = _reachable_ledger()
+    if cli is None:
+        return
+    _, token = LedgerStore(cli, key, title).read()
+    if token == NO_TOKEN:
+        return
+    raise StoreUnavailable(
+        f"ticket {key} has an item in the ledger {cli} reaches, so the markdown store will not begin a second card for "
+        "it. Nothing was written and the pass was not started; open the ticket on the ledger store "
+        f"(unset {LEDGER_SELECTOR}, or name the ledger CLI in it).",
+        code="card_in_ledger",
+    )
+
+
 def choose_store(repo: str | Path, key: str, title: str) -> Store:
     """The ledger store or the markdown store, as ``select_store`` decides; the handle carries the chosen store and why.
 
@@ -2104,8 +2195,9 @@ class TicketPass:
         try:
             token = self.store.apply(self._token, [("claim", claim)])
         except StoreUnavailable as exc:
-            if exc.code == "handle_used":
-                # Not a lost race: the handle was bound meanwhile, and the fix is a fresh handle.
+            if exc.code in ("handle_used", "card_not_imported", "card_in_ledger"):
+                # Not a lost race: the handle was bound meanwhile (a fresh handle is the fix), or the
+                # other store holds the ticket; a claim left live by a failed release is named in the message.
                 raise
             # A lost race: read once more and name the pass that won.
             card, _ = self.store.read()
@@ -2411,22 +2503,77 @@ def _card_names(directory: int, *, regular_only: bool) -> list[str]:
     return names
 
 
-def _markdown_card_exists(repo: Path, key: str) -> bool:
-    """Whether ``<repo>/.ticket/<key>.md`` exists, of any kind (the import lists the same names); False when it cannot be read."""
+def _markdown_card_exists(repo: Path, key: str, *, locked: bool = False) -> bool:
+    """Whether ``<repo>/.ticket/<key>.md`` exists, of any kind (the import lists the same names); False when it cannot be read.
+
+    With ``locked`` the look is made under a shared ``flock`` on the card's
+    existing lock ``.ticket/<key>.lock``, so it waits out a markdown write in
+    progress (``MarkdownStore.apply`` holds that lock across its ledger check
+    and its save). Nothing is created: with no lock file there is no markdown
+    write under way that began before this look.
+    """
 
     try:
         directory = _open_ticket_directory(repo)
         if directory is None:
             return False
+        lock = None
         try:
+            if locked:
+                lock = _shared_card_lock(directory, key)
             os.stat(f"{key}.md", dir_fd=directory, follow_symlinks=False)
             return True
         except FileNotFoundError:
             return False
         finally:
+            if lock is not None:
+                os.close(lock)
             os.close(directory)
     except OSError:
         return False
+
+
+def _shared_card_lock(directory: int, key: str) -> int | None:
+    """``<key>.lock`` opened through ``directory`` (no link followed, never created, never blocking on a FIFO) and
+    held shared; None when there is no lock file or it is not a regular file."""
+
+    try:
+        fd = os.open(f"{key}.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        fcntl.flock(fd, fcntl.LOCK_SH)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _card_not_imported(repo: Path, key: str, detail: str, item_exists: bool) -> StoreUnavailable:
+    """The ``card_not_imported`` refusal (design 4.5, 6.3): the card, what happened, and what a person does next."""
+
+    if item_exists:
+        held = (
+            f"ticket {key}'s ledger item stores nothing but claims, and its markdown card {repo}/.ticket/{key}.md exists "
+            "(a markdown pass created the card while a pass claimed the ledger)"
+        )
+        then = (
+            f"The import (`{import_command(repo)}`) refuses an item that already exists, so a person decides which "
+            "store holds the ticket."
+        )
+    else:
+        held = (
+            f"ticket {key} has no card in the ledger, but its markdown card {repo}/.ticket/{key}.md exists "
+            "(it was started on the markdown store, and this open chose the ledger store)"
+        )
+        then = f"Import the card with `{import_command(repo)}` and open the ticket again."
+    return StoreUnavailable(
+        f"{held}. {detail}, so no fresh card is begun beside it. {then}",
+        code="card_not_imported",
+    )
 
 
 def _leftover_cards(repo: Path) -> list[str]:

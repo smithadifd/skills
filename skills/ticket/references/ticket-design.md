@@ -280,9 +280,12 @@ after every read and every landed write; `_reached_steps` is a pure function of 
 | `outward` | the card is closed and the outward go covers the plan's identity |
 
 Each step from `plan` on is placed only after the step before it. A `skipped` step stays skipped with
-its reason. A step the events cannot place keeps the status it was presented with, so it never renders
-complete: a go of another pass, a review of another revision, or an open card shows the later steps
-`pending`. A closed card, which validates only with every one of those events (4.5 `close_invalid`),
+its reason. Every other step the events cannot place renders `pending`, whatever status the snapshot
+holds: a snapshot that marks a step `complete` proves nothing, so a plan whose stored events reach only
+`orient` and `research` shows `plan`, `build`, `review` and `outward` pending, and a go of another pass,
+a review of another revision, or an open card shows the later steps `pending` too. Only a plan not yet
+stored (built, never presented) renders the statuses its author set; `from_snapshot` and `present_plan`
+make it a stored plan. A closed card, which validates only with every one of those events (4.5 `close_invalid`),
 renders every step complete or skipped. Nothing derived is stored, so the snapshot, the stores and the
 ledger notes are unchanged.
 
@@ -371,7 +374,8 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `stale` | the card changed since this pass last read or wrote it: a write refused under the held token, a fresh read whose token differs from the held one, or on the ledger a batch key already taken (`conflict`); the message names the newest writer when the store knows it (ledger) or says the card on disk changed (markdown) | the held token detects every change under a live pass at every write and every fresh read, so there is one code and one place that raises it |
 | `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | a permanent refusal is never reported as the retryable `stale` |
 | `ledger_incompatible` | the selected ledger CLI lacks `append-many` or `--expect-revision`, or answers `usage` to a command the store sends | |
-| `card_not_imported` | an open chose the ledger store, the ticket has no ledger item, and `<repo>/.ticket/<key>.md` exists; nothing was written and no claim was taken | ledger store, in `open` after the read and before `_derive`, for a new pass and a join alike; the message names the card and the exact `import-cards` command (6.3) |
+| `card_not_imported` | an open chose the ledger store, the ticket's ledger card stores nothing but claims (no item, or an item holding only claims and releases), and `<repo>/.ticket/<key>.md` exists; nothing was written and no claim was taken. Or the open's own claim landed and then the card was found: the claim was released (the message names `release` when that release did not land) | ledger store: in `open` after the read and before `_derive`, for a new pass and a join alike; and in `apply`, right after a claim on such a card lands, under the card's lock (6.3); the message names the card and the exact `import-cards` command, or says a person decides when an item already exists |
+| `card_in_ledger` | a markdown claim would create the card while a ledger this process reaches holds an item for the key; nothing was written | markdown store, in `apply` under the card's lock, after the claim check and before the save; a ledger refusal on that read is raised as it is (6.3) |
 | `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
@@ -745,10 +749,27 @@ need a place outside both stores, and the import is the one step that makes the 
   the item exists, so the open resumes it from the ledger (an open card keeps its pass id).
 - *Concurrent writers.* An import that lands between the read and the claim leaves the claim on a
   token `none` that is no longer current, so the claim loses as `stale` or `held` (4.5), as any lost
-  race does; a pass writing the markdown card has already ended or holds the card's `flock` that the
-  import will not wait for.
-- *Not covered.* The other direction (a ledger item exists and the open chose markdown) is not
-  detected: the markdown store cannot see the ledger. The selection line names the store the open used.
+  race does. A markdown pass that creates the card is the other writer, and the two stores share no
+  transaction, so each side checks the other at a point the card's `flock` (`.ticket/<key>.lock`)
+  orders. The markdown store, when its claim would create the card, asks the ledger this process
+  reaches (the CLI `TICKET_LEDGER_CLI` names, or a `ledger` on `PATH` with `LEDGER_DB`; `none` keeps
+  the markdown store but does not skip the check) while it holds that lock and before it saves; an item
+  for the key refuses `card_in_ledger`. The ledger store, after a claim on a card that stores nothing but
+  claims lands, looks for the markdown card again under a shared lock on the existing lock file (it
+  never creates `.ticket/` or the lock). Either the markdown pass held the lock first, so the look waits
+  for its save and sees the card, or the look came first, so the markdown check runs after the ledger
+  claim and sees the item. A card found there releases the claim and refuses `card_not_imported`. An
+  exclusive marker under `.ticket/` was not used: the ledger store would then create `.ticket/` and pass
+  its ignore check in every repository it works in.
+- *After that refusal.* The released claim leaves a ledger item that stores nothing but claims. The next
+  ledger open finds it with the markdown card and refuses `card_not_imported` (the item already exists,
+  so the import refuses it and a person decides), so the markdown pass stays the one live pass. A
+  release that does not land leaves the claim live; the message names the `release` command.
+- *Not covered.* A markdown pass in a process that reaches no ledger (no CLI, no `LEDGER_DB`, or a CLI
+  that fails the probe) cannot see the ledger, so a card it creates after the ledger open's second look
+  is not detected; nor is a ticket the ledger already holds with stored records while its markdown card
+  exists (the leftover notice names it). A look that cannot read `.ticket/` counts as no card, as the
+  leftover notice does. The selection line names the store the open used.
 
 ### 6.4 Importing markdown cards into the ledger
 
