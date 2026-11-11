@@ -279,10 +279,6 @@ the exit status design 6.2.4 lists for it, unless the row pairs them otherwise.
 | H36 | `test_an_outside_close_under_the_close_keys_is_trusted_only_with_a_close_phase_and_one_source[right keys, close phase, same source | a stop that is not a close phase]` | an outsider's stop and closed state under `ticket-close/K/P/T/…` keys; the stop is at the close phase or at `build` | the read card marks its last stamp as the close only for the close phase (the resume of the `build` stop is `close_invalid`) | `_trusted_close` drops the `phase == "close"` operand (the resume still refuses on the stamp's phase, so the mark is the guard) |
 | H37 | `test_an_outside_close_under_the_close_keys_is_trusted_only_with_a_close_phase_and_one_source[a stop of another source]` | as H36, the stop and the state carrying different `source` | the last stamp is not marked as the close; the resume is `close_invalid` | `_trusted_close` drops the `source` equality |
 | H38 | `test_a_release_naming_another_pass_leaves_the_live_pass_holding` | pass Q claimed; an outsider appends `ticket-pass/K/P/released` for another pass P | a fresh read still shows Q holding; a second pass's claim is `held` naming Q; a release naming Q clears it | the folded release clears the pass without matching its id |
-| H39 | `test_a_ticket_opened_on_markdown_and_resumed_after_a_ledger_appears_names_the_import_command[new pass | join]` | S2[0] started on the markdown store; a compatible fake ledger and `LEDGER_DB` appear; `open` on the chosen store, once as a new pass and once as a join | `card_not_imported` naming the card path and the exact import command; the ledger holds no event and no `append-many` ran; the markdown card's bytes are unchanged | the `refuse_stranded_card` call is dropped from `open`; the refusal code is another |
-| H40 | `test_the_import_command_the_resume_names_carries_the_card_across_and_the_resume_then_finds_it` | H26, a rerun, then `import-cards` | the rerun refuses the same way with nothing appended; the import prints `imported <key>`; the next open resumes at `build` with the plan step complete | the refusal is not repeated by a rerun |
-| H41 | `test_another_ticket_still_opens_fresh_on_the_ledger_while_a_markdown_card_waits` | a markdown card for EK-14; `open` of EK-2 on the ledger | the open succeeds with one claim; the leftover notice is printed | `_markdown_card_exists` answers true for a name that is not there |
-| H42 | `test_a_ticket_already_in_the_ledger_is_not_refused_for_a_leftover_card_of_its_key` | S1 on the ledger, ended; a markdown card under the same key | the open succeeds and prints the leftover notice | the guard ignores the token (`token != NO_TOKEN`) and refuses whenever a card exists |
 
 ## I. Validators
 
@@ -325,10 +321,10 @@ identity of its `and`/`or`.
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 47, F 8, G 31,
-  H 42, I 26. Total 230 rows. Eight carry no test with a mutation of their own in this release:
+  H 38, I 26. Total 226 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 222 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 218 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's

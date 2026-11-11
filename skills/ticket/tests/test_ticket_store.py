@@ -20,7 +20,7 @@ import ticket
 from ledger_support import FakeLedger, build_ledger, machine
 from ticket_support import (
     A, B, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass, read_card,
-    refusal, store, write_card,
+    refusal, store,
 )
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -939,176 +939,34 @@ def test_the_open_card_names_the_store_and_why_first(repo, tmp_path, monkeypatch
     assert on_markdown.reconciliation == ("store: markdown (TICKET_LEDGER_CLI=none)",)
 
 
-# --- LP4-F1: a resume after the store changed ---------------------------------------------------------------
+# --- Store choice, open and resume across a store change stay as they were ---------------------------------
+# A guard against a second card in the other store is a separate change; until it lands, a ticket started on
+# one store and opened on the other begins a card there, and these tests pin that the open is not refused.
 
 
-@pytest.mark.parametrize("joined", [False, True])
-def test_a_ticket_opened_on_markdown_and_resumed_after_a_ledger_appears_names_the_import_command(
-    repo, tmp_path, monkeypatch, joined
-):
+def test_a_markdown_ticket_opened_after_a_ledger_appears_begins_a_ledger_card_unrefused(repo, tmp_path, monkeypatch):
     machine(monkeypatch, tmp_path)  # no ledger on PATH: the ticket starts on the markdown store
-    started = build(repo, Source(), "S2", 0)
-    if not joined:
-        started.end()
+    build(repo, Source(), "S2", 0).end()
     before = card_bytes(repo)
     fake = FakeLedger(tmp_path / "bin")
     machine(monkeypatch, tmp_path, fake)  # a compatible ledger and LEDGER_DB appear
     handle = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(handle, ticket.LedgerStore)
-    with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        ticket.TicketPass.open(KEY, Source(), handle, pass_id=started.pass_id if joined else None)
-    assert refusal(excinfo) == "card_not_imported"
-    message = str(excinfo.value)
-    assert ticket.import_command(repo.resolve()) in message
-    assert str(repo.resolve() / ".ticket" / f"{KEY}.md") in message
-    assert fake.events() == [] and fake.appends() == []  # no fresh card, no claim
+    session = ticket.TicketPass.open(KEY, Source(), handle)
+    assert session.live and session.plan is None  # a fresh ledger card, claimed
+    assert len(fake.appends()) == 1 and fake.store().read()[0]["pass"]["id"] == session.pass_id
+    assert session.reconciliation[-1].startswith("markdown ticket cards remain in ")  # the leftover notice only
     assert card_bytes(repo) == before  # the markdown card is untouched
 
 
-def test_the_import_command_the_resume_names_carries_the_card_across_and_the_resume_then_finds_it(
-    repo, tmp_path, monkeypatch, capsys
-):
-    machine(monkeypatch, tmp_path)
-    build(repo, Source(), "S2", 0).end()
+def test_a_markdown_open_begins_its_card_without_asking_a_ledger_it_could_reach(repo, tmp_path, monkeypatch):
     fake = FakeLedger(tmp_path / "bin")
     machine(monkeypatch, tmp_path, fake)
-    with pytest.raises(ticket.StoreUnavailable):
-        ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
-    with pytest.raises(ticket.StoreUnavailable):  # a rerun refuses the same way, still writing nothing
-        ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
-    assert fake.appends() == []
-    assert ticket.main(["import-cards", str(repo)]) == 0
-    assert capsys.readouterr().out.splitlines() == [f"imported {KEY}"]
-    resumed = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
-    assert resumed.phase == "build"
-    assert resumed.plan is not None and resumed.plan.render().count("- plan: complete") == 1
-
-
-def test_another_ticket_still_opens_fresh_on_the_ledger_while_a_markdown_card_waits(repo, tmp_path, monkeypatch):
-    machine(monkeypatch, tmp_path)
-    build(repo, Source(), "S1", 0).end()
-    fake = FakeLedger(tmp_path / "bin")
-    machine(monkeypatch, tmp_path, fake)
-    session = ticket.TicketPass.open("EK-2", Source(), ticket.choose_store(repo, "EK-2", TITLE))
-    assert session.live and len(fake.appends()) == 1  # only the claim; the other key's card is not its card
-    assert session.reconciliation[-1].startswith("markdown ticket cards remain in ")
-
-
-def test_a_ticket_already_in_the_ledger_is_not_refused_for_a_leftover_card_of_its_key(repo, tmp_path, monkeypatch):
-    fake = FakeLedger(tmp_path / "bin")
-    machine(monkeypatch, tmp_path, fake)
-    build_ledger(fake, Source(), "S1").end()
-    write_card(repo, ticket._blank_card(KEY, TITLE))  # a leftover markdown card under the same key
-    session = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
-    assert session.live
-    assert session.reconciliation[-1].startswith("markdown ticket cards remain in ")
-
-
-# --- LP4-F1 r2: one live pass across both stores ------------------------------------------------------------
-
-
-class SendHook(ticket.LedgerStore):
-    """A ledger handle over the fake CLI that runs ``before`` and ``after`` once, around its first ``append-many``.
-
-    ``before`` runs between the open's markdown-card check and the claim reaching the ledger; ``after`` runs once
-    the claim has landed, before the post-claim check.
-    """
-
-    def __init__(self, fake, repo, before=None, after=None):
-        super().__init__(fake.path, KEY, TITLE, repo)
-        self._hooks = [before, after]
-
-    def _send(self, batch, expect):
-        before, after = self._hooks
-        self._hooks = [None, None]
-        if before is not None:
-            before()
-        token = super()._send(batch, expect)
-        if after is not None:
-            after()
-        return token
-
-
-def _kinds(fake):
-    return [event["kind"] for event in fake.events()]
-
-
-def test_a_markdown_claim_landing_between_the_check_and_the_ledger_claim_releases_the_claim_and_refuses(
-    repo, tmp_path, monkeypatch
-):
-    fake = FakeLedger(tmp_path / "bin")
-    machine(monkeypatch, tmp_path, fake)
-    racer = {}
-
-    def markdown_claim():
-        # Another session on the markdown store; the ledger holds no item yet, so its own check passes.
-        racer["pass"] = ticket.TicketPass.open(KEY, Source(), store(repo))
-
-    handle = SendHook(fake, repo, before=markdown_claim)
-    with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        ticket.TicketPass.open(KEY, Source(), handle)
-    assert refusal(excinfo) == "card_not_imported"
-    assert "was released" in str(excinfo.value)
-    assert _kinds(fake) == ["item.created", "session.opened", "session.closed"]  # the claim landed and was released
-    assert fake.store().read()[0]["pass"] is None  # no claim is left behind in the ledger
-    assert racer["pass"].live and read_card(repo)["pass"]["id"] == racer["pass"].pass_id  # one live pass: the markdown one
-    appends = len(fake.appends())
-    with pytest.raises(ticket.StoreUnavailable) as again:  # the next ledger open finds the claims-only item and refuses
-        ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
-    assert refusal(again) == "card_not_imported"
-    assert len(fake.appends()) == appends
-
-
-def test_the_post_claim_check_waits_out_a_markdown_write_holding_the_cards_lock(repo, tmp_path, monkeypatch):
-    fake = FakeLedger(tmp_path / "bin")
-    machine(monkeypatch, tmp_path, fake)
-    card_path(repo).parent.mkdir()
-    lock = os.open(card_path(repo).with_name(f"{KEY}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(lock, fcntl.LOCK_EX)  # a markdown write under way: it holds the lock and has not saved yet
-    writer = threading.Thread(target=lambda: (time.sleep(0.4), write_card(repo, ticket._blank_card(KEY, TITLE)),
-                                              fcntl.flock(lock, fcntl.LOCK_UN), os.close(lock)))
-    handle = SendHook(fake, repo, after=writer.start)
-    with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        ticket.TicketPass.open(KEY, Source(), handle)
-    writer.join()
-    assert refusal(excinfo) == "card_not_imported"
-    assert fake.store().read()[0]["pass"] is None
-
-
-def test_a_post_claim_refusal_whose_release_fails_names_the_release_command(repo, tmp_path, monkeypatch):
-    fake = FakeLedger(tmp_path / "bin")
-    machine(monkeypatch, tmp_path, fake)
-    handle = SendHook(
-        fake, repo,
-        before=lambda: write_card(repo, ticket._blank_card(KEY, TITLE)),
-        after=lambda: fake.answer("append-many", "validation"),  # the release that follows is refused
-    )
-    with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        ticket.TicketPass.open(KEY, Source(), handle)
-    assert refusal(excinfo) == "card_not_imported"  # not reported as a held ticket
-    live = fake.store().read()[0]["pass"]
-    assert live is not None and ticket.release_command(KEY, live["id"]) in str(excinfo.value)
-
-
-def test_a_markdown_open_refuses_to_begin_a_card_for_a_ticket_the_reachable_ledger_holds(repo, tmp_path, monkeypatch):
-    fake = FakeLedger(tmp_path / "bin")
-    machine(monkeypatch, tmp_path, fake)
-    build_ledger(fake, Source(), "S1").end()
+    build_ledger(fake, Source(), "S1").end()  # the ledger holds an item for the key
     monkeypatch.setenv("TICKET_LEDGER_CLI", "none")  # this session keeps the markdown store
     handle = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(handle, ticket.MarkdownStore)
-    appends = len(fake.appends())
-    with pytest.raises(ticket.StoreUnavailable) as excinfo:
-        ticket.TicketPass.open(KEY, Source(), handle)
-    assert refusal(excinfo) == "card_in_ledger"
-    assert card_bytes(repo) is None and len(fake.appends()) == appends  # no card begun, nothing written anywhere
-
-
-def test_a_markdown_open_asks_the_reachable_ledger_and_begins_the_card_when_it_holds_no_item(repo, tmp_path, monkeypatch):
-    fake = FakeLedger(tmp_path / "bin")
-    machine(monkeypatch, tmp_path, fake)
-    monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
-    session = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
+    calls = len(fake.calls())
+    session = ticket.TicketPass.open(KEY, Source(), handle)
     assert session.live and read_card(repo)["pass"]["id"] == session.pass_id
-    assert [call.argv[-1] for call in fake.calls("query")] == [KEY]
-    assert fake.events() == []
+    assert len(fake.calls()) == calls  # the markdown open never runs the ledger CLI

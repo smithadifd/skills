@@ -13,8 +13,6 @@ def private_tmp(tmp_path, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     monkeypatch.setattr("tempfile.tempdir", None)
     monkeypatch.delenv("TICKET_LEDGER_CLI", raising=False)
-    # A markdown claim asks a reachable ledger first; only a test's own ``machine`` names one.
-    monkeypatch.delenv("LEDGER_DB", raising=False)
     return tmp_path
 
 

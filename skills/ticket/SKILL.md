@@ -142,10 +142,6 @@ cards, `open` adds one line to `session.reconciliation` naming the exact
 `import-cards` command. Read it to the person; run the import when they agree.
 Never run the import against a repository you were not asked to work in.
 
-A ticket with its own markdown card and no ledger item is refused
-`card_not_imported`, nothing written: read its message and import command to
-the person, import when they agree, then open again.
-
 ## One live pass
 
 A ticket has at most one live pass. `open` claims the ticket with the pass's
