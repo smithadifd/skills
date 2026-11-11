@@ -1,7 +1,7 @@
 ---
 name: shape
 kind: portable
-version: 1.2.0
+version: 1.2.1
 description: >
   Adversarially pressure-test a proposed direction BEFORE any code is written: parallel
   read-only sub-agents over one approach — unknowns, edge cases, alternatives + tradeoffs,
@@ -169,8 +169,20 @@ After printing the brief, save it. Pipe the whole brief to
 hyphenated name for the proposal). It writes `shape-<slug>-<YYYY-MM-DD>.md` into
 the roadmaps directory from sharpen's `paths.py` (the same resolution, reused),
 prints the file's absolute path, and refuses to overwrite an earlier brief: pick a
-different slug then. Tell the person the path. If sharpen is not installed beside
-this skill the script says so and saves nothing; the printed brief stands.
+different slug then. The script needs sharpen's `paths.py` beside this skill
+(`${CLAUDE_SKILL_DIR}/../sharpen/paths.py`): the marketplace install and
+`install.sh --all` both put it there, `install.sh shape` alone does not. Its output
+is one line either way: the absolute path on stdout when it saved, or one
+`shape: ...` reason on stderr (exit 2) when it saved nothing, sharpen missing
+included. The printed brief stands, but no file exists.
+
+**End the final message with the outcome of the save, always.** Use the exit status:
+
+- exit 0: `Brief saved: <absolute path>`.
+- exit 1 (the ledger link failed, the file is saved): `Brief saved, not linked: <absolute path>; <the script's reason>`.
+- any other exit: `Brief NOT saved: <the script's reason, verbatim>`. Never end on
+  the printed brief alone: the person reads the brief inline and cannot tell that no
+  `shape-<slug>-<YYYY-MM-DD>.md` file exists unless the final message says so.
 
 When the ledger is on, link the brief to the open item. Run
 `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`; if it prints

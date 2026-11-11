@@ -41,5 +41,6 @@ require 'mutation fallback' 'this review carries the mutation'
 require 'docs exemption' 'Docs-only changes need no mutation'
 require 'delta review heading' 'Delta review (round 2 and later)'
 require 'operative delta review' 'Review the change since the last reviewed commit'
+require 'issue locator' 'Every bullet under Issues carries a `file:line` locator'
 
-printf 'PASS: reviewer text states spec-then-standards axes, scope, mutation ownership and routing, docs exemption, and operative delta review\n'
+printf 'PASS: reviewer text states spec-then-standards axes, scope, mutation ownership and routing, docs exemption, operative delta review, and the file:line locator on every issue\n'
