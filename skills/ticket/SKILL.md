@@ -142,6 +142,10 @@ cards, `open` adds one line to `session.reconciliation` naming the exact
 `import-cards` command. Read it to the person; run the import when they agree.
 Never run the import against a repository you were not asked to work in.
 
+A ticket with its own markdown card and no ledger item is refused
+`card_not_imported`, nothing written: read its message and import command to
+the person, import when they agree, then open again.
+
 ## One live pass
 
 A ticket has at most one live pass. `open` claims the ticket with the pass's
@@ -232,7 +236,8 @@ research, plan, build, review and outward:
   `plan.skip_step("plan", reason, diff_statement="<one sentence>")`. Skipping
   the plan step never skips the plan go.
 - `plan.complete_step(name)` and `plan.add_open_question(text)` record the
-  rest.
+  rest. The rendered card derives each step's status from the stored events
+  (design 3.6); a closed card shows every step complete or skipped.
 
 Present assumptions, intended changes and the test plan in prose around the
 card.

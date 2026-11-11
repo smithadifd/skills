@@ -227,7 +227,10 @@ class PlanCard:
 
     It carries no ``passes`` field. ``review`` is the passing review round of
     this plan that the pass read from the card, or None; ``render`` derives
-    each criterion's ``passes`` from it.
+    each criterion's ``passes`` from it. In the same way ``reached`` names the
+    steps the card's stored events prove were done (``_reached_steps``); the
+    pass sets it, and ``render`` shows those steps complete whatever the
+    presented snapshot said. The snapshot itself is never changed.
     """
 
     def __init__(self, ticket: Ticket):
@@ -238,6 +241,7 @@ class PlanCard:
         self.diff_statement: str | None = None
         self.open_questions: list[str] = []
         self.review: Mapping[str, Any] | None = None
+        self.reached: frozenset[str] = frozenset()
 
     @property
     def acceptance_criteria(self) -> tuple[str, ...]:
@@ -306,7 +310,15 @@ class PlanCard:
         plan.diff_statement = snapshot.get("diff_statement")
         plan.open_questions = list(snapshot["open_questions"])
         plan.review = None
+        plan.reached = frozenset()
         return plan
+
+    def rendered_status(self, step: PlanStep) -> str:
+        """A skipped step stays skipped; a step the stored events prove was done is complete; any other keeps its presented status."""
+
+        if step.status == "skipped":
+            return "skipped"
+        return "complete" if step.name in self.reached else step.status
 
     def render(self) -> str:
         passing = self.review
@@ -319,7 +331,8 @@ class PlanCard:
             lines.append(line)
         lines.extend(("", "## Steps"))
         for step in self.steps:
-            lines.append(f"- {step.name}: skip: {step.skip}" if step.status == "skipped" else f"- {step.name}: {step.status}")
+            status = self.rendered_status(step)
+            lines.append(f"- {step.name}: skip: {step.skip}" if status == "skipped" else f"- {step.name}: {status}")
         if self.diff_statement:
             lines.extend(("", f"Diff: {self.diff_statement}"))
         if self.open_questions:
@@ -768,6 +781,42 @@ def _passing_final(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]
     ):
         return final
     return None
+
+
+def _reached_steps(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]] | None, key: str) -> frozenset[str]:
+    """The plan steps the card's stored events prove were done, from the events alone (design 3.5).
+
+    A pure function of the card, as ``_passing_final`` is for the criteria. A
+    step this cannot place is left out, so it renders as the snapshot
+    presented it, never complete:
+
+    - ``orient`` and ``research``: a plan was presented, which a pass reaches only through both.
+    - ``plan``: a plan go of the pass that presented the plan covers its identity.
+    - ``build``: a review round covering the plan identity is stored. ``begin_build`` writes
+      nothing, so a round is the one stored proof that a build was begun and handed to review.
+    - ``review``: the last round is a passing round of the plan.
+    - ``outward``: the card is closed and the outward go covers the plan. The close is the
+      atomic write that ends the outward actions the go opened.
+
+    Each step from ``plan`` on is placed only after the one before it, so a
+    later event never makes an earlier unplaced step look done.
+    """
+
+    if identity is None:
+        return frozenset()
+    reached = {"orient", "research"}
+    if not _has_go(card, "plan", identity, key):
+        return frozenset(reached)
+    reached.add("plan")
+    if not any(_covers(review, identity) for review in card["reviews"]):
+        return frozenset(reached)
+    reached.add("build")
+    if _passing_final(card, identity) is None:
+        return frozenset(reached)
+    reached.add("review")
+    if card["status"] == "closed" and _has_go(card, "outward", identity, key):
+        reached.add("outward")
+    return frozenset(reached)
 
 
 # --- Changes (design 4.2, 4.3) and flags (4.6) ------------------------------
@@ -1650,6 +1699,25 @@ class LedgerStore:
             f"import them with `{import_command(self.repo)}`"
         )
 
+    def refuse_stranded_card(self, token: str) -> None:
+        """Refuse an open whose ticket has no ledger item but has a markdown card in this repository (design 6.4).
+
+        ``choose_store`` picks the store on every open, so a ticket started on
+        the markdown store can reach a ledger that has never seen it. Starting
+        there would open a second card beside the first; the open stops
+        instead, writes nothing, and names the import command.
+        """
+
+        if token != NO_TOKEN or self.repo is None or not _markdown_card_exists(self.repo, self.key):
+            return
+        raise StoreUnavailable(
+            f"ticket {self.key} has no card in the ledger, but its markdown card {self.repo}/.ticket/{self.key}.md exists "
+            "(it was started on the markdown store, and this open chose the ledger store). Nothing was written and the "
+            f"pass was not started, so no fresh card is begun beside it. Import the card with `{import_command(self.repo)}` "
+            "and open the ticket again.",
+            code="card_not_imported",
+        )
+
     def _run(self, *args: str, stdin: str = "") -> _Answer:
         result = subprocess.run([self.cli, "--json", *args], input=stdin, capture_output=True, encoding="utf-8", check=False)
         return _ledger_answer(result.returncode, result.stdout, result.stderr)
@@ -2002,6 +2070,9 @@ class TicketPass:
         if ticket.key != key:
             raise TicketError(f"the source returned ticket {ticket.key!r}, expected {key!r}")
         card, token = store.read()
+        stranded = getattr(store, "refuse_stranded_card", None)
+        if callable(stranded):
+            stranded(token)
         state, flags, identity = _derive(card, ticket, pass_id, key)
         session = cls(ticket, store, card, token, identity)
         session._phase = state
@@ -2016,6 +2087,7 @@ class TicketPass:
         if session._identity is not None:
             session._plan = PlanCard.from_snapshot(card["plan"])
             session._plan.review = _passing_final(card, session._identity) if state in ("outward_go", "closed") else None
+            session._sync_steps()
         if state in ("stopped", "closed"):
             return session
         if pass_id is None:
@@ -2125,6 +2197,13 @@ class TicketPass:
     def _advance(self, token: str, events: Sequence[tuple[str, Any]]) -> None:
         self._card = _fold(self._card, events)
         self._token = token
+        self._sync_steps()
+
+    def _sync_steps(self) -> None:
+        """Set the held plan's derived steps from the held card."""
+
+        if self._plan is not None:
+            self._plan.reached = _reached_steps(self._card, self._identity, self.key)
 
     def _stamp(self, point: str, next_skills: Sequence[str], refs: Sequence[str], *, phase: str | None = None, close: bool = False) -> tuple[str, Any]:
         return (
@@ -2154,6 +2233,7 @@ class TicketPass:
         self._identity = (revision, tuple(plan.acceptance_criteria))
         plan.review = None
         self._plan = plan
+        self._sync_steps()
         self._phase = "plan_go"
 
     @_ends_on_failure
@@ -2329,6 +2409,24 @@ def _card_names(directory: int, *, regular_only: bool) -> list[str]:
                 continue
         names.append(name)
     return names
+
+
+def _markdown_card_exists(repo: Path, key: str) -> bool:
+    """Whether ``<repo>/.ticket/<key>.md`` exists, of any kind (the import lists the same names); False when it cannot be read."""
+
+    try:
+        directory = _open_ticket_directory(repo)
+        if directory is None:
+            return False
+        try:
+            os.stat(f"{key}.md", dir_fd=directory, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(directory)
+    except OSError:
+        return False
 
 
 def _leftover_cards(repo: Path) -> list[str]:

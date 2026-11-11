@@ -17,10 +17,10 @@ from pathlib import Path
 import pytest
 
 import ticket
-from ledger_support import FakeLedger, machine
+from ledger_support import FakeLedger, build_ledger, machine
 from ticket_support import (
     A, B, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass, read_card,
-    refusal, store,
+    refusal, store, write_card,
 )
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -937,3 +937,68 @@ def test_the_open_card_names_the_store_and_why_first(repo, tmp_path, monkeypatch
     monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
     on_markdown = ticket.TicketPass.open("EK-2", Source(), ticket.choose_store(repo, "EK-2", TITLE))
     assert on_markdown.reconciliation == ("store: markdown (TICKET_LEDGER_CLI=none)",)
+
+
+# --- LP4-F1: a resume after the store changed ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_a_ticket_opened_on_markdown_and_resumed_after_a_ledger_appears_names_the_import_command(
+    repo, tmp_path, monkeypatch, joined
+):
+    machine(monkeypatch, tmp_path)  # no ledger on PATH: the ticket starts on the markdown store
+    started = build(repo, Source(), "S2", 0)
+    if not joined:
+        started.end()
+    before = card_bytes(repo)
+    fake = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, fake)  # a compatible ledger and LEDGER_DB appear
+    handle = ticket.choose_store(repo, KEY, TITLE)
+    assert isinstance(handle, ticket.LedgerStore)
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        ticket.TicketPass.open(KEY, Source(), handle, pass_id=started.pass_id if joined else None)
+    assert refusal(excinfo) == "card_not_imported"
+    message = str(excinfo.value)
+    assert ticket.import_command(repo.resolve()) in message
+    assert str(repo.resolve() / ".ticket" / f"{KEY}.md") in message
+    assert fake.events() == [] and fake.appends() == []  # no fresh card, no claim
+    assert card_bytes(repo) == before  # the markdown card is untouched
+
+
+def test_the_import_command_the_resume_names_carries_the_card_across_and_the_resume_then_finds_it(
+    repo, tmp_path, monkeypatch, capsys
+):
+    machine(monkeypatch, tmp_path)
+    build(repo, Source(), "S2", 0).end()
+    fake = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, fake)
+    with pytest.raises(ticket.StoreUnavailable):
+        ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
+    with pytest.raises(ticket.StoreUnavailable):  # a rerun refuses the same way, still writing nothing
+        ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
+    assert fake.appends() == []
+    assert ticket.main(["import-cards", str(repo)]) == 0
+    assert capsys.readouterr().out.splitlines() == [f"imported {KEY}"]
+    resumed = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
+    assert resumed.phase == "build"
+    assert resumed.plan is not None and resumed.plan.render().count("- plan: complete") == 1
+
+
+def test_another_ticket_still_opens_fresh_on_the_ledger_while_a_markdown_card_waits(repo, tmp_path, monkeypatch):
+    machine(monkeypatch, tmp_path)
+    build(repo, Source(), "S1", 0).end()
+    fake = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, fake)
+    session = ticket.TicketPass.open("EK-2", Source(), ticket.choose_store(repo, "EK-2", TITLE))
+    assert session.live and len(fake.appends()) == 1  # only the claim; the other key's card is not its card
+    assert session.reconciliation[-1].startswith("markdown ticket cards remain in ")
+
+
+def test_a_ticket_already_in_the_ledger_is_not_refused_for_a_leftover_card_of_its_key(repo, tmp_path, monkeypatch):
+    fake = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, fake)
+    build_ledger(fake, Source(), "S1").end()
+    write_card(repo, ticket._blank_card(KEY, TITLE))  # a leftover markdown card under the same key
+    session = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
+    assert session.live
+    assert session.reconciliation[-1].startswith("markdown ticket cards remain in ")

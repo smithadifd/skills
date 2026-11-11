@@ -93,7 +93,7 @@ atomic with `append-many --expect-revision`.
       "schema": "ticket-plan-card/v2", "key", "title",
       "revision": <int >= 1>, "pass": "<id of the pass that presented it>",
       "criteria": ["<text>", ...],                      # ordered, non-empty, each non-empty
-      "steps": [{"name", "status", "skip"?} x 6],       # orient research plan build review outward
+      "steps": [{"name", "status", "skip"?} x 6],       # orient research plan build review outward; as presented (3.6)
       "diff_statement"?: "<one sentence>",   # only while the plan step is skipped
       "open_questions": ["<text>", ...],
       "ticket_status"?: "<text>", "ticket_updated_at"?: "<text>"
@@ -263,6 +263,29 @@ token is the only thing that binds the pass to the store:
 
 A live pass never pulls the ticket source again; the next open sees a source edit.
 
+### 3.6 Rendered step status
+
+The plan snapshot is written once, at `present_plan`, and never changed, so the `status` it stores for
+each step is the status *as presented*. `PlanCard.render` does not show that status as the card's
+progress. It shows each step's status derived from the card's stored events, the way it derives each
+criterion's `passes` from the stored rounds (`PlanCard.reached`, set by the pass from the held card
+after every read and every landed write; `_reached_steps` is a pure function of the card):
+
+| Step | Complete when the stored events show |
+|---|---|
+| `orient`, `research` | a plan was presented (a pass reaches `present_plan` only through both) |
+| `plan` | a plan go of the pass that presented the plan covers its identity |
+| `build` | a review round covering the plan's identity is stored (`begin_build` writes nothing, so a round is the one stored proof that a build was begun and handed to review) |
+| `review` | the last round is a passing round of the plan, listing every criterion |
+| `outward` | the card is closed and the outward go covers the plan's identity |
+
+Each step from `plan` on is placed only after the step before it. A `skipped` step stays skipped with
+its reason. A step the events cannot place keeps the status it was presented with, so it never renders
+complete: a go of another pass, a review of another revision, or an open card shows the later steps
+`pending`. A closed card, which validates only with every one of those events (4.5 `close_invalid`),
+renders every step complete or skipped. Nothing derived is stored, so the snapshot, the stores and the
+ledger notes are unchanged.
+
 ## 4. The resume rules
 
 ### 4.1 Order
@@ -348,6 +371,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `stale` | the card changed since this pass last read or wrote it: a write refused under the held token, a fresh read whose token differs from the held one, or on the ledger a batch key already taken (`conflict`); the message names the newest writer when the store knows it (ledger) or says the card on disk changed (markdown) | the held token detects every change under a live pass at every write and every fresh read, so there is one code and one place that raises it |
 | `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | a permanent refusal is never reported as the retryable `stale` |
 | `ledger_incompatible` | the selected ledger CLI lacks `append-many` or `--expect-revision`, or answers `usage` to a command the store sends | |
+| `card_not_imported` | an open chose the ledger store, the ticket has no ledger item, and `<repo>/.ticket/<key>.md` exists; nothing was written and no claim was taken | ledger store, in `open` after the read and before `_derive`, for a new pass and a join alike; the message names the card and the exact `import-cards` command (6.3) |
 | `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
@@ -708,6 +732,24 @@ select the same way (`import-cards` exits 2 with the reason when the choice is m
 The open prints the choice: `TicketPass.open` puts `store: <ledger|markdown> (<reason>)` first in
 `reconciliation`. A store built directly, not through `choose_store`, prints no such line.
 
+**A resume after the store changed.** The choice is made again on every open, a resume included, so a
+ticket started on the markdown store reaches the ledger store as soon as a compatible `ledger` and
+`LEDGER_DB` appear. The ledger holds no item for it, and a pass opened there would begin a second card
+beside the markdown one. The open therefore stops instead: when the ledger store reads no item for the
+key (token `none`) and `<repo>/.ticket/<key>.md` exists (any kind of entry, the names the import lists),
+`open` raises `card_not_imported` (4.5), which says the card was started on the markdown store and
+names the exact `import-cards` command. It stops after the read and before any claim, so nothing is
+written. The rule is the pass's, not a stored record of which store a pass opened on: that record would
+need a place outside both stores, and the import is the one step that makes the ledger the card's home.
+- *Failure path.* A rerun before the import refuses the same way and writes nothing. After the import
+  the item exists, so the open resumes it from the ledger (an open card keeps its pass id).
+- *Concurrent writers.* An import that lands between the read and the claim leaves the claim on a
+  token `none` that is no longer current, so the claim loses as `stale` or `held` (4.5), as any lost
+  race does; a pass writing the markdown card has already ended or holds the card's `flock` that the
+  import will not wait for.
+- *Not covered.* The other direction (a ledger item exists and the open chose markdown) is not
+  detected: the markdown store cannot see the ledger. The selection line names the store the open used.
+
 ### 6.4 Importing markdown cards into the ledger
 
 A machine that ran `/ticket` on the markdown store holds `.ticket/<key>.md` cards. When it switches to
@@ -794,7 +836,8 @@ cards, is `ledger item exists with different history`: never a merge, never a se
 **The notice.** When a pass opens on the ledger store (selected by name or found on `PATH`) and `<repo>/.ticket/` holds unimported `*.md`
 cards, `TicketPass.open` adds one line to `reconciliation`: it names the exact command
 (`python3 <skill-dir>/ticket.py import-cards <repo>`, absolute and shell-quoted) and is printed once per
-open. The markdown store never prints it.
+open. The markdown store never prints it. When the opened key's own card is among them and the ledger has no item for it,
+the open is refused instead (6.3, `card_not_imported`).
 
 ## 7. Non-goals
 
