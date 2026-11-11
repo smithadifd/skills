@@ -1172,3 +1172,150 @@ def test_F10_reopening_a_closed_ticket_keeps_its_passing_review_in_the_plan(repo
     assert reopened.phase == "closed"
     assert reopened.plan.review is not None
     assert reopened.plan.render() == closing
+
+
+# --- SK36: each step's rendered status is derived from the stored events -----
+
+STEP_ORDER = ("orient", "research", "plan", "build", "review", "outward")
+
+
+def _statuses(rendered):
+    """The rendered steps as ``{name: complete | pending | skipped}``."""
+
+    block = rendered.split("## Steps\n", 1)[1].split("\n\n", 1)[0]
+    found = {}
+    for line in block.strip().splitlines():
+        name, _, value = line[2:].partition(": ")
+        found[name] = "skipped" if value.startswith("skip:") else value
+    return found
+
+
+def _row(*done):
+    return {name: ("complete" if name in done else "pending") for name in STEP_ORDER}
+
+
+@pytest.mark.parametrize(
+    ("stage", "rounds", "done"),
+    [
+        ("S1", 0, ("orient", "research")),
+        ("S2", 0, ("orient", "research", "plan")),
+        ("S2", 1, ("orient", "research", "plan", "build")),
+        ("S3", 1, ("orient", "research", "plan", "build", "review")),
+        ("S4", 1, ("orient", "research", "plan", "build", "review")),
+        ("S6", 1, STEP_ORDER),
+    ],
+)
+def test_SK36_a_step_renders_complete_once_its_stored_event_exists(repo, stage, rounds, done):
+    session = build(repo, Source(), stage, rounds)
+    assert _statuses(session.plan.render()) == _row(*done)  # the live pass, after its last write
+    session.end()
+    assert _statuses(open_pass(repo, Source()).plan.render()) == _row(*done)  # a resume reads it from the card
+
+
+def test_SK36_a_closed_card_renders_every_step_complete_or_skipped_never_pending(repo):
+    src = Source()
+    session = open_pass(repo, src)
+    session.finish_orient()
+    session.finish_research()
+    plan = ticket.PlanCard(session.ticket)
+    plan.skip_step("research", "The ticket already names the module.")
+    plan.skip_step("plan", "The whole change fits in one sentence.", diff_statement="Add one missing guard.")
+    session.present_plan(plan)
+    go_plan(session)
+    session.begin_build()
+    passing(session)
+    go_outward(session)
+    session.close("Ticket pass complete.", refs=("example/repo#14",))
+    rendered = session.plan.render()
+    assert _statuses(rendered) == {
+        "orient": "complete", "research": "skipped", "plan": "skipped",
+        "build": "complete", "review": "complete", "outward": "complete",
+    }
+    assert "- research: skip: The ticket already names the module." in rendered
+    assert "pending" not in _statuses(rendered).values()
+    # The status is derived, not stored: the presented snapshot is as the plan showed it.
+    stored = [(step["name"], step["status"]) for step in read_card(repo)["plan"]["steps"]]
+    assert stored == [
+        ("orient", "pending"), ("research", "skipped"), ("plan", "skipped"),
+        ("build", "pending"), ("review", "pending"), ("outward", "pending"),
+    ]
+    assert open_pass(repo, src).plan.render() == rendered
+
+
+def test_SK36_a_closed_ledger_card_renders_every_step_complete(tmp_path):
+    fake = FakeLedger(tmp_path / "bin")
+    session = build_ledger(fake, Source(), "S6", 1)
+    assert _statuses(session.plan.render()) == _row(*STEP_ORDER)
+    assert _statuses(open_ledger(fake, Source()).plan.render()) == _row(*STEP_ORDER)
+
+
+def test_SK36_events_that_do_not_cover_the_plan_leave_the_later_steps_pending(repo):
+    build_released(repo, Source(), "S4", 1)
+    edit_card(repo, lambda card: card["reviews"][-1].update(plan_revision=9))
+    resumed = open_pass(repo, Source())
+    assert _statuses(resumed.plan.render()) == _row("orient", "research", "plan")
+
+
+def test_SK36_a_plan_go_of_another_pass_leaves_every_step_after_research_pending(repo):
+    build_released(repo, Source(), "S3", 1)
+    edit_card(repo, lambda card: card["decisions"][0].update(**{"pass": "ffff"}))
+    resumed = open_pass(repo, Source())
+    assert _statuses(resumed.plan.render()) == _row("orient", "research")
+
+
+def test_SK36_the_outward_step_needs_the_close_and_the_outward_go(repo):
+    build_released(repo, Source(), "S6", 1)
+    card = read_card(repo)
+    identity = ticket._identity(card)
+    assert ticket._reached_steps(card, identity, KEY) == frozenset(STEP_ORDER)
+    reopened = copy.deepcopy(card)
+    reopened["status"] = "open"
+    assert ticket._reached_steps(reopened, identity, KEY) == frozenset(STEP_ORDER[:5])
+    no_go = copy.deepcopy(card)
+    no_go["decisions"] = [d for d in no_go["decisions"] if d.get("gate") != "outward"]
+    assert ticket._reached_steps(no_go, identity, KEY) == frozenset(STEP_ORDER[:5])
+    assert ticket._reached_steps(card, None, KEY) == frozenset()
+
+
+# --- SK36 r2: a stored plan's step is complete only when the stored events prove it --------
+
+
+def _all_complete(session):
+    """A plan whose author marked every step complete before presenting it."""
+
+    plan = ticket.PlanCard(session.ticket)
+    for name in STEP_ORDER:
+        plan.complete_step(name)
+    return plan
+
+
+def test_SK36_a_stored_plan_reaching_only_research_renders_the_later_steps_pending_whatever_the_snapshot_says(repo):
+    session = open_pass(repo, Source())
+    session.finish_orient()
+    session.finish_research()
+    session.present_plan(_all_complete(session))
+    assert [step["status"] for step in read_card(repo)["plan"]["steps"]] == ["complete"] * 6  # the snapshot claims all six
+    assert _statuses(session.plan.render()) == _row("orient", "research")  # the live pass, after its write
+    session.end()
+    assert _statuses(open_pass(repo, Source()).plan.render()) == _row("orient", "research")  # a resume, from the card
+
+
+def test_SK36_a_stored_ledger_plan_reaching_only_research_renders_the_later_steps_pending(tmp_path):
+    fake = FakeLedger(tmp_path / "bin")
+    session = open_ledger(fake, Source())
+    session.finish_orient()
+    session.finish_research()
+    session.present_plan(_all_complete(session))
+    assert _statuses(session.plan.render()) == _row("orient", "research")
+    session.end()
+    assert _statuses(open_ledger(fake, Source()).plan.render()) == _row("orient", "research")
+
+
+def test_SK36_a_plan_not_yet_stored_renders_its_authors_statuses_and_a_stored_snapshot_alone_proves_nothing(repo):
+    session = open_pass(repo, Source())
+    plan = ticket.PlanCard(session.ticket)
+    plan.complete_step("orient")
+    plan.skip_step("research", "The ticket already names the module.")
+    assert _statuses(plan.render()) == {**_row("orient"), "research": "skipped"}  # unsynchronized: as its author set it
+    stored = ticket.PlanCard.from_snapshot(_all_complete(session).snapshot(1, "abcd", session.ticket))
+    assert _statuses(stored.render()) == _row()  # stored, no event read: every step pending

@@ -93,7 +93,7 @@ atomic with `append-many --expect-revision`.
       "schema": "ticket-plan-card/v2", "key", "title",
       "revision": <int >= 1>, "pass": "<id of the pass that presented it>",
       "criteria": ["<text>", ...],                      # ordered, non-empty, each non-empty
-      "steps": [{"name", "status", "skip"?} x 6],       # orient research plan build review outward
+      "steps": [{"name", "status", "skip"?} x 6],       # orient research plan build review outward; as presented (3.6)
       "diff_statement"?: "<one sentence>",   # only while the plan step is skipped
       "open_questions": ["<text>", ...],
       "ticket_status"?: "<text>", "ticket_updated_at"?: "<text>"
@@ -262,6 +262,32 @@ token is the only thing that binds the pass to the store:
   a refusal and a fresh read never move it.
 
 A live pass never pulls the ticket source again; the next open sees a source edit.
+
+### 3.6 Rendered step status
+
+The plan snapshot is written once, at `present_plan`, and never changed, so the `status` it stores for
+each step is the status *as presented*. `PlanCard.render` does not show that status as the card's
+progress. It shows each step's status derived from the card's stored events, the way it derives each
+criterion's `passes` from the stored rounds (`PlanCard.reached`, set by the pass from the held card
+after every read and every landed write; `_reached_steps` is a pure function of the card):
+
+| Step | Complete when the stored events show |
+|---|---|
+| `orient`, `research` | a plan was presented (a pass reaches `present_plan` only through both) |
+| `plan` | a plan go of the pass that presented the plan covers its identity |
+| `build` | a review round covering the plan's identity is stored (`begin_build` writes nothing, so a round is the one stored proof that a build was begun and handed to review) |
+| `review` | the last round is a passing round of the plan, listing every criterion |
+| `outward` | the card is closed and the outward go covers the plan's identity |
+
+Each step from `plan` on is placed only after the step before it. A `skipped` step stays skipped with
+its reason. Every other step the events cannot place renders `pending`, whatever status the snapshot
+holds: a snapshot that marks a step `complete` proves nothing, so a plan whose stored events reach only
+`orient` and `research` shows `plan`, `build`, `review` and `outward` pending, and a go of another pass,
+a review of another revision, or an open card shows the later steps `pending` too. Only a plan not yet
+stored (built, never presented) renders the statuses its author set; `from_snapshot` and `present_plan`
+make it a stored plan. A closed card, which validates only with every one of those events (4.5 `close_invalid`),
+renders every step complete or skipped. Nothing derived is stored, so the snapshot, the stores and the
+ledger notes are unchanged.
 
 ## 4. The resume rules
 

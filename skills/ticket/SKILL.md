@@ -232,7 +232,8 @@ research, plan, build, review and outward:
   `plan.skip_step("plan", reason, diff_statement="<one sentence>")`. Skipping
   the plan step never skips the plan go.
 - `plan.complete_step(name)` and `plan.add_open_question(text)` record the
-  rest.
+  rest. The rendered card derives each step's status from the stored events
+  (design 3.6); a closed card shows every step complete or skipped.
 
 Present assumptions, intended changes and the test plan in prose around the
 card.

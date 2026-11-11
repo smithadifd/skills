@@ -227,7 +227,14 @@ class PlanCard:
 
     It carries no ``passes`` field. ``review`` is the passing review round of
     this plan that the pass read from the card, or None; ``render`` derives
-    each criterion's ``passes`` from it.
+    each criterion's ``passes`` from it. In the same way ``reached`` names the
+    steps the card's stored events prove were done (``_reached_steps``). It is
+    None on a plan not yet stored (built here, never presented), which renders
+    the statuses its author set; a stored plan (``from_snapshot``, or one the
+    pass presented) holds a set the pass keeps current, and ``render`` shows a
+    step of it complete only when the set names it, skipped when the snapshot
+    skipped it, and pending otherwise, whatever the snapshot's status says. The
+    snapshot itself is never changed.
     """
 
     def __init__(self, ticket: Ticket):
@@ -238,6 +245,8 @@ class PlanCard:
         self.diff_statement: str | None = None
         self.open_questions: list[str] = []
         self.review: Mapping[str, Any] | None = None
+        # None until the plan is stored: an unsynchronized plan renders as its author set it.
+        self.reached: frozenset[str] | None = None
 
     @property
     def acceptance_criteria(self) -> tuple[str, ...]:
@@ -306,7 +315,19 @@ class PlanCard:
         plan.diff_statement = snapshot.get("diff_statement")
         plan.open_questions = list(snapshot["open_questions"])
         plan.review = None
+        # A stored plan: nothing is proven until the pass sets the steps its card's events reach.
+        plan.reached = frozenset()
         return plan
+
+    def rendered_status(self, step: PlanStep) -> str:
+        """A skipped step stays skipped. On a stored plan a step is complete only when the stored events prove it
+        and pending otherwise, whatever the snapshot says; a plan not yet stored shows its author's status (design 3.6)."""
+
+        if step.status == "skipped":
+            return "skipped"
+        if self.reached is None:
+            return step.status
+        return "complete" if step.name in self.reached else "pending"
 
     def render(self) -> str:
         passing = self.review
@@ -319,7 +340,8 @@ class PlanCard:
             lines.append(line)
         lines.extend(("", "## Steps"))
         for step in self.steps:
-            lines.append(f"- {step.name}: skip: {step.skip}" if step.status == "skipped" else f"- {step.name}: {step.status}")
+            status = self.rendered_status(step)
+            lines.append(f"- {step.name}: skip: {step.skip}" if status == "skipped" else f"- {step.name}: {status}")
         if self.diff_statement:
             lines.extend(("", f"Diff: {self.diff_statement}"))
         if self.open_questions:
@@ -768,6 +790,42 @@ def _passing_final(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]
     ):
         return final
     return None
+
+
+def _reached_steps(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]] | None, key: str) -> frozenset[str]:
+    """The plan steps the card's stored events prove were done, from the events alone (design 3.5).
+
+    A pure function of the card, as ``_passing_final`` is for the criteria. A
+    step this cannot place is left out, so it renders pending (or skipped,
+    when the snapshot skipped it), never complete:
+
+    - ``orient`` and ``research``: a plan was presented, which a pass reaches only through both.
+    - ``plan``: a plan go of the pass that presented the plan covers its identity.
+    - ``build``: a review round covering the plan identity is stored. ``begin_build`` writes
+      nothing, so a round is the one stored proof that a build was begun and handed to review.
+    - ``review``: the last round is a passing round of the plan.
+    - ``outward``: the card is closed and the outward go covers the plan. The close is the
+      atomic write that ends the outward actions the go opened.
+
+    Each step from ``plan`` on is placed only after the one before it, so a
+    later event never makes an earlier unplaced step look done.
+    """
+
+    if identity is None:
+        return frozenset()
+    reached = {"orient", "research"}
+    if not _has_go(card, "plan", identity, key):
+        return frozenset(reached)
+    reached.add("plan")
+    if not any(_covers(review, identity) for review in card["reviews"]):
+        return frozenset(reached)
+    reached.add("build")
+    if _passing_final(card, identity) is None:
+        return frozenset(reached)
+    reached.add("review")
+    if card["status"] == "closed" and _has_go(card, "outward", identity, key):
+        reached.add("outward")
+    return frozenset(reached)
 
 
 # --- Changes (design 4.2, 4.3) and flags (4.6) ------------------------------
@@ -2016,6 +2074,7 @@ class TicketPass:
         if session._identity is not None:
             session._plan = PlanCard.from_snapshot(card["plan"])
             session._plan.review = _passing_final(card, session._identity) if state in ("outward_go", "closed") else None
+            session._sync_steps()
         if state in ("stopped", "closed"):
             return session
         if pass_id is None:
@@ -2125,6 +2184,13 @@ class TicketPass:
     def _advance(self, token: str, events: Sequence[tuple[str, Any]]) -> None:
         self._card = _fold(self._card, events)
         self._token = token
+        self._sync_steps()
+
+    def _sync_steps(self) -> None:
+        """Set the held plan's derived steps from the held card."""
+
+        if self._plan is not None:
+            self._plan.reached = _reached_steps(self._card, self._identity, self.key)
 
     def _stamp(self, point: str, next_skills: Sequence[str], refs: Sequence[str], *, phase: str | None = None, close: bool = False) -> tuple[str, Any]:
         return (
@@ -2154,6 +2220,7 @@ class TicketPass:
         self._identity = (revision, tuple(plan.acceptance_criteria))
         plan.review = None
         self._plan = plan
+        self._sync_steps()
         self._phase = "plan_go"
 
     @_ends_on_failure

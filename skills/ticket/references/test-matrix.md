@@ -174,6 +174,12 @@ bind (design section 5).
 | E22 | `test_a_recorded_plan_go_resumes_at_build_and_begin_build_is_live_only` | fresh pass through `record_go("plan")` with no `begin_build`; `release`; resume (new pass) | before the release the live pass reports `plan_go`, `approved("plan")` true, and `record_review` raises `TicketError` (wrong phase); the resumed pass reports `build`, its `begin_build()` raises `TicketError` (wrong phase), and `record_review("changes")` on it stores round 1 | `_derive` row 8 returns `plan_go` while no review is stored (the resumed pass is made to call `begin_build`) |
 | E23 | `test_a_reading_step_refuses_a_moved_token_before_its_gate[begin_build | require_outward_go | approved]` | the live phase for each (`plan_go` approved; S4[1] live; S4[1] live); an outsider (a second markdown handle / a ledger outsider) appends `tried` after the pass's last read; the gate on the fresh card would pass | refusal `stale`, raised before the gate is evaluated; `approved` raises rather than returning true; nothing written by the step; the pass ends and the claim is released; the outsider's `tried` stays | the reading step adopts the fresh token before comparing (`self._token = token` ahead of the check): the gate passes and no `stale` is raised |
 | E24 | `test_the_held_token_advances_only_after_a_successful_write` | S2[0] live: `record_tried` (lands), `record_tried` again (lands), `record_tried("")` (`TicketError`), then a valid `record_tried` | each valid write lands under the token the previous `apply` returned (three `tried` on the card); the `TicketError` leaves the held token where the second write left it and the fourth call lands; the pass stays live throughout | `apply`'s success path does not store the returned token (`self._token` is left at the open's token): the second `record_tried` is `stale` |
+| E25 | `test_SK36_a_step_renders_complete_once_its_stored_event_exists[S1 | S2 r0 | S2 r1 | S3 | S4 | S6]` | each stage, live and then resumed after `end()`, a plan whose steps were all presented pending | `render` shows exactly the steps of design 3.6 complete and the rest pending: S1 orient and research; S2[0] plus plan; S2[1] plus build; S3 and S4 plus review; S6 all six | `render` shows the presented status (`rendered_status` ignores `reached`); each step's clause in `_reached_steps` alone, and `present_plan` or `_advance` not calling `_sync_steps` |
+| E26 | `test_SK36_a_closed_card_renders_every_step_complete_or_skipped_never_pending` | a pass through plan go, build, a passing round, the outward go and close, with `research` and `plan` skipped | no step is `pending`; the two skips keep their reasons; the stored snapshot still says `pending` for the unskipped steps; a reopen renders the same card | `rendered_status` lets a derived step override a skip |
+| E27 | `test_SK36_a_closed_ledger_card_renders_every_step_complete` | S6 on the fake ledger, live and reopened | all six steps complete | the derivation reads a markdown-only field |
+| E28 | `test_SK36_events_that_do_not_cover_the_plan_leave_the_later_steps_pending` | S4[1] whose last round names plan revision 9 | resume: orient, research, plan complete; build, review, outward pending | `build` counts a round that does not cover the plan |
+| E29 | `test_SK36_a_plan_go_of_another_pass_leaves_every_step_after_research_pending` | S3[1] whose plan go names another pass | resume: only orient and research complete | `plan` counts a go of another pass; a step is placed without its predecessor |
+| E30 | `test_SK36_the_outward_step_needs_the_close_and_the_outward_go` | `_reached_steps` on the S6 card, on the same card with `status` open, with no outward go, and with no identity | all six; the first five; the first five; none | `outward` ignores the close, or the outward go |
 
 ## F. Close
 
@@ -314,11 +320,11 @@ identity of its `and`/`or`.
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
-- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 41, F 8, G 31,
-  H 38, I 26. Total 220 rows. Eight carry no test with a mutation of their own in this release:
+- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 47, F 8, G 31,
+  H 38, I 26. Total 226 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 212 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 218 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 import ticket
-from ledger_support import FakeLedger, machine
+from ledger_support import FakeLedger, build_ledger, machine
 from ticket_support import (
     A, B, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass, read_card,
     refusal, store,
@@ -937,3 +937,36 @@ def test_the_open_card_names_the_store_and_why_first(repo, tmp_path, monkeypatch
     monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
     on_markdown = ticket.TicketPass.open("EK-2", Source(), ticket.choose_store(repo, "EK-2", TITLE))
     assert on_markdown.reconciliation == ("store: markdown (TICKET_LEDGER_CLI=none)",)
+
+
+# --- Store choice, open and resume across a store change stay as they were ---------------------------------
+# A guard against a second card in the other store is a separate change; until it lands, a ticket started on
+# one store and opened on the other begins a card there, and these tests pin that the open is not refused.
+
+
+def test_a_markdown_ticket_opened_after_a_ledger_appears_begins_a_ledger_card_unrefused(repo, tmp_path, monkeypatch):
+    machine(monkeypatch, tmp_path)  # no ledger on PATH: the ticket starts on the markdown store
+    build(repo, Source(), "S2", 0).end()
+    before = card_bytes(repo)
+    fake = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, fake)  # a compatible ledger and LEDGER_DB appear
+    handle = ticket.choose_store(repo, KEY, TITLE)
+    assert isinstance(handle, ticket.LedgerStore)
+    session = ticket.TicketPass.open(KEY, Source(), handle)
+    assert session.live and session.plan is None  # a fresh ledger card, claimed
+    assert len(fake.appends()) == 1 and fake.store().read()[0]["pass"]["id"] == session.pass_id
+    assert session.reconciliation[-1].startswith("markdown ticket cards remain in ")  # the leftover notice only
+    assert card_bytes(repo) == before  # the markdown card is untouched
+
+
+def test_a_markdown_open_begins_its_card_without_asking_a_ledger_it_could_reach(repo, tmp_path, monkeypatch):
+    fake = FakeLedger(tmp_path / "bin")
+    machine(monkeypatch, tmp_path, fake)
+    build_ledger(fake, Source(), "S1").end()  # the ledger holds an item for the key
+    monkeypatch.setenv("TICKET_LEDGER_CLI", "none")  # this session keeps the markdown store
+    handle = ticket.choose_store(repo, KEY, TITLE)
+    assert isinstance(handle, ticket.MarkdownStore)
+    calls = len(fake.calls())
+    session = ticket.TicketPass.open(KEY, Source(), handle)
+    assert session.live and read_card(repo)["pass"]["id"] == session.pass_id
+    assert len(fake.calls()) == calls  # the markdown open never runs the ledger CLI
