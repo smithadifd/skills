@@ -499,6 +499,29 @@ def test_a_ledger_on_path_inside_the_working_directory_is_never_run(rig, tmp_pat
     assert marker.exists()
 
 
+@pytest.mark.parametrize("where", ["home", "above home"])
+def test_a_ledger_in_the_home_folder_prints_the_brief_from_a_session_started_in_home_or_above(rig, tmp_path, where):
+    # pipx installs `ledger` in ~/.local/bin. A session started in the home
+    # folder, or in a folder above it, still finds it: they are exempt.
+    local_bin = rig.fake_home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    ledger = local_bin / "ledger"
+    ledger.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
+    ledger.chmod(ledger.stat().st_mode | stat.S_IXUSR)
+    db = rig.database()
+    cwd = rig.fake_home if where == "home" else rig.fake_home.parent
+    proc = rig.run(
+        cwd=cwd,
+        extra_env={"PATH": f"{local_bin}{os.pathsep}{os.environ.get('PATH', '')}", "LEDGER_DB": str(db)},
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        f"ledger on (ledger on PATH with LEDGER_DB: {ledger} found on PATH, LEDGER_DB names {db})\n"
+        + BRIEF_OUTPUT
+    )
+    assert rig.calls() == [["append-many", "--help"], ["resume", "--brief"], ["--version"]]
+
+
 def _plugin_with_shipped(root, shipped):
     """A copy of the plugin layout whose shipped topic config is `shipped`; the hook's path."""
     plugin = root / "plugin"

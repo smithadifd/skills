@@ -30,7 +30,10 @@ of its own. It applies the first of these that holds:
    without a database. The `ledger` found on `PATH` is never run, not even for
    the check, when its real path lies inside the current working directory:
    that folder is usually a checkout, and its content must not choose a
-   program the rule runs.
+   program the rule runs. The home directory and the folders above it (`~`,
+   `/Users`, `/`) are exempt, so a session started there still finds a
+   `ledger` in `~/.local/bin`; a home directory that cannot be resolved
+   exempts nothing.
 3. Anything else is off, silently (rule: not configured): no `ledger` on
    `PATH`, a `ledger` on `PATH` inside the working directory, `LEDGER_DB`
    unset, empty or not a file, a `ledger` that fails the check, a `ledger_cli`
@@ -236,16 +239,37 @@ def probe(cli: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> Optional[str]:
     return None
 
 
+def _home_or_above(here: os.stat_result) -> bool:
+    """True when the working directory `here` is the home directory or one of its ancestors.
+
+    Home is `Path.home()` resolved to its real path, compared by identity like
+    the containment check. A home directory that cannot be resolved or
+    examined is False, so the containment check still applies.
+    """
+    try:
+        home = Path(os.path.realpath(Path.home()))
+        for folder in (home, *home.parents):
+            if os.path.samestat(os.stat(folder), here):
+                return True
+    except (OSError, RuntimeError, KeyError, ValueError):
+        return False
+    return False
+
+
 def _inside_working_directory(path: str) -> bool:
     """True when `path`'s real path lies inside the current working directory, or that cannot be told.
 
     Folders are compared by identity (`os.path.samestat`), not by spelling, so
     a symlink, a relative `PATH` entry or a case-insensitive file system does
     not hide the containment. A working directory or folder that cannot be
-    examined counts as inside: the answer fails closed.
+    examined counts as inside: the answer fails closed. A working directory
+    that is the home directory or one of its ancestors is exempt: it is not a
+    checkout, and `~/.local/bin` lies inside it.
     """
     try:
         here = os.stat(os.getcwd())
+        if _home_or_above(here):
+            return False
         for folder in Path(os.path.realpath(path)).parents:
             if os.path.samestat(os.stat(folder), here):
                 return True

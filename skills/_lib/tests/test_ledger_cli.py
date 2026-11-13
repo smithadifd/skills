@@ -100,9 +100,9 @@ def _override(home, **keys):
 class Machine:
     """A `ledger` on a PATH of its own, a database file, and a clean HOME."""
 
-    def __init__(self, tmp_path, mode="ok"):
-        self.home_dir = tmp_path / "home"
-        self.home_dir.mkdir()
+    def __init__(self, tmp_path, mode="ok", home=None):
+        self.home_dir = home if home is not None else tmp_path / "home"
+        self.home_dir.mkdir(parents=True, exist_ok=True)
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.log = tmp_path / "calls.log"
@@ -471,9 +471,10 @@ def test_a_ledger_on_path_inside_the_working_directory_is_never_run(tmp_path):
     # A checkout that is the working directory and whose bin folder is on PATH
     # must not choose the program the rule runs: the planted `ledger` is never
     # run, not even for the compatibility check. Its log is the side effect.
+    # HOME lies outside the project, so the home exemption does not apply.
     project = tmp_path / "project"
     project.mkdir()
-    machine = Machine(project)
+    machine = Machine(project, home=tmp_path / "home")
     out = _out(machine.run(cwd=project))
     assert out == {"ledger_cli": None, "rule": NOT_CONFIGURED, "line": INSIDE}
     assert not machine.log.exists(), "the ledger inside the working directory was run"
@@ -487,9 +488,12 @@ def test_a_ledger_on_path_inside_the_working_directory_is_never_run(tmp_path):
 
 @pytest.mark.parametrize("entry", ["symlink", "relative", "nested"])
 def test_a_ledger_reached_through_any_path_entry_inside_the_working_directory_is_never_run(tmp_path, entry):
-    project = tmp_path / "project"
-    project.mkdir()
-    machine = Machine(project)
+    # HOME is a sibling of the work folder, so no working directory here is
+    # HOME or one of its ancestors.
+    work = tmp_path / "work"
+    project = work / "project"
+    project.mkdir(parents=True)
+    machine = Machine(project, home=tmp_path / "home")
     cwd = project
     if entry == "symlink":
         # A PATH folder outside the project whose `ledger` links into it.
@@ -502,10 +506,44 @@ def test_a_ledger_reached_through_any_path_entry_inside_the_working_directory_is
     else:
         # The working directory is the project's parent: the project is inside it.
         path = str(machine.bin)
-        cwd = tmp_path
+        cwd = work
     out = _out(machine.run(cwd=cwd, PATH=path))
     assert out == {"ledger_cli": None, "rule": NOT_CONFIGURED, "line": INSIDE}
     assert not machine.log.exists(), "the ledger inside the working directory was run"
+
+
+@pytest.mark.parametrize("where", ["home", "above home"])
+def test_a_ledger_in_the_home_folder_runs_from_a_session_started_in_home_or_above(tmp_path, where):
+    # pipx puts `ledger` in ~/.local/bin, which lies inside both working
+    # directories; the home folder and its ancestors are exempt from the check.
+    home = tmp_path / "home"
+    (home / ".local").mkdir(parents=True)
+    machine = Machine(home / ".local", home=home)
+    cwd = home if where == "home" else tmp_path
+    out = _out(machine.run(cwd=cwd))
+    assert (out["ledger_cli"], out["rule"]) == (str(machine.ledger), ON_PATH)
+    assert machine.calls() == [["append-many", "--help"]]
+
+
+def test_a_project_below_home_still_never_runs_a_ledger_planted_in_it(tmp_path):
+    home = tmp_path / "home"
+    project = home / "code" / "project"
+    project.mkdir(parents=True)
+    machine = Machine(project, home=home)
+    out = _out(machine.run(cwd=project))
+    assert out == {"ledger_cli": None, "rule": NOT_CONFIGURED, "line": INSIDE}
+    assert not machine.log.exists(), "the ledger inside the working directory was run"
+
+
+def test_a_home_folder_that_cannot_be_resolved_exempts_nothing(tmp_path):
+    # HOME names a folder that does not exist, below the working directory:
+    # nothing is exempt, so the ledger inside the working directory is skipped.
+    machine = Machine(tmp_path)
+    missing = tmp_path / "missing-home"
+    proc = _run(LIB_SCRIPT, missing, cwd=tmp_path, PATH=machine.path, LEDGER_DB=str(machine.db))
+    assert _out(proc) == {"ledger_cli": None, "rule": NOT_CONFIGURED, "line": INSIDE}
+    assert not machine.log.exists(), "the ledger inside the working directory was run"
+    assert not missing.exists()
 
 
 def test_a_working_directory_that_cannot_be_examined_leaves_the_ledger_off(machine, tmp_path, monkeypatch):
