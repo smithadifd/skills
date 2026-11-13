@@ -294,8 +294,9 @@ ledger notes are unchanged.
 
 ### 4.1 Order
 
-An open, with or without a pass id, runs: pull the source; read the card; `_derive`; then, for a new
-pass, claim. The checks inside `_derive` run in the order of section 3.2. In particular a refusal
+An open, with or without a pass id, runs: pull the source; on the ledger store, record a tracker or
+JSON-file ticket as the item's spec (6.6); read the card; confirm the item's spec is still the one the
+source read (6.5) or the open recorded (6.6); `_derive`; then, for a new pass, claim. The checks inside `_derive` run in the order of section 3.2. In particular a refusal
 (unreadable card, unidentifiable plan, invalid close) wins over everything; a valid close wins over a
 change; a change wins over the ladder.
 
@@ -383,7 +384,9 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `no_spec` | a ledger-item source's item has no spec (6.5); nothing was written | the message names the exact `spec set` command, shell-quoted, with the body file and criteria as placeholders |
 | `no_acceptance` | the item's spec records no acceptance criteria, or only blank text (6.5); nothing was written | names the same `spec set` command |
 | `acceptance_unparseable` | the spec's acceptance text breaks the grammar of 6.5; nothing was written | names the first line that breaks it and why |
-| `item_unreadable` | an answer of `query`, `spec show` or `links` for a ledger-item source is not the shape 6.5 reads (a version that is not a whole number of at least 1, a content hash that is not a SHA-256 hex digest, a body or acceptance that is not text, a row with no title or status, a link with no relation or end) | never answered from an earlier read |
+| `item_unreadable` | an answer of `query`, `spec show` or `links` for a ledger-item source, or of the `spec show` that confirms a recorded ticket's spec (6.6), is not the shape 6.5 reads (a version that is not a whole number of at least 1, a content hash that is not a SHA-256 hex digest, a body or acceptance that is not text, a row with no title or status, a link with no relation or end) | never answered from an earlier read |
+| `spec_set_failed` | on the ledger store, the `spec set` that records a tracker or JSON-file ticket (6.6) was refused, could not run, gave no envelope or a lost answer, or answered what cannot be read; the card was not read and nothing else was written | the message names the command (its source, with the title, body and criteria as placeholders) and what the CLI said, with its stderr; never retried, and the content is never altered to fit |
+| `spec_diff_failed` | spec version N was recorded (6.6), but its `spec diff` from N-1 was refused or answered what cannot be read; the card was not read | the message names the diff command to run; the next open records nothing and prints no diff |
 | `source_store_mismatch` | a ledger-item source was opened with a store that is not the ledger store of the same item through the same CLI; nothing was read or written | raised by `open` before `source.pull` |
 | `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
@@ -621,7 +624,8 @@ mapping table:
 
 | Step | Batch | `--expect-revision` |
 |---|---|---|
-| `open` (new pass), token `none` | `item.created`, `session.opened` | `none` |
+| `open` of a tracker or JSON-file ticket whose item does not exist yet (6.6) | `item.created`, alone, before `spec set` | `none` |
+| a claim on token `none` (a handle used without an open: a direct `apply`) | `item.created`, `session.opened` | `none` |
 | `open` (new pass), token `R` | `session.opened` | `R` |
 | `open(pass_id=P)`; `finish_orient`; `finish_research` | nothing | — |
 | `begin_build`; `require_outward_go`; `approved` | nothing (a `query` for the token comparison, then `export-item` only when equal) | — |
@@ -635,6 +639,10 @@ mapping table:
 | `more_info` | `item.stopped` (the store phase of the live phase) | `R` |
 | `close` | `item.stopped` (phase `close`, key `ticket-close/K/P/T/stop`), `item.state` (key `ticket-close/K/P/T/state`) | `R` |
 | `end()`, release | `session.closed` | none |
+
+Every `open` of a tracker or JSON-file ticket also runs one `spec set` before the card read (6.6), a
+new pass and `open(pass_id=P)` alike; it writes an `item.spec` event only for a changed ticket. Because
+that open creates a missing item first, its claim is the token-`R` row.
 
 #### 6.2.3 Ticket records in notes
 
@@ -892,6 +900,75 @@ parsed is refused: there is no cached spec to fall back on.
 
 **Failure path.** The source writes nothing, so a stop at any read leaves the item as it was, and a rerun
 reads again from the start. The writes are those of 6.2, with their failure paths.
+
+### 6.6 Recording a pulled ticket as the item's spec
+
+On the ledger store, the ticket a tracker connector or a JSON file gave is recorded on the card's item as
+its spec, so the ledger holds what each pass planned from. This is the thin form of tracker intake: the
+skill that already reads the tracker writes it.
+
+**The invariant.** After an open of a tracker or JSON-file ticket on the ledger store, the item that carries
+the pass's card has a current spec whose content equals the ticket just pulled, and a new spec version
+exists only when that content, or the source, changed since the current version. The tracker's status is
+never written as the item's status or claimed by the ledger.
+
+**The grammar.** `TicketPass.open` calls `LedgerStore.record_spec(ticket)` after the pull and before
+`store.read()`, when the store is a `LedgerStore` and the source is not a `LedgerItemSource`:
+
+| Input | What the open does |
+|---|---|
+| a tracker or JSON-file ticket, ledger store | `query --item K`; when no item exists, `append-many K --expect-revision none` with the claim's own `item.created` element and key `ticket-item/K/created`; then one `spec set K --title=<title> --body=<description> --acceptance=<criteria> --source=<source>` |
+| `spec set` answers `unchanged: true` | nothing more is printed |
+| `spec set` answers `unchanged: false` at version 1 | nothing more is printed: there is no earlier version |
+| `spec set` answers `unchanged: false` at version N > 1 | `spec diff K N-1 N`, printed as one `session.reconciliation` entry right after the store line: `ledger spec diff K N-1 N: the ticket changed since spec vN-1, and spec vN records it (changed: <fields>)`, then for each field `## <field>` and its unified diff lines; `<fields>` is `no content field; the source moved` when only the source moved |
+| a ledger-item source (6.5) | nothing: its spec already is the ledger's |
+| the markdown store | no ledger call |
+
+Every flag goes in the `--name=value` form, so a description or criterion that starts with `-` is never
+read as a flag. The acceptance text is one `- ` bullet per criterion, in order, the grammar of 6.5; a
+criterion with a line break in it is sent as it is. The source is `ticket:<K>`, then one space and the
+ticket's `url` when it has one. `Ticket.from_mapping` refuses a `url` that is not non-empty text with no
+whitespace (`TicketError`), so the same ticket gives the same source bytes on every open. Status, update
+time and links are not part of the spec. `Ticket.spec` stays None for these sources: the plan stores no
+spec version for them and `_derive` compares the criteria as before (4.2), so a description edit is
+printed as a diff but is not a change.
+
+**Reading the answers.** `spec set` must answer `ok` with `data.item_id == K`, a boolean `unchanged`, a
+whole-number `version` of at least 1, and an `event` whose `payload` holds that `version` and a SHA-256
+`content_hash`; that version and hash are the spec the open recorded. Anything else (a refusal, no envelope, a lost answer, a call that
+cannot run, such as a description with a NUL byte) is `spec_set_failed`, naming the command (its source,
+with the title, body and criteria as placeholders) and what the CLI said, with its stderr. `spec diff` must
+answer `ok` with `item_id == K`, `from == N-1`, `to == N` and a `fields` list whose entries each name a
+`field` and give `diff` as a list of lines; anything else is `spec_diff_failed`. Neither call is retried,
+and no content is altered to make the ledger take it: an empty description, which `spec set` refuses,
+stops the open.
+
+**Failure path.** The creation and `spec set` are the writes before the card read. A `spec set` that fails
+writes no version, and the open stops before the card is read, so the pass never plans from a ticket the
+ledger did not record; a rerun sends the same call. A `spec diff` failure comes after version N landed:
+the open stops and its message names the diff command, because a rerun's `spec set` answers `unchanged`
+and prints no diff. A lost `spec set` answer is not retried for the same reason: a retry that answers
+`unchanged` would hide the diff. A stop after the creation leaves an item with no spec and no claim; the
+rerun finds it, creates nothing, and records the spec.
+
+**Concurrent writers.** Each version moves the item's revision. Recording before `store.read()` means the
+open's own token already holds its version. The creation is the claim's own event under
+`--expect-revision none`: a racing open with the same key and payload replays it, and another title under
+the same key is `conflict`, so `stale`. The ledger compares the content inside its own write, so two opens
+of the same changed ticket write one version. Another open can still record a newer version after this
+open's `spec set` and before its card read, so the read's token already holds it. After the card read the
+open therefore reads `spec show K` (`LedgerStore.confirm_spec`) and compares its version and content hash
+with the ones `spec set` reported, by the comparison 6.5's `confirm` uses: when another spec won, the open
+is refused `stale` (the message names the two versions) before `_derive`, so it plans nothing, claims
+nothing, and the next open records its ticket again as the next version and prints that diff. A version
+recorded after the confirm moves the revision past the held token, so the claim is `stale`. A confirm read
+that fails is `ledger_refused` and one that cannot be read is `item_unreadable`; the recorded spec never
+stands in for it. An open that records a version while another pass is live
+moves the revision past that pass's token: the live pass's next write is `stale`, as a person's `spec
+set` makes it in 6.5. That open is then refused `held` and prints no diff; `ledger spec diff K` shows it.
+
+**Versions.** The tests' fake ledger answers `spec set` and `spec diff` as ledger 0.1.22 does. Ledger
+0.2.0 adds `--expect-revision` to `spec set`; the intake does not send it.
 
 ## 7. Non-goals
 

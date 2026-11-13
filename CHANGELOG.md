@@ -4,6 +4,17 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### `ticket` records the ticket it pulled in the ledger
+
+On the ledger store, every open of a tracker or JSON-file ticket now records that ticket as the item's spec with `ledger spec set`: its title, description and acceptance criteria, with `ticket:<key> <url>` as the source. An unchanged ticket writes nothing. A changed one writes the next version, and the open adds the `ledger spec diff` from the version before it to `session.reconciliation`. The tracker's status is not part of the spec, and the ledger never records it.
+
+- Give a tracker ticket its URL as `url` in the ticket mapping. A `url` that is empty or holds whitespace is refused.
+- When the ledger has no item for the key yet, the open creates it before it records the spec, so the claim no longer creates it.
+- A `spec set` that fails stops the open as `spec_set_failed` before the card is read, and a `spec diff` that fails stops it as `spec_diff_failed`. Each names the command and what the ledger said. A ticket with an empty description cannot be recorded, because a spec needs a body, so on the ledger store it stops the open.
+- After it reads the card, the open checks that the spec it recorded is still the item's current one. When another open recorded a newer version in between, the open stops as `stale` and plans nothing. A spec read that fails stops the open by name.
+- A ledger item as the ticket, and the markdown store, record nothing.
+- The ledger CLI must have `spec set` and `spec diff`, as ledger 0.1.22 does.
+
 ### `ticket` works a ledger item
 
 `/ticket <item-id>` can now work an item you filed in the ledger. When no tracker key and no local JSON file matches the key, the ledger is on and it holds an item with that id, `ticket.ledger_item_source(key)` gives a source that reads the item's title and status, its current spec (body and acceptance criteria) and its links. The pass keeps its card on that same item.

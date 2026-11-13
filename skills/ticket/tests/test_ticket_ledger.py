@@ -404,27 +404,76 @@ def test_H22_a_key_conflict_is_stale_not_success(fake):
     assert session.live is False
 
 
-@pytest.mark.parametrize("title", ["same title", "other title"])
-def test_H23_the_first_claim_creates_the_item(fake, title):
-    src = Source()
-    first = []
-    second = ReadHook(fake.path, KEY, TITLE if title == "same title" else "Another title",
-                      lambda: first.append(open_ledger(fake, src)))
-    with pytest.raises(ticket.TicketHeld) as excinfo:
-        open_ledger(fake, src, handle=second)
-    claim = fake.appends()[0]
-    assert claim.argv[-2:] == ["--expect-revision", "none"]
-    purpose = f"ticket pass {first[0].pass_id} on {ticket._host()}"
-    created, opened = claim.batch
-    assert created == {"kind": "item.created", "item_id": KEY, "idempotency_key": f"ticket-item/{KEY}/created",
-                       "payload": {"type": "ticket", "title": TITLE, "source": WRITER}}
-    assert opened["kind"] == "session.opened" and opened["idempotency_key"] == f"ticket-pass/{KEY}/{first[0].pass_id}/claimed"
+CREATED = {"kind": "item.created", "item_id": KEY, "idempotency_key": f"ticket-item/{KEY}/created",
+           "payload": {"type": "ticket", "title": TITLE, "source": WRITER}}
+
+
+def test_H23_the_first_open_creates_the_item_before_it_records_the_spec_and_claims(fake):
+    # Design 6.6: the intake needs the item, so the open creates it in a batch of its own under
+    # --expect-revision none, records the spec, then reads the card, confirms the spec is still the one it
+    # recorded, and claims under that revision.
+    session = open_ledger(fake, Source())
+    create, claim = fake.appends()
+    assert create.argv[-2:] == ["--expect-revision", "none"]
+    assert create.batch == [CREATED]
+    assert [call.verb for call in fake.calls()] == [
+        "query", "append-many", "spec", "query", "export-item", "spec", "append-many"]
+    assert kinds(fake.events()) == ["item.created", "item.spec", "session.opened"]
+    assert claim.argv[-2:] == ["--expect-revision", str(fake.events()[1]["id"])]
+    (opened,) = claim.batch
+    purpose = f"ticket pass {session.pass_id} on {ticket._host()}"
+    assert opened["kind"] == "session.opened" and opened["idempotency_key"] == f"ticket-pass/{KEY}/{session.pass_id}/claimed"
     assert opened["payload"]["purpose"].startswith(purpose + " at ") and opened["payload"]["source"] == WRITER
-    assert fake.appends()[1].code == ("stale_revision" if title == "same title" else "conflict")
-    assert excinfo.value.holder["id"] == first[0].pass_id
-    assert kinds(fake.events()).count("item.created") == 1
     rows = subprocess.run([str(fake.path), "--json", "query", "--item", KEY], capture_output=True, text=True, check=True)
     assert '"type": "ticket"' in rows.stdout
+
+
+def test_H23_a_claim_on_none_still_creates_the_item_in_its_own_batch(fake):
+    # A handle used without an open (the import, a direct apply) keeps the claim's creation row of 6.2.
+    handle = fake.store()
+    handle.apply(ticket.NO_TOKEN, [("claim", {"id": "0123456789abcdef", "host": "here", "started_at": "2026-11-13T00:00:00Z"})])
+    (claim,) = fake.appends()
+    assert claim.argv[-2:] == ["--expect-revision", "none"]
+    assert [element["kind"] for element in claim.batch] == ["item.created", "session.opened"]
+    assert claim.batch[0] == CREATED
+
+
+class CreateRace(ticket.LedgerStore):
+    """A ledger handle that runs ``racer`` once, just before its first ``append-many``."""
+
+    def __init__(self, cli, key, title, racer):
+        super().__init__(cli, key, title)
+        self._racer = racer
+
+    def _send(self, batch, expect):
+        racer, self._racer = self._racer, None
+        if racer is not None:
+            racer()
+        return super()._send(batch, expect)
+
+
+@pytest.mark.parametrize("title", ["same title", "other title"])
+def test_H23_a_racing_first_open_creates_the_item_once(fake, title):
+    src = Source()
+    first = []
+    second = CreateRace(fake.path, KEY, TITLE if title == "same title" else "Another title",
+                        lambda: first.append(open_ledger(fake, src)))
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        open_ledger(fake, src, handle=second)
+    creates = [call for call in fake.appends() if call.batch[0]["kind"] == "item.created"]
+    assert len(creates) == 2 and all(call.argv[-2:] == ["--expect-revision", "none"] for call in creates)
+    if title == "same title":
+        # The same key and payload replay: the second open goes on, records nothing new, and meets the live pass.
+        assert isinstance(excinfo.value, ticket.TicketHeld)
+        assert excinfo.value.holder["id"] == first[0].pass_id
+        assert creates[1].code is None
+    else:
+        # Another title under the same key is a conflict: stale, and nothing more is written.
+        assert refusal(excinfo) == "stale"
+        assert creates[1].code == "conflict"
+    assert kinds(fake.events()).count("item.created") == 1
+    assert kinds(fake.events()).count("item.spec") == 1
+    assert len(claims(fake)) == 1
 
 
 @pytest.mark.parametrize(
@@ -441,6 +490,7 @@ def test_a_key_held_by_another_item_type_is_refused(fake, payload):
     assert KEY in str(excinfo.value) and "not a ticket" in str(excinfo.value)
     assert fake.events() == before
     assert fake.appends() == []
+    assert fake.calls("spec") == []  # the intake refuses it before any spec is recorded (design 6.6)
 
 
 @needs_ledger_cli
