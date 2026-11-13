@@ -26,7 +26,7 @@ FAKE_CLI = Path(__file__).resolve().parent / "fake_ledger_cli.py"
 EXIT = {
     "stale_revision": 5, "conflict": 3, "validation": 3, "missing_harness": 3, "shared_database": 3,
     "synced_path": 3, "not_found": 1, "empty": 1, "missing_db": 1, "integrity": 4, "usage": 2, "error": 3,
-    "unusable": 3, "no_spec": 1,
+    "unusable": 3, "no_spec": 1, "unknown_version": 1,
 }
 WRITER = "ticket"
 
@@ -86,7 +86,8 @@ class FakeLedger:
         self._change(lambda state: state.update(help=mode))
 
     def script(self, verb, **answer):
-        """The next answer to ``verb``: ``stdout`` and ``status`` replace the CLI's; ``commit`` carries the call out first."""
+        """The next answer to ``verb``: ``stdout`` and ``status`` replace the CLI's; ``commit`` carries the call out first;
+        ``stderr`` adds a line on stderr."""
 
         self._change(lambda state: state["script"].append({"verb": verb, **answer}))
 
@@ -151,6 +152,11 @@ class FakeLedger:
         """``ledger link <item> <target> --rel <rel>``."""
 
         self._append(item, "item.linked", {"rel": rel, "target": target}, f"link/{item}/{rel}/{target}")
+
+    def specs(self, item=KEY):
+        """The item's ``item.spec`` events, oldest first."""
+
+        return [e for e in self.events() if e["item_id"] == item and e["kind"] == "item.spec"]
 
     def spec_hash(self, item=KEY):
         """The content hash of the item's current spec."""

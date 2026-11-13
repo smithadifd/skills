@@ -225,16 +225,17 @@ def test_a_plan_stored_without_a_spec_and_one_stored_with_a_spec_each_differ_fro
     session = open_item(repo, tracker)
     present(session)
     session.end()
-    fake.set_spec(BULLETS)
+    # The tracker's open recorded the ticket it pulled as spec v1 (design 6.6), so this set is v2.
+    assert fake.set_spec(BULLETS) == 2
     src = source_for(fake)
     resumed = open_item(repo, src)
     assert resumed.phase == "plan"
-    assert F1(1, "the ticket now has spec v1 and the plan was stored without one") in resumed.reconciliation
+    assert F1(1, "the ticket now has spec v2 and the plan was stored without one") in resumed.reconciliation
     present(resumed)
     resumed.end()
     back = open_item(repo, tracker)
     assert back.phase == "plan"
-    assert F1(2, "the plan was stored against spec v1 and the ticket source has no spec") in back.reconciliation
+    assert F1(2, "the plan was stored against spec v2 and the ticket source has no spec") in back.reconciliation
 
 
 # --- Concurrent writers: a spec set while the pass opens or runs -------------

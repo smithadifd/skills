@@ -159,6 +159,8 @@ class Ticket:
     updated_at: str | None = None
     # The spec version a ledger-item source read on this pull; None for every other source (design 6.5).
     spec: SpecVersion | None = None
+    # The ticket's own address on its tracker, when the source gives one; the recorded spec's source names it (design 6.6).
+    url: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Ticket":
@@ -187,6 +189,9 @@ class Ticket:
             if not link.get("url"):
                 raise TicketError("each link needs a url")
             normalized.append({"kind": str(link["kind"]), "url": str(link["url"])})
+        url = value.get("url")
+        if url is not None and not (type(url) is str and url and not any(char.isspace() for char in url)):
+            raise TicketError("a ticket's url must be non-empty text with no whitespace")
         return cls(
             key=str(value["key"]),
             title=value["title"].strip(),
@@ -195,6 +200,7 @@ class Ticket:
             acceptance_criteria=tuple(item.strip() for item in criteria),
             links=tuple(normalized),
             updated_at=str(value["updated_at"]) if value.get("updated_at") else None,
+            url=url,
         )
 
 
@@ -1552,7 +1558,8 @@ class _Answer:
 
     ``ok`` is None when there is no envelope (garbage, a crash), and ``lost``
     is true when nothing came back at all. ``status`` is the exit status, kept
-    for the message only: the store decides on the envelope.
+    for the message only: the store decides on the envelope. ``stderr`` is the
+    CLI's stderr on one line, for a message that names it.
     """
 
     status: int
@@ -1562,10 +1569,14 @@ class _Answer:
     code: str | None = None
     message: str = ""
     lost: bool = False
+    stderr: str = ""
 
 
 def _ledger_answer(status: int, stdout: str, stderr: str) -> _Answer:
-    output = _one_line(f"{stdout} {stderr}")
+    return dataclasses.replace(_envelope_answer(status, stdout, _one_line(f"{stdout} {stderr}")), stderr=_one_line(stderr))
+
+
+def _envelope_answer(status: int, stdout: str, output: str) -> _Answer:
     if not stdout.strip():
         return _Answer(status, output, None, lost=True)
     try:
@@ -1699,6 +1710,53 @@ def _ledger_card(events: Sequence[Mapping[str, Any]], key: str, title: str) -> t
     return card, events[states[-1]]["payload"].get("blocked_by") if states else None
 
 
+# --- Recording a pulled ticket as the item's spec (design 6.6) -------------
+
+
+def intake_source(ticket: Ticket) -> str:
+    """The ``--source`` an open records with a pulled ticket's spec: ``ticket:<key>``, then a space and the url when the ticket has one.
+
+    It is built from the key and the url alone, which the source refuses with
+    whitespace in them, so the same ticket gives the same bytes on every open
+    and an unchanged ticket never writes a version for its source.
+    """
+
+    return f"ticket:{ticket.key}" + (f" {ticket.url}" if ticket.url is not None else "")
+
+
+def _acceptance_text(criteria: Sequence[str]) -> str:
+    """The criteria as a spec's acceptance text: one ``- `` bullet per criterion, in order (the grammar of 6.5)."""
+
+    return "\n".join(f"- {text}" for text in criteria)
+
+
+def _said(answer: _Answer) -> str:
+    """What a CLI answer that is not ``ok`` said: its code and message, or its exit status and output; then its stderr."""
+
+    if answer.code:
+        said = f"answered {answer.code}: {answer.message}"
+        return said + (f" (stderr: {answer.stderr})" if answer.stderr else "")
+    return f"gave no envelope, exit status {answer.status}: {answer.output}"
+
+
+def _spec_set_failed(key: str, command: str, why: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"the ledger did not record ticket {key} as the spec of its item: `{command}` {why}. The open stops before "
+        "the card is read, so the pass does not plan from a ticket the ledger did not record, and nothing else was "
+        "written. A person reads the ledger's reason, then opens the ticket again.",
+        code="spec_set_failed",
+    )
+
+
+def _spec_diff_failed(key: str, version: int, command: str, why: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"spec v{version} of ledger item {key} records the ticket as pulled now, but `{command}` {why}. The open "
+        "stops so the change is not missed, before the card is read. Run that command to read the change, then open "
+        "the ticket again: the next open of the same ticket records nothing and prints no diff.",
+        code="spec_diff_failed",
+    )
+
+
 class LedgerStore:
     """The card as the events of one item in a ledger, read and written through the ledger's CLI.
 
@@ -1783,23 +1841,120 @@ class LedgerStore:
         """
 
         with self._threads:
-            answer = self._run("query", "--item", self.key)
-            if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+            row = self._ticket_row()
+            if row is None:
                 card, token, item = _blank_card(self.key, self.title), NO_TOKEN, {}
             else:
-                row = next(row for row in self._data(answer, "read")["items"] if row["item_id"] == self.key)
-                if row.get("type") != "ticket":
-                    found = repr(row["type"]) if "type" in row else "none"
-                    raise StoreUnavailable(
-                        f"ledger item {self.key} is not a ticket (its type is {found}), so the pass will not claim or "
-                        "write to it. Nothing was written; a person resolves the key.",
-                        code="ledger_refused",
-                    )
                 card, blocked = _ledger_card(self._data(self._run("export-item", self.key), "read")["events"], self.key, self.title)
                 token = str(row["revision"])
                 item = {"owner": row.get("owner"), "claim": row.get("claim"), "blocked_by": blocked}
             self._card, self._item = card, item
             return copy.deepcopy(card), token
+
+    def _ticket_row(self) -> Mapping[str, Any] | None:
+        """The item's ``query --item`` row, or None when the ledger holds no such item.
+
+        An item of another type is refused ``ledger_refused`` before anything
+        is written to it.
+        """
+
+        answer = self._run("query", "--item", self.key)
+        if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+            return None
+        row = next(row for row in self._data(answer, "read")["items"] if row["item_id"] == self.key)
+        if row.get("type") != "ticket":
+            found = repr(row["type"]) if "type" in row else "none"
+            raise StoreUnavailable(
+                f"ledger item {self.key} is not a ticket (its type is {found}), so the pass will not claim or "
+                "write to it. Nothing was written; a person resolves the key.",
+                code="ledger_refused",
+            )
+        return row
+
+    def record_spec(self, ticket: Ticket) -> tuple[str, ...]:
+        """Record the pulled ``ticket`` as the item's spec; return the lines the open prints (design 6.6).
+
+        One ``spec set`` sends the ticket's title, description and criteria
+        with ``intake_source(ticket)``; the ledger appends the next version
+        only when that content or the source changed, and answers
+        ``unchanged`` otherwise. An unchanged ticket and a first version print
+        nothing; a later version N prints ``spec diff <item> N-1 N``. The
+        ticket's status, update time and links are not part of the spec, and
+        nothing here writes a status or a claim. An item that does not exist
+        yet is created first with the claim's own ``item.created`` event and
+        key, under ``--expect-revision none``; an item of another type is
+        refused before anything is written. A ``spec set`` that fails or
+        answers what cannot be read is ``spec_set_failed``, a ``spec diff``
+        that does is ``spec_diff_failed``; neither is retried.
+        """
+
+        with self._threads:
+            if self._ticket_row() is None:
+                self._send([self._created()], NO_TOKEN)
+            version = self._spec_set(ticket)
+            if version is None or version == 1:
+                return ()
+            return (self._spec_diff(version),)
+
+    def _spec_set(self, ticket: Ticket) -> int | None:
+        """One ``spec set`` of the ticket: the new version, or None when the ledger answered ``unchanged``."""
+
+        source = intake_source(ticket)
+        args = (
+            "spec", "set", self.key, f"--title={ticket.title}", f"--body={ticket.description}",
+            f"--acceptance={_acceptance_text(ticket.acceptance_criteria)}", f"--source={source}",
+        )
+        command = (
+            shlex.join([self.cli, "spec", "set", self.key, f"--source={source}"])
+            + " --title=<title> --body=<description> --acceptance=<criteria>"
+        )
+        try:
+            answer = self._run(*args)
+        except (OSError, ValueError) as exc:
+            raise _spec_set_failed(self.key, command, f"could not run ({_one_line(exc)})") from exc
+        if not answer.ok:
+            raise _spec_set_failed(self.key, command, _said(answer))
+        data = answer.data
+        if type(data) is not dict or data.get("item_id") != self.key or type(data.get("unchanged")) is not bool:
+            raise _spec_set_failed(self.key, command, "answered what cannot be read: it does not give this item's id and an unchanged flag")
+        version = data.get("version")
+        if type(version) is not int or version < 1:
+            why = f"answered what cannot be read: version {version!r} is not a whole number of at least 1"
+            raise _spec_set_failed(self.key, command, why)
+        return None if data["unchanged"] else version
+
+    def _spec_diff(self, version: int) -> str:
+        """The ledger's ``spec diff`` from version ``version - 1`` to ``version``, as the lines the open prints."""
+
+        older = version - 1
+        args = ("spec", "diff", self.key, str(older), str(version))
+        command = shlex.join([self.cli, *args])
+        answer = self._run(*args)
+        if not answer.ok:
+            raise _spec_diff_failed(self.key, version, command, _said(answer))
+        data = answer.data
+        fields = data.get("fields") if type(data) is dict else None
+        readable = (
+            type(fields) is list
+            and data.get("item_id") == self.key
+            and type(data.get("from")) is int and data["from"] == older
+            and type(data.get("to")) is int and data["to"] == version
+            and all(
+                type(entry) is dict and _is_text(entry.get("field")) and type(entry.get("diff")) is list
+                and all(type(line) is str for line in entry["diff"])
+                for entry in fields
+            )
+        )
+        if not readable:
+            raise _spec_diff_failed(self.key, version, command, "answered what cannot be read as the diff of those two versions")
+        changed = ", ".join(entry["field"] for entry in fields) or "no content field; the source moved"
+        lines = [
+            f"ledger spec diff {self.key} {older} {version}: the ticket changed since spec v{older}, "
+            f"and spec v{version} records it (changed: {changed})"
+        ]
+        for entry in fields:
+            lines.extend([f"## {entry['field']}", *entry["diff"]])
+        return "\n".join(lines)
 
     def apply(self, token: str, events: Sequence[tuple[str, Any]]) -> str:
         """Land every event or none, only while the item's revision is still ``token``.
@@ -1862,6 +2017,11 @@ class LedgerStore:
     def _element(self, kind: str, payload: Mapping[str, Any], key: str) -> dict[str, Any]:
         return {"kind": kind, "payload": {**payload, "source": _LEDGER_WRITER}, "item_id": self.key, "idempotency_key": key}
 
+    def _created(self) -> dict[str, Any]:
+        """The item's creation event: the same event and key whether a claim on ``none`` or the spec intake (6.6) sends it."""
+
+        return self._element("item.created", {"type": "ticket", "title": self.title}, f"ticket-item/{self.key}/created")
+
     def _released(self, pass_id: str) -> dict[str, Any]:
         return self._element("session.closed", {"outcome": f"ticket pass {pass_id} released"}, f"ticket-pass/{self.key}/{pass_id}/released")
 
@@ -1880,7 +2040,7 @@ class LedgerStore:
             ordinary = f"ticket-write/{key}/{token}/{request}/{index}"
             if kind == "claim":
                 if token == NO_TOKEN:
-                    batch.append(self._element("item.created", {"type": "ticket", "title": self.title}, f"ticket-item/{key}/created"))
+                    batch.append(self._created())
                 purpose = f"ticket pass {value['id']} on {value['host']} at {value['started_at']}"
                 batch.append(self._element("session.opened", {"purpose": purpose}, f"ticket-pass/{key}/{value['id']}/claimed"))
             elif kind in _RECORD_KINDS:
@@ -2335,9 +2495,13 @@ class TicketPass:
         the open is refused there. Then the source is pulled, the card is read
         and its state derived. A ledger-item source is checked against the
         store first (``source_store_mismatch``) and its spec is read again
-        after the card (``stale`` when it moved). A refused card writes nothing; a stopped or
-        closed ticket is reported and takes no claim. The open writes nothing
-        into a store: a new pass sends its claim, a join sends a ``join`` event.
+        after the card (``stale`` when it moved). On the ledger store, any
+        other source's ticket is recorded as the item's spec between the pull
+        and the card read (``LedgerStore.record_spec``, design 6.6), and a
+        failure there stops the open before the card is read. A refused card
+        writes nothing more; a stopped or closed ticket is reported and takes
+        no claim. Beyond that spec record the open writes nothing into a store:
+        a new pass sends its claim, a join sends a ``join`` event.
         """
 
         if store.pass_id is not None or store.ended is not None:
@@ -2346,6 +2510,10 @@ class TicketPass:
         ticket = source.pull(key)
         if ticket.key != key:
             raise TicketError(f"the source returned ticket {ticket.key!r}, expected {key!r}")
+        # Before the card read, so the token it reads already holds any spec version this wrote.
+        intake: tuple[str, ...] = ()
+        if isinstance(store, LedgerStore) and not isinstance(source, LedgerItemSource):
+            intake = store.record_spec(ticket)
         card, token = store.read()
         if isinstance(source, LedgerItemSource):
             source.confirm(ticket)
@@ -2357,6 +2525,7 @@ class TicketPass:
         stored = getattr(store, "selection", None)
         session.reconciliation = (
             *((f"store: {stored}",) if stored else ()),
+            *intake,
             *flags,
             *((leftover,) if leftover else ()),
         )
