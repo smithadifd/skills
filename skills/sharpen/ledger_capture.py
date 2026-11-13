@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""ledger_capture.py — record a sharpen brief in the ledger, when a ledger CLI is configured.
+"""ledger_capture.py — record a sharpen brief in the ledger, when the ledger is on.
 
     python3 ledger_capture.py link   --item <id> --brief <path>
     python3 ledger_capture.py ratify --item <id> --brief <path> --words <text> --quote <phrase>
                                      [--chosen-description <text>] [--quote-ref <event id>]
 
-The CLI is the one `_lib/ledger_cli.py` resolves (the topic skill's `ledger_cli`
-key). With it off, both commands print nothing, call nothing and exit 0.
+The CLI is the one the shared rule chooses (`decide` in `_lib/ledger_cli.py`: the
+topic skill's `ledger_cli` key, or else a compatible `ledger` on `PATH` with
+`LEDGER_DB`). With the ledger off, both commands print nothing, call nothing and
+exit 0. With it on, a command that succeeds prints the ledger line first
+(`ledger on (<rule>: <detail>)`, naming the rule that chose), then its result.
 
 `link` attaches the brief to the item: `<cli> link <item> --rel url --target
 <absolute brief path>`.
@@ -134,7 +137,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         ledger = _load_ledger_cli()
-        cli = ledger.resolve(who="sharpen", quiet=True)
+        decision = ledger.decide(who="sharpen", quiet=True)
+        cli = decision.cli
     except Exception as exc:
         print(f"sharpen: could not read the ledger setting ({exc}) — skipping the ledger step", file=sys.stderr)
         return 0
@@ -165,6 +169,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if calls is not None:
             ledger.call(cli, calls[0])
+            print(decision.line)
             print(f"linked\t{args.item}\t{brief_text}")
             return 0
         if quote_ref is None:
@@ -187,6 +192,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        print(decision.line)
         print(f"elected\t{args.item}\tquote-ref={quote_ref}")
     except ledger.LedgerCallError as exc:
         print(f"sharpen: {exc}", file=sys.stderr)

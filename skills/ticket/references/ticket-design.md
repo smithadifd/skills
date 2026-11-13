@@ -4,7 +4,7 @@ The code is checked against `test-matrix.md`: every behavior here maps to a name
 Scope: `skills/ticket/` (the pass, the plan identity, resume, both stores). The ledger CLI it relies on
 is an external CLI that implements the contract in `SKILL.md`, at the version that has `append --expect-revision` and `append-many`.
 Both stores are built: the markdown store (section 6.1) and the ledger store (section 6.2, matrix
-section H). A ledger CLI on `PATH` with a database, or a named `TICKET_LEDGER_CLI`, selects the ledger store (section 6.3).
+section H). A ledger CLI on `PATH` with a database, or one named by `TICKET_LEDGER_CLI` or the topic skill's `ledger_cli` key, selects the ledger store (section 6.3).
 
 ## 0. The four decisions behind the resume and plan-identity rules
 
@@ -712,18 +712,22 @@ refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once
 
 ### 6.3 Store selection
 
-`choose_store(repo, key, title)` reads the environment once (`select_store`) and returns the store with
-the choice and its reason on it:
+`choose_store(repo, key, title)` decides once (`select_store`) and returns the store with the choice and its
+reason on it. The decision is the shared rule every skill and the session-start hook use, `decide` in
+`skills/_lib/ledger_cli.py`, with `TICKET_LEDGER_CLI` named as an explicit setting ahead of the topic skill's
+`ledger_cli` key. The reason starts with the rule that chose (`explicit setting`, `off by setting`,
+`ledger on PATH with LEDGER_DB`, `not configured`):
 
-| `TICKET_LEDGER_CLI` | Other inputs | Store | Reason printed |
+| Setting (`TICKET_LEDGER_CLI`, else `ledger_cli`) | Other inputs | Store | Reason printed |
 |---|---|---|---|
-| `none`, any case | any | markdown | `TICKET_LEDGER_CLI=none` |
-| any other non-empty value | the CLI passes the capability probe | ledger, that CLI | `TICKET_LEDGER_CLI names it` |
-| any other non-empty value | the CLI fails the probe | refused `ledger_incompatible`, nothing read or written | none (a refusal) |
-| unset or empty | no `ledger` on `PATH` | markdown | `no ledger CLI on PATH and TICKET_LEDGER_CLI is unset` |
-| unset or empty | `ledger` on `PATH`, `LEDGER_DB` unset, empty or not an existing file | markdown | names `LEDGER_DB` (the ledger picks no default database) |
-| unset or empty | `ledger` on `PATH`, `LEDGER_DB` an existing file, probe fails | markdown | `<cli> on PATH lacks append-many or --expect-revision, or does not run` |
-| unset or empty | `ledger` on `PATH`, `LEDGER_DB` an existing file, probe passes | ledger, the CLI found on `PATH` | `<cli> found on PATH, LEDGER_DB names <path>` |
+| `none`, any case | any | markdown | `off by setting: TICKET_LEDGER_CLI=none` or `off by setting: ledger_cli in the topic config is none` |
+| any other non-blank value | the CLI passes the capability probe | ledger, that CLI | `explicit setting: TICKET_LEDGER_CLI names it` or `explicit setting: ledger_cli in the topic config names it` |
+| any other non-blank value | the CLI fails the probe | refused `ledger_incompatible`, nothing read or written | none (a refusal) |
+| `ledger_cli` not a string, or a topic config that cannot be read | any | markdown | `not configured: ...` (never the `PATH` rule) |
+| neither set | no `ledger` on `PATH` | markdown | `not configured: no ledger CLI on PATH and no setting names one` |
+| neither set | `ledger` on `PATH`, `LEDGER_DB` unset, empty or not an existing file | markdown | `not configured: ...` naming `LEDGER_DB` (the ledger picks no default database) |
+| neither set | `ledger` on `PATH`, `LEDGER_DB` an existing file, probe fails | markdown | `not configured: <cli> on PATH lacks append-many or --expect-revision, or does not run` |
+| neither set | `ledger` on `PATH`, `LEDGER_DB` an existing file, probe passes | ledger, the CLI found on `PATH` | `ledger on PATH with LEDGER_DB: <cli> found on PATH, LEDGER_DB names <path>` |
 
 The capability probe is the one of 6.2: `<cli> append-many --help` exits 0 and names `--expect-revision`.
 An explicitly named CLI is the person's own word, so a failure is a refusal; a CLI merely found on `PATH`
@@ -731,7 +735,7 @@ is a guess, so a failure is the markdown store. The default fails closed: anythi
 about the CLI or the database is markdown, with the reason. The `release` and `import-cards` commands
 select the same way (`import-cards` exits 2 with the reason when the choice is markdown).
 
-The open prints the choice: `TicketPass.open` puts `store: <ledger|markdown> (<reason>)` first in
+The open prints the choice: `TicketPass.open` puts `store: <ledger|markdown> (<rule>: <reason>)` first in
 `reconciliation`. A store built directly, not through `choose_store`, prints no such line.
 
 ### 6.4 Importing markdown cards into the ledger

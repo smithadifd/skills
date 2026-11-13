@@ -1,4 +1,9 @@
-"""The plugin's SessionStart hook: reports ledger state without blocking startup."""
+"""The plugin's SessionStart hook: reports ledger state without blocking startup.
+
+Whether the ledger is on is the shared rule's decision (`skills/_lib/ledger_cli.py`):
+an explicit `ledger_cli` setting, `none`, or a compatible `ledger` on PATH with
+`LEDGER_DB` naming an existing file.
+"""
 
 import importlib.util
 import json
@@ -29,6 +34,12 @@ if argv == ["--version"]:
         raise SystemExit(2)
     sys.stdout.write("ledger 0.1.14\\n")
     raise SystemExit(0)
+if argv[:1] == ["append-many"] and "--help" in argv:
+    if mode == "nocapability":
+        sys.stdout.write("usage: ledger append-many ITEM\\n")
+    else:
+        sys.stdout.write("usage: ledger append-many ITEM [--expect-revision N]\\n")
+    raise SystemExit(0)
 if mode == "fail":
     sys.stdout.write("PARTIAL OUTPUT\\n")
     sys.stderr.write("\\nboom\\nmore detail\\n")
@@ -50,6 +61,19 @@ if argv[0] == "resume":
     raise SystemExit(0)
 print("ok")
 """
+
+
+EXPLICIT_LINE = "ledger on (explicit setting: ledger_cli in the topic config names it)\n"
+BRIEF_OUTPUT = "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
+
+
+def _load_rule():
+    spec = importlib.util.spec_from_file_location(
+        "session_start_test_rule", REPO_ROOT / "skills" / "_lib" / "ledger_cli.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class Rig:
@@ -74,6 +98,19 @@ class Rig:
         (plugin / "skills" / "_lib").mkdir(parents=True)
         shutil.copy(REPO_ROOT / "skills" / "_lib" / "ledger_cli.py", plugin / "skills" / "_lib" / "ledger_cli.py")
         self.hook = plugin / "hooks" / "session-start.py"
+
+    def path_ledger(self):
+        """The same fake, installed as `ledger` on PATH; its path."""
+        ledger = self.bin / "ledger"
+        ledger.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
+        ledger.chmod(ledger.stat().st_mode | stat.S_IXUSR)
+        return ledger
+
+    def database(self):
+        """An existing database file for `LEDGER_DB`; its path."""
+        db = self.fake_home.parent / "ledger.db"
+        db.touch()
+        return db
 
     def configure(self, value="fakeledger"):
         path = self.fake_home / ".claude" / "skill-config"
@@ -137,7 +174,7 @@ def test_success_prints_the_version_line_then_the_resume_brief(rig):
     rig.configure()
     proc = rig.run()
     assert proc.returncode == 0
-    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == EXPLICIT_LINE + BRIEF_OUTPUT
     assert rig.calls() == [["resume", "--brief"], ["--version"]]
 
 
@@ -154,7 +191,7 @@ def test_a_failed_version_call_does_not_hide_the_brief(rig):
     rig.configure()
     proc = rig.run(mode="versionfail")
     assert proc.returncode == 0
-    assert proc.stdout == "BRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == EXPLICIT_LINE + "BRIEF: 2 open items\nnext: LC15\n"
     assert rig.calls() == [["resume", "--brief"], ["--version"]]
 
 
@@ -172,13 +209,15 @@ def test_version_probe_shares_the_resume_deadline_and_cannot_hide_the_brief(monk
             return subprocess.CompletedProcess(args, 0, "BRIEF: ready\n", "")
         return subprocess.CompletedProcess(args, 2, "", "version unavailable\n")
 
+    rule = _load_rule()
+    decision = rule.Decision("fakeledger", rule.RULE_EXPLICIT, "set for the test")
     monkeypatch.setattr(module, "_input_data", lambda: {})
-    monkeypatch.setattr(module, "_resolve_cli", lambda: "fakeledger")
+    monkeypatch.setattr(module, "_decide", lambda deadline: decision)
     monkeypatch.setattr(module.subprocess, "run", run)
     monkeypatch.delenv("CLAUDE_ENV_FILE", raising=False)
 
     assert module.main() == 0
-    assert capsys.readouterr().out == "BRIEF: ready\n"
+    assert capsys.readouterr().out == "ledger on (explicit setting: set for the test)\nBRIEF: ready\n"
     assert timeouts[1] < timeouts[0], "version probe must use only the deadline remaining after resume"
 
 
@@ -323,7 +362,7 @@ def test_bad_stdin_still_prints_the_brief_and_writes_no_session(rig, stdin):
     rig.configure()
     proc = rig.run(stdin=stdin)
     assert proc.returncode == 0
-    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == EXPLICIT_LINE + BRIEF_OUTPUT
     text = rig.env_file.read_text(encoding="utf-8")
     assert "LEDGER_SESSION" not in text
 
@@ -339,7 +378,7 @@ def test_an_unwritable_env_file_does_not_fail_the_session(rig, tmp_path):
     rig.configure()
     proc = rig.run(extra_env={"CLAUDE_ENV_FILE": str(tmp_path / "no-dir" / "env")})
     assert proc.returncode == 0
-    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == EXPLICIT_LINE + BRIEF_OUTPUT
 
 
 def test_it_writes_no_file_but_the_env_file(rig, tmp_path):
@@ -363,10 +402,107 @@ def test_it_writes_no_file_but_the_env_file(rig, tmp_path):
     before_plugin, before_home = tree(plugin), tree(rig.fake_home)
     proc = rig.run()
     assert proc.returncode == 0
-    assert proc.stdout == "ledger 0.1.14\nBRIEF: 2 open items\nnext: LC15\n"
+    assert proc.stdout == EXPLICIT_LINE + BRIEF_OUTPUT
     assert tree(plugin) == before_plugin
     assert tree(rig.fake_home) == before_home
     assert rig.env_file.exists()
+
+
+# --- The shared rule: a ledger on PATH with LEDGER_DB, and `none` ------------------------
+
+
+def test_with_only_a_ledger_on_path_and_ledger_db_it_prints_the_brief(rig):
+    ledger = rig.path_ledger()
+    db = rig.database()
+    proc = rig.run(extra_env={"LEDGER_DB": str(db)})
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        f"ledger on (ledger on PATH with LEDGER_DB: {ledger} found on PATH, LEDGER_DB names {db})\n"
+        + BRIEF_OUTPUT
+    )
+    assert rig.calls() == [["append-many", "--help"], ["resume", "--brief"], ["--version"]]
+    assert "export LEDGER_SESSION=sess-1" in rig.env_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("value", ["none", "NONE", " None "])
+def test_none_keeps_the_hook_silent_though_a_ledger_is_on_path_with_ledger_db(rig, value):
+    rig.path_ledger()
+    rig.configure(value)
+    proc = rig.run(extra_env={"LEDGER_DB": str(rig.database())})
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert rig.calls() == []
+    assert not rig.env_file.exists()
+
+
+@pytest.mark.parametrize("database", ["unset", "empty", "missing"])
+def test_a_ledger_on_path_without_a_usable_ledger_db_is_silent_and_never_run(rig, tmp_path, database):
+    rig.path_ledger()
+    extra = {"empty": {"LEDGER_DB": ""}, "missing": {"LEDGER_DB": str(tmp_path / "absent.db")}}.get(database, {})
+    proc = rig.run(extra_env=extra)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert rig.calls() == []
+    assert not rig.env_file.exists()
+
+
+def test_an_incompatible_ledger_on_path_is_silent_after_the_check(rig):
+    rig.path_ledger()
+    proc = rig.run(mode="nocapability", extra_env={"LEDGER_DB": str(rig.database())})
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert rig.calls() == [["append-many", "--help"]]
+    assert not rig.env_file.exists()
+
+
+def test_an_unreadable_setting_never_falls_through_to_the_ledger_on_path(rig):
+    rig.path_ledger()
+    override = rig.fake_home / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    override.write_text("{not json", encoding="utf-8")
+    proc = rig.run(extra_env={"LEDGER_DB": str(rig.database())})
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    assert rig.calls() == []
+
+
+def test_an_explicit_setting_wins_over_the_ledger_on_path(rig):
+    rig.path_ledger()
+    rig.configure()
+    proc = rig.run(extra_env={"LEDGER_DB": str(rig.database())})
+    assert proc.stdout == EXPLICIT_LINE + BRIEF_OUTPUT
+    assert rig.calls() == [["resume", "--brief"], ["--version"]], "an explicit CLI is not probed"
+
+
+def test_the_check_and_the_brief_share_one_deadline(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location("session_start_shared_deadline", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    seen = {}
+    real = module._decide
+
+    def decide(deadline):
+        seen["deadline"] = deadline
+        return real(deadline)
+
+    def brief(cli, deadline):
+        seen["brief"] = deadline
+        return "", ""
+
+    monkeypatch.setattr(module, "_decide", decide)
+    monkeypatch.setattr(module, "_brief", brief)
+    monkeypatch.setattr(module, "_input_data", lambda: {})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "rig").mkdir()
+    rig = Rig(tmp_path / "rig")
+    monkeypatch.setenv("PATH", f"{rig.bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_LEDGER_LOG", str(rig.log))
+    monkeypatch.setenv("LEDGER_DB", str(rig.database()))
+    monkeypatch.delenv("CLAUDE_ENV_FILE", raising=False)
+    rig.path_ledger()
+    assert module.main() == 0
+    assert seen["brief"] == seen["deadline"]
 
 
 def test_hooks_json_declares_the_session_start_command():

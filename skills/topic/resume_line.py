@@ -3,10 +3,11 @@
 
     python3 resume_line.py <item id> [--config <path>]
 
-With a ledger CLI configured (the topic skill's `ledger_cli` key), prints the
-CLI's stdout for `resume --item <id>` exactly as it came back, and exits 0. With
-the key unset it prints nothing and exits 0, so a close without a ledger is
-unchanged. When the CLI fails (not found, an older ledger with no `resume`, a
+With the ledger on (the shared rule, `decide` in `skills/_lib/ledger_cli.py`:
+the topic skill's `ledger_cli` key, or else a compatible `ledger` on `PATH` with
+`LEDGER_DB`), prints the CLI's stdout for `resume --item <id>` exactly as it came
+back, and exits 0. With the ledger off it prints nothing and exits 0, so a close
+without a ledger is unchanged. When the CLI fails (not found, an older ledger with no `resume`, a
 non-zero exit) it prints one line on stderr, nothing on stdout, and exits 1: the
 close is already done, so report the line and stop.
 
@@ -40,7 +41,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         spec = importlib.util.spec_from_file_location("topic_resume_ledger_cli", LEDGER_CLI_PATH)
         ledger = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(ledger)
-        cli = ledger.resolve(args.config, who="topic", strict=True, required_shipped=True)
+        cli = ledger.decide(args.config, who="topic", strict=True, required_shipped=True).cli
     except Exception as exc:
         print(f"topic: could not read the ledger setting ({exc})", file=sys.stderr)
         return 1

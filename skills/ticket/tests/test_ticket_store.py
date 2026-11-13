@@ -822,7 +822,9 @@ def test_an_unset_or_empty_selector_with_a_compatible_cli_on_path_gives_the_ledg
     chosen = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(chosen, ticket.LedgerStore)
     assert chosen.cli == str(fake.path)
-    assert chosen.selection == f"ledger ({fake.path} found on PATH, LEDGER_DB names {tmp_path / 'ledger.db'})"
+    assert chosen.selection == (
+        f"ledger (ledger on PATH with LEDGER_DB: {fake.path} found on PATH, LEDGER_DB names {tmp_path / 'ledger.db'})"
+    )
     assert [call.argv for call in fake.calls()] == [["append-many", "--help"]]
     assert fake.events() == [] and not (repo / ".ticket").exists()
 
@@ -831,7 +833,7 @@ def test_no_selector_and_no_cli_on_path_gives_the_markdown_store_with_its_reason
     machine(monkeypatch, tmp_path)
     chosen = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(chosen, ticket.MarkdownStore)
-    assert chosen.selection == "markdown (no ledger CLI on PATH and TICKET_LEDGER_CLI is unset)"
+    assert chosen.selection == "markdown (not configured: no ledger CLI on PATH and no setting names one)"
 
 
 @pytest.mark.parametrize("cli", ["no append-many", "no --expect-revision"])
@@ -841,7 +843,7 @@ def test_an_incompatible_cli_on_path_gives_markdown_with_a_reason_not_a_refusal(
     machine(monkeypatch, tmp_path, fake)
     chosen = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(chosen, ticket.MarkdownStore)
-    assert chosen.selection == f"markdown ({fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
+    assert chosen.selection == f"markdown (not configured: {fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
     assert [call.argv for call in fake.calls()] == [["append-many", "--help"]]
 
 
@@ -852,7 +854,7 @@ def test_a_probe_that_hangs_on_an_auto_found_cli_gives_markdown_and_on_a_named_c
     monkeypatch.setattr(ticket, "LEDGER_PROBE_TIMEOUT", 0.5)
     chosen = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(chosen, ticket.MarkdownStore)
-    assert chosen.selection == f"markdown ({fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
+    assert chosen.selection == f"markdown (not configured: {fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
     monkeypatch.setenv("TICKET_LEDGER_CLI", str(fake.path))
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         ticket.choose_store(repo, KEY, TITLE)
@@ -866,7 +868,7 @@ def test_a_probe_that_prints_non_utf8_on_an_auto_found_cli_gives_markdown(repo, 
     machine(monkeypatch, tmp_path, fake)
     chosen = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(chosen, ticket.MarkdownStore)
-    assert chosen.selection == f"markdown ({fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
+    assert chosen.selection == f"markdown (not configured: {fake.path} on PATH lacks append-many or --expect-revision, or does not run)"
 
 
 @pytest.mark.parametrize("database", ["unset", "empty", "missing"])
@@ -882,10 +884,10 @@ def test_a_cli_on_path_without_a_usable_database_gives_markdown_and_is_never_pro
     chosen = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(chosen, ticket.MarkdownStore)
     if database == "missing":
-        assert chosen.selection == f"markdown ({fake.path} is on PATH but LEDGER_DB names {tmp_path / 'absent.db'}, which is not a file)"
+        assert chosen.selection == f"markdown (not configured: {fake.path} is on PATH but LEDGER_DB names {tmp_path / 'absent.db'}, which is not a file)"
     else:
         assert chosen.selection == (
-            f"markdown ({fake.path} is on PATH but LEDGER_DB is not set, and the ledger picks no default database)"
+            f"markdown (not configured: {fake.path} is on PATH but LEDGER_DB is not set, and the ledger picks no default database)"
         )
     assert fake.calls() == []
 
@@ -897,7 +899,7 @@ def test_the_opt_out_value_gives_markdown_though_a_compatible_cli_is_on_path(rep
     monkeypatch.setenv("TICKET_LEDGER_CLI", value)
     chosen = ticket.choose_store(repo, KEY, TITLE)
     assert isinstance(chosen, ticket.MarkdownStore)
-    assert chosen.selection == "markdown (TICKET_LEDGER_CLI=none)"
+    assert chosen.selection == "markdown (off by setting: TICKET_LEDGER_CLI=none)"
     assert fake.calls() == []
 
 
@@ -936,7 +938,7 @@ def test_the_open_card_names_the_store_and_why_first(repo, tmp_path, monkeypatch
     assert on_ledger.reconciliation == (f"store: {ticket.choose_store(repo, KEY, TITLE).selection}",)
     monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
     on_markdown = ticket.TicketPass.open("EK-2", Source(), ticket.choose_store(repo, "EK-2", TITLE))
-    assert on_markdown.reconciliation == ("store: markdown (TICKET_LEDGER_CLI=none)",)
+    assert on_markdown.reconciliation == ("store: markdown (off by setting: TICKET_LEDGER_CLI=none)",)
 
 
 # --- Store choice, open and resume across a store change stay as they were ---------------------------------

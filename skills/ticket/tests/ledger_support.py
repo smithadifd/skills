@@ -164,12 +164,13 @@ class ReadHook(ticket.LedgerStore):
 
 
 def ledger_environment(tmp_path, fake=None):
-    """The ``PATH`` and ``LEDGER_DB`` of a machine, built from scratch for a test.
+    """The ``PATH``, ``LEDGER_DB`` and ``HOME`` of a machine, built from scratch for a test.
 
     With a ``FakeLedger``, its directory comes first on ``PATH`` and its ``ledger`` is the one found. Without
     one, ``PATH`` holds no directory with a ``ledger`` in it, so the real user's CLI is never reached (``git``
     is linked into a directory of its own so dropping a directory never drops it). ``LEDGER_DB`` names an
-    existing empty file; the fake CLI never opens it.
+    existing empty file; the fake CLI never opens it. ``HOME`` is an empty directory, so the topic skill's
+    ``ledger_cli`` key, which the shared rule also reads, comes only from what the test writes there.
     """
 
     shim = Path(tmp_path) / "path-shim"
@@ -184,7 +185,9 @@ def ledger_environment(tmp_path, fake=None):
     entries = ([str(fake.path.parent)] if fake is not None else []) + [str(shim), *kept]
     database = Path(tmp_path) / "ledger.db"
     database.touch()
-    return {"PATH": os.pathsep.join(entries), "LEDGER_DB": str(database)}
+    home = Path(tmp_path) / "machine-home"
+    home.mkdir(exist_ok=True)
+    return {"PATH": os.pathsep.join(entries), "LEDGER_DB": str(database), "HOME": str(home)}
 
 
 def machine(monkeypatch, tmp_path, fake=None):

@@ -2,6 +2,24 @@
 
 Release notes for the `sdlc` plugin, newest first.
 
+## Unreleased
+
+### One rule decides whether the ledger is on
+
+`topic`, `sharpen`, `shape`, `ticket` and the session-start hook now decide whether the ledger is on the same way, with one rule in `skills/_lib/ledger_cli.py`. Before, `ticket` used a `ledger` on your `PATH` when `LEDGER_DB` named a database, while the others needed `ledger_cli` set in the topic config, so a machine could keep ticket cards in the ledger and never see the contract at session start.
+
+- An explicit setting wins: `ledger_cli` in the topic config and, for `ticket`, its own `TICKET_LEDGER_CLI`, which comes first. An explicit CLI that is missing or fails is reported as before.
+- `none`, in any case, turns the ledger off. `"ledger_cli": "none"` keeps every skill, `ticket` included, on files.
+- With no setting, the ledger is on when a `ledger` on `PATH` passes the check `ticket` already ran (`ledger append-many --help` names `--expect-revision`) and `LEDGER_DB` names an existing file. Anything else leaves it off, silently.
+- A `ledger_cli` value that is not a string, or a topic config file that exists but cannot be read, leaves the ledger off; it never falls through to the `PATH` rule.
+- Each skill's first ledger line names the rule that chose, as `ledger on (<rule>: <detail>)`, where `<rule>` is `explicit setting`, `off by setting`, `ledger on PATH with LEDGER_DB` or `not configured`. The session-start hook prints it before the version line, `topic` before the item line, and `sharpen` and `shape` with a successful link or election. `ticket`'s open card reads `store: ledger (<rule>: <detail>)` or `store: markdown (<rule>: <detail>)`. `python3 skills/_lib/ledger_cli.py` adds `rule` and `line` to its JSON.
+
+What changes for you:
+
+- With `ledger` on your `PATH` and `LEDGER_DB` set, the session-start hook, `topic`, `sharpen` and `shape` now use the ledger with no `ledger_cli`. To keep them on files, set `"ledger_cli": "none"` in `~/.claude/skill-config/topic.json`.
+- `ticket` now also follows `ledger_cli`: a CLI named there is used (and refused when it fails the check), and `none` there keeps the markdown store.
+- `"ledger_cli": null` in your override file no longer forces the ledger off. It clears the setting, and the `PATH` rule decides.
+
 ## 0.12.0
 
 This is the first tagged release (repository tag v1.2.0) that carries the session-start hook, the shared `_lib` folder and the ledger features listed under 0.11.0. The 0.11.0 notes below were written but never tagged; the previous tag, v1.1.1, is plugin 0.10.0 and has no hook.

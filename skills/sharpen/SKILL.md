@@ -310,12 +310,17 @@ the two to make a decision look better sourced than it is. When `process_standar
 defines a citation grammar for briefs, follow it exactly and neither extend nor
 reorder its fields.
 
-## Ledger capture (only when a ledger CLI is configured)
+## Ledger capture (only when the ledger is on)
 
 Run `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`. It prints
-`{"ledger_cli": <path or null>}`: the topic skill's `ledger_cli` key. When it is
-`null`, skip this whole section; nothing here applies and sharpen behaves exactly
-as written elsewhere. No other setting switches this on.
+`{"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}`: the
+decision of the one rule every skill and the plugin's session-start hook share.
+The topic skill's `ledger_cli` key wins when set, `none` turns the ledger off, and
+otherwise a compatible `ledger` on `PATH` with `LEDGER_DB` naming an existing
+database turns it on. When `ledger_cli` is `null`, skip this whole section;
+nothing here applies and sharpen behaves exactly as written elsewhere. When it
+names a CLI, say its `line` to the person once: it names the rule that turned
+the ledger on.
 
 When it names a CLI, the brief is also recorded on the open item. That item is the
 topic item `topic-<slug>` the session is working on. If you cannot tell which,
@@ -335,7 +340,8 @@ and say so in one line.
    must be a verbatim substring of the words; the script refuses (exit 2) and
    records nothing when it is not. A bare click with no words of theirs leaves
    nothing to capture: skip the election and say so; never write words for them.
-3. **A failed call** prints one stderr line and exits 1. Report it. The brief and
+3. **A call that succeeds** prints the same ledger line first, then `linked ...`
+   or `elected ...`. **A failed call** prints one stderr line and exits 1. Report it. The brief and
    its stamp stand on their own. If the election failed after the words were
    captured, the line names the captured event; rerun the same command adding
    `--quote-ref <that id>` to retry the election alone. Rerunning without it is
@@ -435,8 +441,8 @@ on an existing plan.
 | `skills/sharpen/SKILL.md` | this playbook |
 | `skills/sharpen/config.json` | directory keys, filename pattern, optional source filenames, commit behavior |
 | `skills/sharpen/paths.py` | executable resolver for the write directory and optional sources |
-| `skills/sharpen/ledger_capture.py` | links the brief and records its ratification in the ledger, when a ledger CLI is configured |
-| `skills/_lib/ledger_cli.py` | resolves the ledger CLI setting shared with topic, shape and the session-start hook |
+| `skills/sharpen/ledger_capture.py` | links the brief and records its ratification in the ledger, when the ledger is on |
+| `skills/_lib/ledger_cli.py` | the one rule that decides whether the ledger is on, shared with topic, shape, ticket and the session-start hook |
 | `<roadmaps>/sharpen-<slug>-<date>.md` | the mini-brief — the ONLY file this skill writes |
 | `<standards>/process.md` (`process_standard`) | optional install-specific process and citation rules; local fallback above |
 | `<roadmaps>/direction.md` (`direction_record`) | optional quote-freshness boundary; conservative local fallback above |

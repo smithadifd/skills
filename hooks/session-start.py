@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """SessionStart hook: report ledger state and tag the session for ledger writes.
 
-Resolves the ledger CLI the way every skill does (`skills/_lib/ledger_cli.py`,
-the topic skill's `ledger_cli` key). With none configured it prints nothing,
-writes nothing and exits 0.
+Decides whether the ledger is on by the rule every skill uses
+(`skills/_lib/ledger_cli.py`, `decide`): an explicit `ledger_cli` setting in the
+topic skill's config wins, `none` turns the ledger off, and otherwise a
+compatible `ledger` on `PATH` with `LEDGER_DB` naming an existing file turns it
+on. With the ledger off it prints nothing, writes nothing and exits 0.
 
-With one, it runs `<ledger_cli> resume --brief`. The version line and the brief
-print only when that call succeeds with non-empty output: `ledger <version>` first,
-when `<ledger_cli> --version` succeeds, then the brief. A successful call with empty
-output prints nothing. Failure prints one bounded `ledger session-start: ...` line
-naming a non-zero exit, a program that could not run, or a timeout. Every path exits
-0 so session start never blocks.
+With it on, it runs `<cli> resume --brief`. The ledger line, the version line
+and the brief print only when that call succeeds with non-empty output: first
+the ledger line (`ledger on (<rule>: <detail>)`, naming the rule that turned the
+ledger on), then `ledger <version>` when `<cli> --version` succeeds, then the
+brief. A successful call with empty output prints nothing. Failure prints one
+bounded `ledger session-start: ...` line naming a non-zero exit, a program that
+could not run, or a timeout. Every path exits 0 so session start never blocks.
+The compatibility check and the brief share one deadline.
 
-If `CLAUDE_ENV_FILE` is set and a CLI is configured, the hook appends shell-quoted
+If `CLAUDE_ENV_FILE` is set and the ledger is on, the hook appends shell-quoted
 exports for a non-empty stdin `session_id` and `model` (the latter may also be an
 object with a string `id`). `LEDGER_SESSION` is always written from a non-empty
 `session_id`, whatever the hook's environment holds. Only `LEDGER_AGENT`,
@@ -69,13 +73,15 @@ def _one_line(value: str, limit: int = MAX_DETAIL_CHARS) -> str:
     return line[:limit]
 
 
-def _resolve_cli() -> str | None:
+def _decide(deadline: float):
+    """The shared rule's decision (`ledger_cli.decide`), or None when the rule cannot be loaded."""
     spec = importlib.util.spec_from_file_location("session_start_ledger_cli", LEDGER_CLI_PATH)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.resolve(quiet=True)
+    remaining = max(0.0, deadline - time.monotonic())
+    return module.decide(quiet=True, probe_timeout=min(module.PROBE_TIMEOUT_SECONDS, remaining))
 
 
 def _brief(cli: str, deadline: float) -> tuple[str, str]:
@@ -149,10 +155,11 @@ def main() -> int:
     data = _input_data()
     session_id = _nonempty_string(data.get("session_id"))
     model_id = _model_id(data)
-    cli = _resolve_cli()
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    decision = _decide(deadline)
+    cli = decision.cli if decision is not None else None
     if not cli:
         return 0
-    deadline = time.monotonic() + TIMEOUT_SECONDS
     output, diagnostic = _brief(cli, deadline)
     env_file = os.environ.get("CLAUDE_ENV_FILE")
     if env_file:
@@ -163,6 +170,7 @@ def main() -> int:
     if diagnostic:
         sys.stdout.write(diagnostic)
     elif output:
+        sys.stdout.write(" ".join(decision.line.split()) + "\n")
         sys.stdout.write(_version(cli, deadline))
         sys.stdout.write(output)
     return 0

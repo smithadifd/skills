@@ -411,11 +411,11 @@ def test_without_a_ledger_cli_that_passes_the_probe_nothing_is_read(repo, fake, 
     assert [call.verb for call in fake.calls()] == ["append-many"] and fake.events() == []
     machine(monkeypatch, repo.parent)  # no ledger on PATH and the variable unset
     code, lines, err = run(capsys, "import-cards", str(repo))
-    assert (code, lines) == (2, []) and "markdown (no ledger CLI on PATH and TICKET_LEDGER_CLI is unset)" in err
+    assert (code, lines) == (2, []) and "markdown (not configured: no ledger CLI on PATH and no setting names one)" in err
     assert (repo / ".ticket" / f"{CLOSED}.md").exists()
     monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
     code, lines, err = run(capsys, "import-cards", str(repo))
-    assert (code, lines) == (2, []) and "markdown (TICKET_LEDGER_CLI=none)" in err
+    assert (code, lines) == (2, []) and "markdown (off by setting: TICKET_LEDGER_CLI=none)" in err
     assert (repo / ".ticket" / f"{CLOSED}.md").exists()
 
 
@@ -505,7 +505,7 @@ def test_an_open_on_the_ledger_store_prints_the_import_command_once(repo, fake, 
     put_fixture(repo, "OTHER-1")
     session = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
     assert session.reconciliation[1:] == (import_line(repo),)
-    assert session.reconciliation[0].startswith("store: ledger (TICKET_LEDGER_CLI names it)")
+    assert session.reconciliation[0].startswith("store: ledger (explicit setting: TICKET_LEDGER_CLI names it)")
     session.end()
     again = ticket.TicketPass.open(KEY, Source(), ticket.choose_store(repo, KEY, TITLE))
     assert again.reconciliation[1:] == (import_line(repo),)

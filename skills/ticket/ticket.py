@@ -19,12 +19,12 @@ import errno
 import fcntl
 import functools
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import secrets
 import shlex
-import shutil
 import socket
 import stat
 import subprocess
@@ -1894,20 +1894,42 @@ class LedgerStore:
 
 # --- Store selection (design 6.3) -------------------------------------------
 
+# The ticket skill's own explicit setting; it comes before the topic config's ``ledger_cli`` key.
 LEDGER_SELECTOR = "TICKET_LEDGER_CLI"
-# The value of ``TICKET_LEDGER_CLI`` that keeps the markdown store whatever is installed.
-LEDGER_OPT_OUT = "none"
-# The name looked up on PATH when ``TICKET_LEDGER_CLI`` is unset or empty.
-LEDGER_COMMAND = "ledger"
-# The ledger picks no default database: this variable names it.
-LEDGER_DATABASE = "LEDGER_DB"
 # Seconds the capability probe (``append-many --help``) may run before the CLI counts as not running.
 LEDGER_PROBE_TIMEOUT = 10.0
+# The shared rule: ``skills/_lib/ledger_cli.py``, beside this skill's directory.
+LEDGER_RULE_PATH = Path(__file__).resolve().parent.parent / "_lib" / "ledger_cli.py"
+
+
+def _load_ledger_rule():
+    """The shared rule every skill and the session-start hook use to decide whether the ledger is on."""
+
+    spec = importlib.util.spec_from_file_location("ticket_ledger_cli", LEDGER_RULE_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load the shared ledger rule {LEDGER_RULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    # Loading the shared helper must not leave bytecode beside it.
+    saved = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    except OSError as exc:
+        raise ImportError(
+            f"the shared ledger rule {LEDGER_RULE_PATH} is missing ({exc}); reinstall the skills "
+            "(`install.sh` installs `_lib` beside them)"
+        ) from exc
+    finally:
+        sys.dont_write_bytecode = saved
+    return module
+
+
+_LEDGER_RULE = _load_ledger_rule()
 
 
 @dataclass(frozen=True)
 class Selection:
-    """The store ``TICKET_LEDGER_CLI`` and the machine give: the ledger CLI to use (None for markdown) and why."""
+    """The store the shared rule gives: the ledger CLI to use (None for markdown) and why, starting with the rule."""
 
     cli: str | None
     reason: str
@@ -1918,35 +1940,22 @@ class Selection:
 
 
 def select_store() -> Selection:
-    """Pick the store from the environment (design 6.3).
+    """Pick the store by the shared rule, ``decide`` in ``skills/_lib/ledger_cli.py`` (design 6.3).
 
-    ``TICKET_LEDGER_CLI`` set to ``none`` (any case) is the markdown store. Set
-    to anything else, it names the ledger CLI: one that fails the capability
-    probe is refused ``ledger_incompatible`` rather than falling back. Unset or
-    empty, a ``ledger`` on PATH is used when ``LEDGER_DB`` names an existing
-    database and the CLI passes the same probe; every other case is the
-    markdown store with the reason, never a refusal.
+    ``TICKET_LEDGER_CLI`` is an explicit setting ahead of the topic config's
+    ``ledger_cli`` key. Either one set to ``none`` (any case) is the markdown
+    store. Set to anything else, it names the ledger CLI: one that fails the
+    capability probe is refused ``ledger_incompatible`` rather than falling
+    back. With neither set, a ``ledger`` on PATH is used when ``LEDGER_DB``
+    names an existing database and the CLI passes the same probe; every other
+    case is the markdown store with the reason, never a refusal. The reason
+    starts with the rule that chose.
     """
 
-    value = os.environ.get(LEDGER_SELECTOR, "")
-    if value.strip().lower() == LEDGER_OPT_OUT:
-        return Selection(None, f"{LEDGER_SELECTOR}={LEDGER_OPT_OUT}")
-    if value:
-        _probe_ledger(value)
-        return Selection(value, f"{LEDGER_SELECTOR} names it")
-    found = shutil.which(LEDGER_COMMAND)
-    if found is None:
-        return Selection(None, f"no {LEDGER_COMMAND} CLI on PATH and {LEDGER_SELECTOR} is unset")
-    database = os.environ.get(LEDGER_DATABASE, "")
-    if not database:
-        return Selection(None, f"{found} is on PATH but {LEDGER_DATABASE} is not set, and the ledger picks no default database")
-    if not os.path.isfile(database):
-        return Selection(None, f"{found} is on PATH but {LEDGER_DATABASE} names {_one_line(database)}, which is not a file")
-    try:
-        _probe_ledger(found)
-    except StoreUnavailable:
-        return Selection(None, f"{found} on PATH lacks append-many or --expect-revision, or does not run")
-    return Selection(found, f"{found} found on PATH, {LEDGER_DATABASE} names {_one_line(database)}")
+    decision = _LEDGER_RULE.decide(selector_env=LEDGER_SELECTOR, who="ticket", quiet=True, probe_timeout=LEDGER_PROBE_TIMEOUT)
+    if decision.rule == _LEDGER_RULE.RULE_EXPLICIT:
+        _probe_ledger(decision.cli)
+    return Selection(decision.cli, decision.reason)
 
 
 def choose_store(repo: str | Path, key: str, title: str) -> Store:
@@ -1965,17 +1974,11 @@ def choose_store(repo: str | Path, key: str, title: str) -> Store:
 
 
 def _probe_ledger(cli: str) -> None:
-    try:
-        result = subprocess.run(
-            [cli, "append-many", "--help"], input="", capture_output=True, encoding="utf-8", errors="replace",
-            check=False, timeout=LEDGER_PROBE_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise _ledger_incompatible(cli, f"append-many --help did not finish within {LEDGER_PROBE_TIMEOUT:g}s") from exc
-    except OSError as exc:
-        raise _ledger_incompatible(cli, str(exc)) from exc
-    if result.returncode != 0 or "--expect-revision" not in result.stdout:
-        raise _ledger_incompatible(cli, f"append-many --help exited {result.returncode}")
+    """Refuse ``ledger_incompatible`` unless ``cli`` passes the shared capability probe."""
+
+    failure = _LEDGER_RULE.probe(cli, LEDGER_PROBE_TIMEOUT)
+    if failure is not None:
+        raise _ledger_incompatible(cli, failure)
 
 
 # --- The pass ----------------------------------------------------------------

@@ -11,7 +11,7 @@ description: >
   the template is absent, opens EVERY touch with a reconcile pass against the
   note's external references and stamps "Last synced", maintains a Staged drafts
   rail for async continuation, and at close runs the promote-or-park ledger and
-  names the close tier (LITE vs FULL). With `ledger_cli` set, the thread is a
+  names the close tier (LITE vs FULL). With the ledger on, the thread is a
   ledger item and no note file is written. Use when the user says "/topic <slug>",
   "open a topic for this", "resume the <x> topic", "track this investigation",
   "stage this for later", or when an attended session starts with an ad-hoc ask
@@ -42,7 +42,7 @@ Do not invent a second directory when the resolved path is absent.
   built-in skeleton below when the template is absent). Never a roadmap, memory,
   a deploy, or any other file. Promotion targets get edited by the session itself
   as ordinary work — this skill just enforces that the ledger names a disposition.
-  With `ledger_cli` set, the ledger item replaces the note file (Ledger route,
+  With the ledger on, the ledger item replaces the note file (Ledger route,
   below).
 - Not a session journal — one file per *thread*, not per sitting.
 
@@ -51,9 +51,19 @@ Do not invent a second directory when the resolved path is absent.
 `ledger_cli` names an external ledger CLI that implements the contract below;
 this repository does not ship one. It is a key in `config.json`, read
 the same way as `topics_dir` (explicit `--config`, then
-`~/.claude/skill-config/topic.json`, then the shipped file). Unset, null or empty
-means off, and everything else in this file applies as written. A value that is
-not a string is an error. When it is set,
+`~/.claude/skill-config/topic.json`, then the shipped file). Whether the route is
+on is one rule, shared by every skill and the plugin's session-start hook
+(`decide` in `../_lib/ledger_cli.py`):
+
+- a `ledger_cli` value names the CLI and wins (rule `explicit setting`);
+- `none`, in any case, turns the route off (rule `off by setting`);
+- with the key unset, null or empty, a `ledger` on `PATH` turns the route on when
+  `LEDGER_DB` names an existing database file and `ledger append-many --help`
+  names `--expect-revision` (rule `ledger on PATH with LEDGER_DB`);
+- anything else leaves it off (rule `not configured`), and everything else in
+  this file applies as written.
+
+A value that is not a string is an error. When the route is on,
 a thread is a ledger item of type `topic` with the id `topic-<slug>`, this skill
 writes no markdown note, and File resolution, the template and the built-in
 skeleton below are not used.
@@ -75,7 +85,9 @@ used:
 | `resume --item <id>` | the item's resume summary, printed as the last line of a close (ledger v0.1.1 or later) |
 
 - **Open or resume:** `python3 ${CLAUDE_SKILL_DIR}/ledger_item.py --open <slug> --ask <words>`.
-  It prints the item id, `created` or `resumed`, and the executable. It creates
+  It prints two lines: the ledger line, `ledger on (<rule>: <detail>)`, which
+  names the rule that turned the route on (say it to the person), then the item
+  id, `created` or `resumed`, and the executable. It creates
   the item only when none exists, with an `Ask:` note and a `topic-rails` note
   (Rails, below). On a resume it adds whichever of those two an interrupted
   earlier call left out, and never a second copy. Two opens racing on one slug
@@ -115,12 +127,14 @@ used:
   and print its output, exactly as it came back, as the last line of the close
   (it runs `<ledger_cli> resume --item <item>`; `resume` needs ledger v0.1.1 or
   later). If it exits nonzero, say its one stderr line and stop: the close itself
-  is already done. With `ledger_cli` unset the script prints nothing, and the
+  is already done. With the ledger off the script prints nothing, and the
   close is as it always was.
-- **Where the shared setting is read:** `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`
-  prints `{"ledger_cli": <path or null>}`, the same value `ledger_item.py` uses.
-  The sharpen and shape skills and the plugin's session-start hook read it from
-  there too, so one key in this skill's config switches the ledger on for all of them.
+- **Where the rule lives:** `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`
+  prints `{"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}`,
+  the same decision `ledger_item.py` uses. The sharpen, shape and ticket skills and
+  the plugin's session-start hook decide the same way, so one setting, or a ledger
+  on `PATH` with `LEDGER_DB`, switches the ledger on for all of them, and `none`
+  switches it off for all of them.
 
 ## File resolution
 

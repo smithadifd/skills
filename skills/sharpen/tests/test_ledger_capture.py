@@ -18,6 +18,9 @@ import json, os, sys
 argv = sys.argv[1:]
 with open(os.environ["FAKE_LEDGER_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(argv) + "\\n")
+if argv[:2] == ["append-many", "--help"]:
+    print("usage: ledger append-many ITEM [--expect-revision N]")
+    raise SystemExit(0)
 if argv[0] == os.environ.get("FAKE_FAIL_VERB"):
     sys.stderr.write("refused by the fake\\n")
     raise SystemExit(3)
@@ -27,6 +30,7 @@ else:
     print("ok")
 """
 
+EXPLICIT = "ledger on (explicit setting: ledger_cli in the topic config names it)"
 WORDS = "Looks right to me. Ratified as written, go ahead and build it."
 QUOTE = "Ratified as written"
 
@@ -45,6 +49,15 @@ class Rig:
         self.brief = tmp_path / "roadmaps" / "sharpen-demo-2026-11-04.md"
         self.brief.parent.mkdir()
         self.brief.write_text("# Sharpening brief — demo\n", encoding="utf-8")
+
+    def path_ledger(self):
+        """The same fake as `ledger` on PATH, and an existing LEDGER_DB; both paths."""
+        ledger = self.bin / "ledger"
+        ledger.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
+        ledger.chmod(ledger.stat().st_mode | stat.S_IXUSR)
+        db = self.tmp / "ledger.db"
+        db.touch()
+        return ledger, db
 
     def configure(self, value="fakeledger"):
         path = self.fake_home / ".claude" / "skill-config"
@@ -96,6 +109,7 @@ def test_a_brief_produces_one_link_call_with_the_absolute_brief_path(rig):
     assert rig.calls() == [
         ["link", "topic-demo", "--rel", "url", "--target", str(rig.brief.resolve())]
     ]
+    assert proc.stdout == f"{EXPLICIT}\nlinked\ttopic-demo\t{rig.brief.resolve()}\n"
 
 
 def test_a_relative_brief_path_is_made_absolute(rig):
@@ -121,6 +135,7 @@ def test_ratifying_captures_the_words_then_elects_quoting_them(rig):
     rig.configure()
     proc = rig.ratify()
     assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == f"{EXPLICIT}\nelected\ttopic-demo\tquote-ref=7\n"
     calls = rig.calls()
     assert [c[0] for c in calls] == ["append", "elect"]
     append, elect = calls
@@ -185,6 +200,31 @@ def test_with_the_cli_unset_nothing_is_called_and_nothing_printed(rig):
             assert proc.returncode == 0, proc.stderr
             assert proc.stdout == ""
             assert proc.stderr == ""
+    assert rig.calls() == []
+
+
+def test_with_no_key_a_ledger_on_path_and_ledger_db_link_the_brief(rig):
+    ledger, db = rig.path_ledger()
+    proc = rig.link(extra_env={"LEDGER_DB": str(db)})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == (
+        f"ledger on (ledger on PATH with LEDGER_DB: {ledger} found on PATH, LEDGER_DB names {db})\n"
+        f"linked\ttopic-demo\t{rig.brief.resolve()}\n"
+    )
+    assert rig.calls() == [
+        ["append-many", "--help"],
+        ["link", "topic-demo", "--rel", "url", "--target", str(rig.brief.resolve())],
+    ]
+
+
+@pytest.mark.parametrize("value", ["none", "NONE", " None "])
+def test_none_keeps_sharpen_on_files_though_a_ledger_is_on_path(rig, value):
+    _, db = rig.path_ledger()
+    rig.configure(value)
+    for proc in (rig.link(extra_env={"LEDGER_DB": str(db)}), rig.ratify(extra_env={"LEDGER_DB": str(db)})):
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == ""
+        assert proc.stderr == ""
     assert rig.calls() == []
 
 
