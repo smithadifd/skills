@@ -24,6 +24,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 THIS_FILE = Path(__file__).resolve()
+# These two files drive the LEDGER plugin's SessionStart hook (not this plugin's removed one).
+LEDGER_HOOK_FILES = frozenset(
+    REPO_ROOT / rel for rel in ("ci/check.sh", "ci/fixtures/ledger-e2e-session-start.json")
+)
 
 MANIFESTS = (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
 TEXT_SUFFIXES = {".md", ".py", ".json", ".sh", ".txt", ".yml", ".yaml", ".awk"}
@@ -105,7 +109,7 @@ def test_the_session_start_files_are_gone():
 
 
 def test_no_text_says_the_plugin_prints_the_brief_at_session_start():
-    assert stale_text_hits(REPO_ROOT, frozenset({THIS_FILE})) == []
+    assert stale_text_hits(REPO_ROOT, frozenset({THIS_FILE}) | LEDGER_HOOK_FILES) == []
 
 
 def test_a_plugin_with_no_hooks_has_no_problems(tmp_path):
