@@ -392,32 +392,48 @@ check_ledger_e2e() {
   HOME="$home" ./install.sh --all > /dev/null || ledger_e2e_fail sdlc-install 'install.sh --all failed'
   [ -f "$home/.claude/skills/ticket/ticket.py" ] || ledger_e2e_fail sdlc-install 'the ticket skill was not installed'
   [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || ledger_e2e_fail sdlc-install 'the shared _lib was not installed'
-  # The throwaway install itself must hold no hooks: no file under
-  # ~/.claude/hooks and no "hooks" key in any settings.json it wrote.
+  # The throwaway install itself must hold no hooks. install.sh writes only
+  # ~/.claude/skills/<name>/, so ~/.claude/hooks must not exist at all (a
+  # dangling symlink counts; nothing is walked), no settings*.json under
+  # ~/.claude may carry a "hooks" key, and no installed skill's frontmatter
+  # may declare "hooks:".
+  local hooks_path="$home/.claude/hooks"
+  if [ -e "$hooks_path" ] || [ -L "$hooks_path" ]; then
+    ledger_e2e_fail install "install.sh --all created $hooks_path: $(ls -la -- "$hooks_path" 2>&1 | tr '\n' ' ')"
+  fi
   local installed_hooks
   installed_hooks=$("$python" -I - "$home/.claude" <<'PY'
-import json, os, sys
+import json, os, re, sys
 root = sys.argv[1]
 found = []
-hooks_dir = os.path.join(root, "hooks")
-for base, _dirs, files in os.walk(hooks_dir):
-    found.extend(os.path.join(base, name) for name in files)
 for base, _dirs, files in os.walk(root):
     for name in files:
-        if name != "settings.json":
-            continue
         path = os.path.join(base, name)
-        try:
-            data = json.load(open(path, encoding="utf-8"))
-        except (OSError, ValueError):
-            found.append(path + " (unreadable)")
-            continue
-        if isinstance(data, dict) and "hooks" in data:
-            found.append(path + " (hooks key)")
-print(" ".join(found))
+        if re.fullmatch(r"settings.*\.json", name):
+            try:
+                data = json.load(open(path, encoding="utf-8"))
+            except (OSError, ValueError):
+                found.append("settings:" + path + " (unreadable)")
+                continue
+            if isinstance(data, dict) and "hooks" in data:
+                found.append("settings:" + path + " (hooks key)")
+        elif name == "SKILL.md":
+            lines = open(path, encoding="utf-8").read().split("\n")
+            if lines and lines[0].strip() == "---":
+                for line in lines[1:]:
+                    if line.strip() == "---":
+                        break
+                    if re.match(r"hooks\s*:", line):
+                        found.append("skill:" + path)
+                        break
+print("\n".join(found))
 PY
   ) || ledger_e2e_fail install 'the installed home could not be scanned for hooks'
-  [ -z "$installed_hooks" ] || ledger_e2e_fail install "install.sh --all installed hooks: $installed_hooks"
+  case $installed_hooks in
+    '') ;;
+    skill:*) ledger_e2e_fail install "installed skill declares hooks: ${installed_hooks#skill:}" ;;
+    *) ledger_e2e_fail install "install.sh --all wrote a hooks key: ${installed_hooks#settings:}" ;;
+  esac
   "$python" -I - "$repo_dir" <<'PY' || ledger_e2e_fail sdlc-plugin 'the sdlc plugin declares hooks, or its manifest is unreadable'
 import json, os, sys
 root = sys.argv[1]
