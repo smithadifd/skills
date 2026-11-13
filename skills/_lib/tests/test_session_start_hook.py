@@ -501,7 +501,7 @@ def test_a_ledger_on_path_inside_the_working_directory_is_never_run(rig, tmp_pat
 
 @pytest.mark.parametrize("where", ["home", "above home"])
 def test_a_ledger_in_the_home_folder_prints_the_brief_from_a_session_started_in_home_or_above(rig, tmp_path, where):
-    # pipx installs `ledger` in ~/.local/bin. A session started in the home
+    # pipx installs `ledger` in the home folder's .local/bin. A session started in the home
     # folder, or in a folder above it, still finds it: they are exempt.
     local_bin = rig.fake_home / ".local" / "bin"
     local_bin.mkdir(parents=True)

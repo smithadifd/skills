@@ -32,8 +32,8 @@ of its own. It applies the first of these that holds:
    that folder is usually a checkout, and its content must not choose a
    program the rule runs. The home directory and the folders above it (`~`,
    `/Users`, `/`) are exempt, so a session started there still finds a
-   `ledger` in `~/.local/bin`; a home directory that cannot be resolved
-   exempts nothing.
+   `ledger` that pipx installed in the home directory's local bin folder; a
+   home directory that cannot be resolved exempts nothing.
 3. Anything else is off, silently (rule: not configured): no `ledger` on
    `PATH`, a `ledger` on `PATH` inside the working directory, `LEDGER_DB`
    unset, empty or not a file, a `ledger` that fails the check, a `ledger_cli`
@@ -264,7 +264,8 @@ def _inside_working_directory(path: str) -> bool:
     not hide the containment. A working directory or folder that cannot be
     examined counts as inside: the answer fails closed. A working directory
     that is the home directory or one of its ancestors is exempt: it is not a
-    checkout, and `~/.local/bin` lies inside it.
+    checkout, and the local bin folder where pipx installs `ledger` lies
+    inside it.
     """
     try:
         here = os.stat(os.getcwd())

@@ -514,7 +514,7 @@ def test_a_ledger_reached_through_any_path_entry_inside_the_working_directory_is
 
 @pytest.mark.parametrize("where", ["home", "above home"])
 def test_a_ledger_in_the_home_folder_runs_from_a_session_started_in_home_or_above(tmp_path, where):
-    # pipx puts `ledger` in ~/.local/bin, which lies inside both working
+    # pipx puts `ledger` in the home folder's .local/bin, which lies inside both working
     # directories; the home folder and its ancestors are exempt from the check.
     home = tmp_path / "home"
     (home / ".local").mkdir(parents=True)
