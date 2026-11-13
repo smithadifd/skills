@@ -2137,7 +2137,7 @@ LEDGER_RULE_PATH = Path(__file__).resolve().parent.parent / "_lib" / "ledger_cli
 
 
 def _load_ledger_rule():
-    """The shared rule every skill and the session-start hook use to decide whether the ledger is on."""
+    """The shared rule every skill uses to decide whether the ledger is on."""
 
     spec = importlib.util.spec_from_file_location("ticket_ledger_cli", LEDGER_RULE_PATH)
     if spec is None or spec.loader is None:

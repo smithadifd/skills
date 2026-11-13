@@ -151,8 +151,7 @@ changed the card since then, another session or a hand edit, the write is
 refused as `stale` and the pass ends. Open it again to see the change.
 
 `choose_store` picks the store by the rule every skill shares (`decide` in
-`../_lib/ledger_cli.py`; the session-start hook uses only its explicit
-setting). This repository does not ship a ledger CLI; the contract below is
+`../_lib/ledger_cli.py`). This repository does not ship a ledger CLI; the contract below is
 what one must implement.
 
 - An explicit setting wins: `TICKET_LEDGER_CLI`, then the topic skill's

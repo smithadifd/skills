@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ledger_cli.py — the one rule that decides whether the ledger is on, for every skill and hook.
+"""ledger_cli.py — the one rule that decides whether the ledger is on, for every skill.
 
     python3 ledger_cli.py [--config <path>]
 
@@ -8,8 +8,8 @@ Prints one JSON object and exits 0:
     {"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}
 
 `decide` is the rule. Every skill that writes to the ledger (topic, sharpen,
-shape, ticket) and the plugin's session-start hook call it; none keeps a lookup
-of its own. It applies the first of these that holds:
+shape, ticket) calls it; none keeps a lookup of its own. It applies the first
+of these that holds:
 
 1. An explicit setting wins. The setting is the `ledger_cli` key of the topic
    skill's config, read the way `topics_dir` is: an explicit `--config` file
@@ -28,18 +28,12 @@ of its own. It applies the first of these that holds:
    always run: `ledger append-many --help` exits 0 within the timeout and names
    `--expect-revision`. `LEDGER_DB` is tested first, so a `ledger` is never run
    without a database. This rule is for the skills a person invokes (`topic`,
-   `sharpen`, `shape`, `ticket`), which keep the default `path_rule=True`.
-   The session-start hook calls `decide` with `path_rule=False`: with no
-   setting it does not look on `PATH`, so only an explicit setting turns the
-   ledger on there. It then runs the program that setting names, and a bare
-   name such as `ledger` is looked up on `PATH`, so an absolute path is
-   recommended.
+   `sharpen`, `shape`, `ticket`).
 3. Anything else is off, silently (rule: not configured): no `ledger` on
    `PATH`, `LEDGER_DB` unset, empty or not a file, a `ledger` that fails the
-   check, no explicit setting for a caller that passes `path_rule=False`, a
-   `ledger_cli` value that is not a string, or a config file that exists but
-   cannot be read. The last two never fall through to rule 2: a setting that
-   cannot be read might have said `none`. Each config file keeps its own value
+   check, a `ledger_cli` value that is not a string, or a config file that
+   exists but cannot be read. The last two never fall through to rule 2: a
+   setting that cannot be read might have said `none`. Each config file keeps its own value
    and read status, and they are weighed in precedence order: an override file
    that cannot be read is off even when the shipped config names a CLI,
    because the shipped value is never consulted beneath a broken override.
@@ -279,7 +273,6 @@ def decide(
     required_shipped: bool = False,
     quiet: bool = False,
     probe_timeout: float = PROBE_TIMEOUT_SECONDS,
-    path_rule: bool = True,
 ) -> Decision:
     """The one rule (see the module text): whether the ledger is on, through which CLI, and which rule chose.
 
@@ -290,9 +283,6 @@ def decide(
     long-standing behaviour); otherwise a missing one is silent, because a
     standalone install of one skill may not carry the topic skill. `quiet`
     mutes every stderr line. `probe_timeout` bounds the compatibility check.
-    `path_rule` False skips rule 2: with no explicit setting the decision is
-    `not configured`, and `shutil.which` is never called and nothing is run.
-    The session-start hook passes False; the skills keep the default True.
     """
     if selector_env:
         value = os.environ.get(selector_env, "").strip()
@@ -311,12 +301,6 @@ def decide(
         return _explicit(value, f"{CONFIG_SOURCE} is {OPT_OUT}", f"{CONFIG_SOURCE} names it")
     if problem is not None:
         return Decision(None, RULE_NOT_CONFIGURED, f"{problem}, so no ledger on PATH is used")
-    if not path_rule:
-        return Decision(
-            None,
-            RULE_NOT_CONFIGURED,
-            f"no setting names a {LEDGER_COMMAND} CLI, and this caller does not look on PATH",
-        )
     return _on_path(probe_timeout)
 
 
