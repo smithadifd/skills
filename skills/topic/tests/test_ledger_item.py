@@ -1,8 +1,10 @@
 """ledger_item suite — the `ledger_cli` route of `/topic`.
 
 Seam under test: `ledger_item.py --open <slug> --ask <text>` run as a
-program. With `ledger_cli` set it opens or resumes a `topic` item through the
-configured executable; unset, it behaves as `topics_dir.py --open`.
+program. With the ledger on (the shared rule: `ledger_cli` set, or else a
+compatible `ledger` on PATH with `LEDGER_DB` naming an existing file) it opens
+or resumes a `topic` item through that executable; with it off (`none`, or
+nothing found), it behaves as `topics_dir.py --open`.
 
 The ledger is a fake executable the test writes to `tmp_path`. It records
 every argv, keeps its items in a JSON file, and accepts only the verbs and
@@ -33,6 +35,8 @@ import pytest
 SKILL_DIR = Path(__file__).resolve().parent.parent
 HELPER = SKILL_DIR / "ledger_item.py"
 ASK = "the ask in the asker's words"
+# The ledger line ledger_item.py prints first when the config's key names the CLI.
+EXPLICIT = "ledger on (explicit setting: ledger_cli in the topic config names it)\n"
 
 FAKE_LEDGER = """#!__PYTHON__
 import json
@@ -93,6 +97,11 @@ def finish(code, ok, data=None, error_code=None, message=None):
     raise SystemExit(code)
 
 
+if argv[:1] == ["append-many"] and "--help" in argv:
+    # The compatibility check the shared rule runs on a ledger found on PATH.
+    save()
+    print("usage: ledger append-many ITEM [--expect-revision N]")
+    raise SystemExit(0)
 if not argv or argv[0] not in VERBS:
     finish(2, False, error_code="usage", message="unknown verb")
 verb = argv[0]
@@ -312,7 +321,7 @@ def test_first_call_creates_exactly_one_topic_item_and_no_note_file(rig):
     proc = rig.run()
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == f"topic-demo\tcreated\t{rig.fake}\n"
+    assert proc.stdout == EXPLICIT + f"topic-demo\tcreated\t{rig.fake}\n"
     state = rig.snapshot()
     assert list(state["items"]) == ["topic-demo"]
     item = state["items"]["topic-demo"]
@@ -331,7 +340,7 @@ def test_second_call_resumes_the_same_item_and_creates_none(rig):
     second = rig.run(ask="a different ask on the second touch")
 
     assert second.returncode == 0, second.stderr
-    assert second.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
+    assert second.stdout == EXPLICIT + f"topic-demo\tresumed\t{rig.fake}\n"
     state = rig.snapshot()
     assert state["items"] == after_first, "a resume must not change or duplicate the item"
     assert state["calls"][calls_before:] == [QUERY, QUERY, EXPORT], "a resume only reads the item"
@@ -349,7 +358,7 @@ def test_first_call_against_a_store_that_does_not_exist_yet_creates_the_item(rig
     proc = rig.run()
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == f"topic-demo\tcreated\t{rig.fake}\n"
+    assert proc.stdout == EXPLICIT + f"topic-demo\tcreated\t{rig.fake}\n"
     assert rig.snapshot()["calls"] == [QUERY, NEW, NOTE, RAILS_NOTE]
     assert list(rig.snapshot()["items"]) == ["topic-demo"]
 
@@ -369,8 +378,9 @@ def test_key_unset_makes_no_cli_call_and_writes_the_note_file(rig, setting):
         rig.write_config()
     else:
         rig.write_config(ledger_cli=setting)
-    # A working `ledger` on PATH must not be picked up when the key is unset.
+    # A working `ledger` on PATH is not picked up while LEDGER_DB names no file.
     rig.env["PATH"] = str(rig.bin) + os.pathsep + rig.env["PATH"]
+    assert not Path(rig.env["LEDGER_DB"]).exists()
 
     proc = rig.run()
 
@@ -380,6 +390,38 @@ def test_key_unset_makes_no_cli_call_and_writes_the_note_file(rig, setting):
     assert rig.note_files() == ["demo.md"]
     assert ASK in (rig.topics / "demo.md").read_text(encoding="utf-8")
     assert rig.snapshot()["items"] == {}
+
+
+def test_with_no_key_a_ledger_on_path_and_ledger_db_open_a_ledger_item(rig):
+    rig.write_config()
+    rig.env["PATH"] = str(rig.bin) + os.pathsep + rig.env["PATH"]
+    db = Path(rig.env["LEDGER_DB"])
+    db.touch()
+
+    proc = rig.run()
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == (
+        f"ledger on (ledger on PATH with LEDGER_DB: {rig.fake} found on PATH, LEDGER_DB names {db})\n"
+        f"topic-demo\tcreated\t{rig.fake}\n"
+    )
+    assert rig.snapshot()["calls"] == [["append-many", "--help"], QUERY, NEW, NOTE, RAILS_NOTE]
+    assert rig.snapshot()["items"]["topic-demo"]["notes"] == ["Ask: " + ASK, RAILS]
+    assert rig.note_files() == [], "the ledger route must not write a markdown note"
+
+
+@pytest.mark.parametrize("setting", ["none", "NONE", " None "])
+def test_none_keeps_the_note_file_though_a_ledger_is_on_path_with_ledger_db(rig, setting):
+    rig.write_config(ledger_cli=setting)
+    rig.env["PATH"] = str(rig.bin) + os.pathsep + rig.env["PATH"]
+    Path(rig.env["LEDGER_DB"]).touch()
+
+    proc = rig.run()
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == str(rig.topics / "demo.md")
+    assert rig.snapshot()["calls"] == []
+    assert rig.note_files() == ["demo.md"]
 
 
 def test_shipped_config_leaves_the_key_unset():
@@ -485,7 +527,7 @@ def test_the_per_skill_override_file_turns_the_route_on(rig):
     proc = rig.run(use_config=False)
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == f"topic-demo\tcreated\t{rig.fake}\n"
+    assert proc.stdout == EXPLICIT + f"topic-demo\tcreated\t{rig.fake}\n"
     assert list(rig.snapshot()["items"]) == ["topic-demo"]
     assert rig.note_files() == []
 
@@ -543,7 +585,7 @@ def test_a_create_that_dies_after_new_is_completed_by_the_next_call_exactly_once
     second = rig.run()
 
     assert second.returncode == 0, second.stderr
-    assert second.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
+    assert second.stdout == EXPLICIT + f"topic-demo\tresumed\t{rig.fake}\n"
     notes = rig.card_notes()
     assert notes == ["Ask: " + ASK, RAILS], "exactly one Ask note and one rails note"
     assert rails_of(notes) == {"staged_drafts": "none", "promote_or_park": "open"}
@@ -551,7 +593,7 @@ def test_a_create_that_dies_after_new_is_completed_by_the_next_call_exactly_once
     calls_before = len(rig.snapshot()["calls"])
     third = rig.run()
 
-    assert third.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
+    assert third.stdout == EXPLICIT + f"topic-demo\tresumed\t{rig.fake}\n"
     assert [c[0] for c in rig.snapshot()["calls"][calls_before:]] == ["query", "query", "export-item"]
     assert rig.card_notes() == notes, "a further retry adds nothing"
 
@@ -565,7 +607,7 @@ def test_successful_appends_after_stale_refusals_do_not_count_toward_the_retry_l
     proc = rig.run()
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == f"topic-demo\tcreated\t{rig.fake}\n"
+    assert proc.stdout == EXPLICIT + f"topic-demo\tcreated\t{rig.fake}\n"
     notes = rig.card_notes()
     assert notes == ["Ask: " + ASK, RAILS], "exactly one Ask note and one rails note"
     assert [c[0] for c in rig.snapshot()["calls"]].count("note") == 8
@@ -608,7 +650,7 @@ def test_losing_the_create_race_resumes_the_winners_item(rig, winner_notes, extr
     proc = rig.run()
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
+    assert proc.stdout == EXPLICIT + f"topic-demo\tresumed\t{rig.fake}\n"
     state = rig.snapshot()
     assert state["calls"] == [QUERY, NEW, QUERY, QUERY, EXPORT, *extra_calls]
     assert list(state["items"]) == ["topic-demo"]
@@ -850,7 +892,7 @@ def test_repair_of_a_closed_item_takes_its_token_from_query_not_the_export(rig):
     proc = rig.run()
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == f"topic-demo\tresumed\t{rig.fake}\n"
+    assert proc.stdout == EXPLICIT + f"topic-demo\tresumed\t{rig.fake}\n"
     state = rig.snapshot()
     assert state["items"]["topic-demo"]["notes"] == ["Ask: " + ASK, RAILS]
     notes = [call for call in state["calls"] if call[0] == "note"]
@@ -920,7 +962,7 @@ def test_repair_of_a_closed_item_succeeds_against_the_real_ledger_cli(tmp_path):
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == f"topic-demo\tresumed\t{cli}\n"
+    assert proc.stdout == EXPLICIT + f"topic-demo\tresumed\t{cli}\n"
     notes = [
         event["payload"]["text"]
         for event in ledger("export-item", "topic-demo")["events"]

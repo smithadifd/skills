@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""save_brief.py — write the shape brief to the roadmaps directory, and link it when a ledger CLI is set.
+"""save_brief.py — write the shape brief to the roadmaps directory, and link it when the ledger is on.
 
     python3 save_brief.py --slug <slug> [--date <YYYY-MM-DD>] [--item <id>]   < brief text on stdin
 
@@ -8,11 +8,13 @@ Writes `shape-<slug>-<YYYY-MM-DD>.md` (the date defaults to today) into the
 copied), and prints the file's absolute path on stdout. It never overwrites: a
 file already there is refused (exit 2) so an earlier brief survives.
 
-With a ledger CLI configured (`_lib/ledger_cli.py`) and `--item` given, it then
-runs `<cli> link <item> --rel url --target <absolute path>`, so the brief is
-attached to the open topic item and survives the session. With the CLI off, or
-no `--item`, no ledger call is made. A failing CLI leaves the file in place and
-exits 1 with one stderr line.
+With the ledger on (the shared rule, `decide` in `_lib/ledger_cli.py`) and
+`--item` given, it then runs `<cli> link <item> --rel url --target <absolute
+path>`, so the brief is attached to the open topic item and survives the
+session, and prints the ledger line (`ledger on (<rule>: <detail>)`, naming the
+rule that chose) after the path. With the ledger off, or no `--item`, no ledger
+call is made. A failing CLI leaves the file in place and exits 1 with one
+stderr line.
 
 Exit status: 0 written (and linked when asked), 1 the ledger link failed,
 2 refused (bad slug or date, empty brief, existing file, roadmaps unresolved).
@@ -103,7 +105,8 @@ def main(argv: Optional[list[str]] = None, stdin=None) -> int:
         return 0
     try:
         ledger = _load("shape_ledger_cli", LEDGER_CLI_PATH)
-        cli = ledger.resolve(who="shape", quiet=True)
+        decision = ledger.decide(who="shape", quiet=True)
+        cli = decision.cli
     except Exception as exc:
         print(f"shape: could not read the ledger setting ({exc}) — brief saved, not linked", file=sys.stderr)
         return 0
@@ -114,6 +117,7 @@ def main(argv: Optional[list[str]] = None, stdin=None) -> int:
     except ledger.LedgerCallError as exc:
         print(f"shape: {exc}; the brief is saved at {absolute} but not linked", file=sys.stderr)
         return 1
+    print(decision.line)
     return 0
 
 

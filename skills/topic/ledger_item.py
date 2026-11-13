@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """ledger_item.py — open or resume a topic as a ledger item.
 
-The ledger route is switched on by `config.json`'s `ledger_cli` key: the path
-or name of an external ledger CLI that implements the contract in `SKILL.md`. Absent, null or empty means off. The key
-is read the same way `topics_dir` is: an explicit `--config` file alone, or
-else the shipped `config.json` with `~/.claude/skill-config/topic.json` laid
-over it. The reading itself lives in `skills/_lib/ledger_cli.py`, shared with
-sharpen, shape and the session-start hook.
+Whether the ledger route is on is decided by the rule every skill shares,
+`decide` in `skills/_lib/ledger_cli.py` (also used by sharpen, shape, ticket
+and the session-start hook). `config.json`'s `ledger_cli` key, the path or name
+of an external ledger CLI that implements the contract in `SKILL.md`, wins when
+it is set, and `none` turns the route off. With the key absent, null or empty,
+a compatible `ledger` on `PATH` with `LEDGER_DB` naming an existing file turns
+the route on; anything else leaves it off. The key is read the same way
+`topics_dir` is: an explicit `--config` file alone, or else the shipped
+`config.json` with `~/.claude/skill-config/topic.json` laid over it.
 
     python3 ledger_item.py --open <slug> --ask <text> [--config <path>]
 
-Key unset: this does exactly what `topics_dir.py --open` does (writes the
+Route off: this does exactly what `topics_dir.py --open` does (writes the
 note file if it is absent, prints its path).
 
-Key set: it finds the `topic` item `topic-<slug>` with `query` and creates it
+Route on: it finds the `topic` item `topic-<slug>` with `query` and creates it
 with `new` only when none exists, then records two notes: the ask
 (`Ask: <text>`) and the rails note (see RAILS_TEXT), whose fixed grammar is the
 item's machine-readable staged-drafts and promote-or-park state. A second call
@@ -31,9 +34,11 @@ so its newest id is not the revision). When
 another writer got in first the append is refused as `stale_revision`, and the
 resumer reads the item again and decides again, so two openers racing cannot
 write the Ask or the rails note twice, and a rails update written in the gap
-is never buried under the default. It writes no markdown note. It prints one
-line on stdout:
+is never buried under the default. It writes no markdown note. It prints two
+lines on stdout: the ledger line, which names the rule that turned the route on,
+then the item:
 
+    ledger on (<rule>: <detail>)
     <item id> TAB <created|resumed> TAB <ledger_cli>
 
 A configured CLI that is missing, cannot run, or fails is reported in one
@@ -108,19 +113,24 @@ def _load_ledger_cli():
     return module
 
 
-def configured_cli(config_path: Optional[Path] = None) -> Optional[str]:
-    """The `ledger_cli` setting, or None when it is off.
+def ledger_decision(config_path: Optional[Path] = None):
+    """The shared rule's decision (`ledger_cli.decide`): the CLI, or None when the route is off, and the rule.
 
-    Read by `skills/_lib/ledger_cli.py`: an explicit `config_path` alone, else the
-    shipped config with the per-skill override file laid over it.
+    The key is read by `skills/_lib/ledger_cli.py`: an explicit `config_path`
+    alone, else the shipped config with the per-skill override file laid over it.
     """
     ledger_cli = _load_ledger_cli()
     try:
-        return ledger_cli.resolve(
+        return ledger_cli.decide(
             config_path, who="topic", strict=True, required_shipped=True
         )
     except ledger_cli.ConfigError as exc:
         raise LedgerError(str(exc))
+
+
+def configured_cli(config_path: Optional[Path] = None) -> Optional[str]:
+    """The ledger CLI the shared rule chose, or None when the route is off."""
+    return ledger_decision(config_path).cli
 
 
 def _one_line(text: str) -> str:
@@ -380,7 +390,8 @@ def main(argv=None) -> int:
     topics = _load_topics_dir()
     try:
         topics._check_slug(args.slug)
-        cli = configured_cli(args.config)
+        decision = ledger_decision(args.config)
+        cli = decision.cli
         if cli is None:
             print(topics.open_topic(args.slug, args.ask, args.config).path)
             return 0
@@ -391,6 +402,7 @@ def main(argv=None) -> int:
     except LedgerError as exc:
         print(f"topic: {exc}", file=sys.stderr)
         return 1
+    print(decision.line)
     print(f"{item_id}\t{state}\t{cli}")
     return 0
 

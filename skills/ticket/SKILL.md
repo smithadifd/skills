@@ -67,18 +67,20 @@ token is a digest of the card as the pass last read or wrote it. If anything
 changed the card since then, another session or a hand edit, the write is
 refused as `stale` and the pass ends. Open it again to see the change.
 
-`choose_store` picks the store from the environment. This repository does not
-ship a ledger CLI; the contract below is what one must implement.
+`choose_store` picks the store by the rule every skill shares (`decide` in
+`../_lib/ledger_cli.py`; the session-start hook uses only its explicit
+setting). This repository does not ship a ledger CLI; the contract below is
+what one must implement.
 
-- `TICKET_LEDGER_CLI=none` (any case) always gives the markdown store.
-- `TICKET_LEDGER_CLI` set to anything else names the ledger CLI. A CLI that
-  fails the contract check is refused (`ledger_incompatible`) before anything is
-  read or written; it never falls back.
-- `TICKET_LEDGER_CLI` unset or empty: a `ledger` on `PATH` is used when
-  `LEDGER_DB` names an existing database file (the ledger picks no default
-  database) and the CLI passes the same contract check. Every other case, no
-  `ledger` on `PATH`, no usable `LEDGER_DB`, or a `ledger` that fails the check,
-  gives the markdown store and is never a refusal.
+- An explicit setting wins: `TICKET_LEDGER_CLI`, then the topic skill's
+  `ledger_cli` key. `none` (any case) gives the markdown store (rule `off by
+  setting`); anything else names the ledger CLI (rule `explicit setting`), and
+  one that fails the contract check is refused (`ledger_incompatible`) before
+  anything is read or written. It never falls back.
+- With neither set: a `ledger` on `PATH` is used when `LEDGER_DB` names an
+  existing database file (the ledger picks no default database) and the CLI
+  passes the same check (rule `ledger on PATH with LEDGER_DB`). Every other
+  case gives the markdown store (rule `not configured`), never a refusal.
 
 The ledger store keeps the card as the events of one ledger item. There the
 token is the item's newest event id, and each step is one `append-many` under
@@ -87,10 +89,11 @@ lost race is `stale`. Any refusal by the CLI after selection is `ledger_refused`
 and carries the CLI's own code and message; never retry it as if it were `stale`.
 
 The open card says which store was chosen and why: the first line of
-`session.reconciliation` is `store: ledger (<reason>)` or `store: markdown
-(<reason>)`. Read it to the person; a machine that expected the ledger and
-sees `markdown` learns here what to fix (set `LEDGER_DB`, put `ledger` on
-`PATH`), and `TICKET_LEDGER_CLI=none` is how to keep markdown on purpose.
+`session.reconciliation` is `store: ledger (<rule>: <reason>)` or `store:
+markdown (<rule>: <reason>)`, where `<rule>` is one of the four rules above.
+Read it to the person; a machine that expected the ledger and sees `markdown`
+learns here what to fix (set `LEDGER_DB`, put `ledger` on `PATH`), and `none`
+in either setting is how to keep markdown on purpose.
 
 The ledger CLI contract. Every call is `<cli> --json <verb> ...` and the CLI
 prints one JSON envelope, `{"ok": true, "data": ...}` or
@@ -113,7 +116,7 @@ prints one JSON envelope, `{"ok": true, "data": ...}` or
 
 A machine that ran `/ticket` before it switched to the ledger store still holds
 `.ticket/<key>.md` cards. Once the store choice picks the ledger (a ledger on
-`PATH` with `LEDGER_DB` set, or `TICKET_LEDGER_CLI` naming one), run these
+`PATH` with `LEDGER_DB` set, or `TICKET_LEDGER_CLI` or `ledger_cli` naming one), run these
 once, from this skill's folder or by its full path:
 
 - `python3 ${CLAUDE_SKILL_DIR}/ticket.py find-cards [<root>...]` lists, one

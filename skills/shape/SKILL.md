@@ -185,12 +185,17 @@ included. The printed brief stands, but no file exists.
   `shape-<slug>-<YYYY-MM-DD>.md` file exists unless the final message says so.
 
 When the ledger is on, link the brief to the open item. Run
-`python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`; if it prints
-`{"ledger_cli": null}`, pass no item and stop there. If it names a CLI, add
-`--item <item>` to the same command: the topic item `topic-<slug>` the session is
-on, or ask once which item. The script then runs
-`<ledger_cli> link <item> --rel url --target <the saved path>`. A failing CLI
-leaves the file in place and exits 1 with one line; report it.
+`python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`: it prints the decision of the
+one rule every skill shares, `{"ledger_cli": <path or null>, "rule": <rule>,
+"line": <the ledger line>}` (the topic skill's `ledger_cli` key wins, `none` turns
+the ledger off, and otherwise a compatible `ledger` on `PATH` with `LEDGER_DB`
+naming an existing database turns it on). If `ledger_cli` is `null`, pass no item
+and stop there. If it names a CLI, add `--item <item>` to the same command: the
+topic item `topic-<slug>` the session is on, or ask once which item. The script
+then runs `<ledger_cli> link <item> --rel url --target <the saved path>` and, when
+the link succeeds, prints the ledger line after the path; it names the rule that
+turned the ledger on. A failing CLI leaves the file in place and exits 1 with one
+line; report it.
 
 ## Safety rails
 

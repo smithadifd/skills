@@ -20,6 +20,9 @@ FAKE = """#!__PYTHON__
 import json, os, sys
 with open(os.environ["FAKE_LEDGER_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:3] == ["append-many", "--help"]:
+    print("usage: ledger append-many ITEM [--expect-revision N]")
+    raise SystemExit(0)
 if sys.argv[1] == os.environ.get("FAKE_FAIL_VERB"):
     sys.stderr.write("refused by the fake\\n")
     raise SystemExit(3)
@@ -27,6 +30,7 @@ print("ok")
 """
 
 BRIEF = "# Shape brief\n\nVerdict: Proceed with changes.\n"
+EXPLICIT = "ledger on (explicit setting: ledger_cli in the topic config names it)"
 
 
 class Rig:
@@ -46,6 +50,15 @@ class Rig:
             json.dumps({"notes_root": {"roadmaps": str(self.roadmaps)}}), encoding="utf-8"
         )
         self.script = SAVE
+
+    def path_ledger(self):
+        """The same fake as `ledger` on PATH, and an existing LEDGER_DB; both paths."""
+        ledger = self.bin / "ledger"
+        ledger.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
+        ledger.chmod(ledger.stat().st_mode | stat.S_IXUSR)
+        db = self.fake_home.parent / "ledger.db"
+        db.touch()
+        return ledger, db
 
     def configure(self, value="fakeledger"):
         config = self.fake_home / ".claude" / "skill-config"
@@ -105,6 +118,37 @@ def test_with_the_ledger_on_it_links_the_saved_file_once(rig):
     assert rig.calls() == [
         ["link", "topic-new-cache", "--rel", "url", "--target", str(target)]
     ]
+    assert proc.stdout.splitlines() == [str(target), EXPLICIT]
+
+
+def test_with_no_key_a_ledger_on_path_and_ledger_db_link_the_saved_file(rig):
+    ledger, db = rig.path_ledger()
+    proc = rig.run(
+        "--slug", "new-cache", "--date", "2026-11-04", "--item", "topic-new-cache",
+        extra_env={"LEDGER_DB": str(db)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    target = (rig.roadmaps / "shape-new-cache-2026-11-04.md").resolve()
+    assert proc.stdout.splitlines() == [
+        str(target),
+        f"ledger on (ledger on PATH with LEDGER_DB: {ledger} found on PATH, LEDGER_DB names {db})",
+    ]
+    assert rig.calls() == [
+        ["append-many", "--help"],
+        ["link", "topic-new-cache", "--rel", "url", "--target", str(target)],
+    ]
+
+
+@pytest.mark.parametrize("value", ["none", "NONE", " None "])
+def test_none_keeps_shape_on_files_though_a_ledger_is_on_path(rig, value):
+    _, db = rig.path_ledger()
+    rig.configure(value)
+    proc = rig.run(
+        "--slug", "x", "--date", "2026-11-04", "--item", "topic-x", extra_env={"LEDGER_DB": str(db)}
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == [str((rig.roadmaps / "shape-x-2026-11-04.md").resolve())]
+    assert rig.calls() == []
 
 
 def test_with_the_ledger_off_the_file_is_written_and_nothing_is_called(rig):

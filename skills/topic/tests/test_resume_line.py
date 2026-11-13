@@ -18,6 +18,9 @@ import json, os, sys
 with open(os.environ["FAKE_LEDGER_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\\n")
 mode = os.environ.get("FAKE_LEDGER_MODE", "ok")
+if sys.argv[1:3] == ["append-many", "--help"]:
+    sys.stdout.write("usage: ledger append-many ITEM [--expect-revision N]\\n")
+    raise SystemExit(0)
 if mode == "fail":
     sys.stdout.write("usage: ledger <verb>\\n")
     sys.stderr.write("unknown verb: resume\\n")
@@ -42,12 +45,22 @@ class Rig:
         config.mkdir(parents=True, exist_ok=True)
         (config / "topic.json").write_text(json.dumps({"ledger_cli": value}), encoding="utf-8")
 
-    def run(self, mode="ok"):
+    def path_ledger(self):
+        """The same fake as `ledger` on PATH, and an existing LEDGER_DB; the database's path."""
+        ledger = self.bin / "ledger"
+        ledger.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
+        ledger.chmod(ledger.stat().st_mode | stat.S_IXUSR)
+        db = self.fake_home.parent / "ledger.db"
+        db.touch()
+        return db
+
+    def run(self, mode="ok", extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
         env["HOME"] = str(self.fake_home)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["FAKE_LEDGER_LOG"] = str(self.log)
         env["FAKE_LEDGER_MODE"] = mode
+        env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, str(RESUME), "topic-demo"],
             env=env,
@@ -81,6 +94,23 @@ def test_with_the_cli_unset_the_close_is_unchanged(rig):
         proc = rig.run()
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout == ""
+    assert rig.calls() == []
+
+
+def test_with_no_key_a_ledger_on_path_and_ledger_db_print_the_resume_output(rig):
+    db = rig.path_ledger()
+    proc = rig.run(extra_env={"LEDGER_DB": str(db)})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "topic-demo: 1 open, next step LC15\n  (second line)\n"
+    assert rig.calls() == [["append-many", "--help"], ["resume", "--item", "topic-demo"]]
+
+
+def test_none_keeps_the_close_unchanged_though_a_ledger_is_on_path(rig):
+    db = rig.path_ledger()
+    rig.configure("none")
+    proc = rig.run(extra_env={"LEDGER_DB": str(db)})
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
     assert rig.calls() == []
 
 
