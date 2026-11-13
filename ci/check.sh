@@ -392,6 +392,32 @@ check_ledger_e2e() {
   HOME="$home" ./install.sh --all > /dev/null || ledger_e2e_fail sdlc-install 'install.sh --all failed'
   [ -f "$home/.claude/skills/ticket/ticket.py" ] || ledger_e2e_fail sdlc-install 'the ticket skill was not installed'
   [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || ledger_e2e_fail sdlc-install 'the shared _lib was not installed'
+  # The throwaway install itself must hold no hooks: no file under
+  # ~/.claude/hooks and no "hooks" key in any settings.json it wrote.
+  local installed_hooks
+  installed_hooks=$("$python" -I - "$home/.claude" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+found = []
+hooks_dir = os.path.join(root, "hooks")
+for base, _dirs, files in os.walk(hooks_dir):
+    found.extend(os.path.join(base, name) for name in files)
+for base, _dirs, files in os.walk(root):
+    for name in files:
+        if name != "settings.json":
+            continue
+        path = os.path.join(base, name)
+        try:
+            data = json.load(open(path, encoding="utf-8"))
+        except (OSError, ValueError):
+            found.append(path + " (unreadable)")
+            continue
+        if isinstance(data, dict) and "hooks" in data:
+            found.append(path + " (hooks key)")
+print(" ".join(found))
+PY
+  ) || ledger_e2e_fail install 'the installed home could not be scanned for hooks'
+  [ -z "$installed_hooks" ] || ledger_e2e_fail install "install.sh --all installed hooks: $installed_hooks"
   "$python" -I - "$repo_dir" <<'PY' || ledger_e2e_fail sdlc-plugin 'the sdlc plugin declares hooks, or its manifest is unreadable'
 import json, os, sys
 root = sys.argv[1]
