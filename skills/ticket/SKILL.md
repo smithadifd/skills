@@ -52,6 +52,46 @@ constrain the ticket. Record a link you cannot open as an open question; never
 guess its contents. Do not mirror the tracker's status into the card. For a
 local JSON ticket, `ticket.FileTicketSource(path)` implements the same call.
 
+`/ticket <KEY>` takes the first source that matches, in this order:
+
+1. a tracker ticket with exactly that key, through the tracker's connector;
+2. a local JSON ticket file, through `ticket.FileTicketSource(path)`;
+3. a ledger item with that id: `source = ticket.ledger_item_source("<KEY>")`.
+   It returns `None` when the store rule below leaves the ledger off or the
+   ledger holds no such item. Then the key names no ticket: say so and stop.
+
+### A ledger item as the ticket
+
+A ledger item's ticket is the item's title and status (`query`), its current
+spec (`spec show`) and its links (`links`). Every `open` reads all of them
+again, and the source keeps nothing between pulls. The spec's body is the
+description, its acceptance text gives the criteria, and its version and
+content hash are `session.ticket.spec`. Outgoing links read as their relation,
+incoming ones as `<relation> (incoming)`. The pass keeps its card on that same
+item: open it with `choose_store(...)` for the same key. Any other store is
+refused `source_store_mismatch` before anything is read.
+
+Write the acceptance text in one of two forms. Either every non-blank line is a
+`- ` bullet at the start of the line, one criterion each, or no line starts
+like a list item and the whole text is one criterion. A mix of bullets and
+other lines, an indented bullet, or another marker (`*`, `+`, `1.`, `1)`) is
+refused `acceptance_unparseable`, naming the line.
+
+- An item with no spec is refused `no_spec`. A spec with no acceptance
+  criteria is refused `no_acceptance`. Each refusal names the command that
+  fixes it, `ledger spec set <KEY> --title <title> --body-file <body.md>
+  --acceptance <criteria>` (with the CLI the rule chose). Read it to the person.
+  Nothing was written.
+- A spec read that fails, or that answers a version or content hash that
+  cannot be read, is refused (`ledger_refused`, `item_unreadable`). An earlier
+  read never stands in for it.
+- The plan stores the spec version it was made from. A spec that changed since
+  then sends the pass back to `plan`, as a changed criterion does (section 1).
+  Another version counts, including one that only moved the spec's source, and
+  so does other content under the same version. A spec set while the pass
+  opens is refused `stale`. One set during a live pass makes the pass's next
+  write `stale`. Open the ticket again to see the change.
+
 ## The card and the store
 
 The card is the ticket's durable record: its claim, the plan snapshot, go
@@ -109,6 +149,11 @@ prints one JSON envelope, `{"ok": true, "data": ...}` or
   such item.
 - `export-item <item>` gives `data.events` in id order, each with `id`, `kind`,
   `payload` and `idempotency_key`.
+- For a ledger item as the ticket: `spec show <item>` gives `data` with
+  `item_id`, `version`, `content_hash`, `recorded_at`, `body_md` and
+  `acceptance`, where `no_spec` means the item has no spec. `links <item>` gives
+  `data.outgoing` rows with `rel` and `target` and `data.incoming` rows with
+  `rel` and `source`, where `empty` means no link names the item.
 - `usage` is an unknown command or flag. Codes such as `validation` and
   `integrity` are permanent refusals.
 
@@ -201,7 +246,7 @@ Where a resume lands:
 | closed | `closed` |
 
 A change on the ticket's acceptance criteria (added, removed, edited,
-duplicated or reordered) sends the pass back to `plan`: the stored plan must be
+duplicated or reordered), or on a ledger item's spec, sends the pass back to `plan`: the stored plan must be
 presented again as a new revision, with its own plan go and review rounds.
 Rounds already stored still count toward the cap, so at the cap a change
 leaves the ticket `stopped`. A change after the outward go spends that go;

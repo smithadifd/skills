@@ -1,8 +1,12 @@
 """A stand-in for the ledger CLI that the ticket skill's ledger store drives, for its tests.
 
 It answers the verbs the store sends (``query --item``, ``export-item``,
-``append-many`` and ``append-many --help``) with the CLI's ``{ok, data,
-error}`` envelope and its exit statuses: an item's revision is the id of its
+``append-many`` and ``append-many --help``), and the ones the ledger-item
+source reads (``spec show ITEM`` and ``links ITEM``, as ledger 0.1.22 answers
+them), with the CLI's ``{ok, data, error}`` envelope and its exit statuses:
+``spec show`` refuses an unknown item ``not_found`` and an item with no spec
+``no_spec``, and ``links`` refuses an unknown item ``not_found`` and an item no
+link names ``empty``. An item's revision is the id of its
 newest event, ``export-item`` hides an item's session records before its
 latest close (all of them while it is closed), and ``append-many`` lands its
 batch whole or not at all, replays a stored key, refuses a stored key that
@@ -26,6 +30,10 @@ import sys
 import time
 
 EPHEMERAL = ("session.opened", "session.closed", "item.progress")
+# The spec's content fields and its provenance, as ``spec show`` prints them.
+SPEC_FIELDS = ("title", "body_md", "acceptance", "size", "merge_class", "source", "source_rev")
+# The link relations whose target is an item id.
+ITEM_RELS = ("item", "blocks", "duplicate-of", "child-of")
 FIELDS = ("kind", "payload", "item_id", "idempotency_key", "payload_version", "channel", "provenance_class")
 HELP = {
     "ok": (0, "usage: ledger append-many [-h] [--json] [--db DB] [--expect-revision EVENT_ID|none] item\n"),
@@ -90,6 +98,51 @@ def export_item(state, item):
     return {"item_id": item, "events": shown}
 
 
+def exists(state, item):
+    return any(event["kind"] == "item.created" for event in of_item(state["events"], item))
+
+
+def spec_show(state, item):
+    if not exists(state, item):
+        raise Refusal("not_found", f"item not found: {item}", 1)
+    specs = [event for event in of_item(state["events"], item) if event["kind"] == "item.spec"]
+    if not specs:
+        raise Refusal("no_spec", f"item {item} has no spec", 1)
+    event = specs[-1]
+    payload = event["payload"]
+    data = {
+        "item_id": item, "version": payload["version"], "event_id": event["id"],
+        "recorded_at": event.get("recorded_at"), "content_hash": payload["content_hash"],
+    }
+    data.update({name: payload.get(name) for name in SPEC_FIELDS})
+    return data
+
+
+def links(state, item):
+    if not exists(state, item):
+        raise Refusal("not_found", f"item not found: {item}", 1)
+    titles = {}
+    for event in state["events"]:
+        if event["kind"] == "item.created":
+            titles.setdefault(event["item_id"], event["payload"]["title"])
+    outgoing, incoming = [], []
+    for event in state["events"]:
+        if event["kind"] != "item.linked":
+            continue
+        rel, target = event["payload"].get("rel"), event["payload"].get("target")
+        if event["item_id"] == item:
+            resolution = "item" if target in titles else ("unresolved" if rel in ITEM_RELS else "external")
+            outgoing.append({"event_id": event["id"], "rel": rel, "target": target, "resolution": resolution,
+                             "title": titles.get(target)})
+        if target == item:
+            resolution = "item" if event["item_id"] in titles else "unresolved"
+            incoming.append({"event_id": event["id"], "rel": rel, "source": event["item_id"], "resolution": resolution,
+                             "title": titles.get(event["item_id"])})
+    if not outgoing and not incoming:
+        raise Refusal("empty", f"no links name {item}", 1)
+    return {"item_id": item, "title": titles[item], "outgoing": outgoing, "incoming": incoming}
+
+
 def append_many(state, item, expect, stdin):
     try:
         batch = json.loads(stdin)
@@ -149,6 +202,10 @@ def carry_out(state, verb, args, stdin):
         elif verb == "append-many" and len(args) >= 2:
             expect = args[args.index("--expect-revision") + 1] if "--expect-revision" in args else None
             data = append_many(state, args[1], expect, stdin)
+        elif verb == "spec" and len(args) == 3 and args[1] == "show":
+            data = spec_show(state, args[2])
+        elif verb == "links" and len(args) == 2:
+            data = links(state, args[1])
         else:
             raise Refusal("usage", f"the fake does not answer {' '.join(args)!r}", 2)
     except Refusal as refusal:

@@ -4,6 +4,16 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### `ticket` works a ledger item
+
+`/ticket <item-id>` can now work an item you filed in the ledger. When no tracker key and no local JSON file matches the key, the ledger is on and it holds an item with that id, `ticket.ledger_item_source(key)` gives a source that reads the item's title and status, its current spec (body and acceptance criteria) and its links. The pass keeps its card on that same item.
+
+- Every open and resume reads the spec again. A spec that changed since the plan was stored (a new version, or other content) sends the pass back to planning, as a changed acceptance criterion on a tracker ticket does. A spec set while a pass opens or runs makes that pass stop as `stale`, and the next open sees the change.
+- An item with no spec is refused as `no_spec`, and a spec with no acceptance criteria as `no_acceptance`. Each refusal names the `ledger spec set` command that fixes it, and nothing is written.
+- Acceptance text is either `- ` bullets, one criterion per line, or one text with no list markers. Anything between the two is refused as `acceptance_unparseable`, naming the line.
+- A spec read that fails, or that answers a version it cannot parse, is refused. An earlier read is never used instead.
+- The ledger CLI must have `spec show` and `links`, as ledger 0.1.22 does.
+
 ### One rule decides whether the ledger is on
 
 `topic`, `sharpen`, `shape`, `ticket` and the session-start hook now decide whether the ledger is on the same way, with one rule in `skills/_lib/ledger_cli.py`. Before, `ticket` used a `ledger` on your `PATH` when `LEDGER_DB` named a database, while the others needed `ledger_cli` set in the topic config, so `ticket` could keep its cards in the ledger while `topic`, `sharpen` and `shape` stayed on files. The session-start hook shares the rule but uses only an explicit setting, so it still needs `ledger_cli` set to print the contract.
