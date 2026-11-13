@@ -53,7 +53,8 @@ this repository does not ship one. It is a key in `config.json`, read
 the same way as `topics_dir` (explicit `--config`, then
 `~/.claude/skill-config/topic.json`, then the shipped file). Whether the route is
 on is one rule, shared by every skill and the plugin's session-start hook
-(`decide` in `../_lib/ledger_cli.py`):
+(`decide` in `../_lib/ledger_cli.py`; the hook skips the `PATH` case below, so
+it needs an explicit setting):
 
 - a `ledger_cli` value names the CLI and wins (rule `explicit setting`);
 - `none`, in any case, turns the route off (rule `off by setting`);
@@ -131,10 +132,11 @@ used:
   close is as it always was.
 - **Where the rule lives:** `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`
   prints `{"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}`,
-  the same decision `ledger_item.py` uses. The sharpen, shape and ticket skills and
-  the plugin's session-start hook decide the same way, so one setting, or a ledger
-  on `PATH` with `LEDGER_DB`, switches the ledger on for all of them, and `none`
-  switches it off for all of them.
+  the same decision `ledger_item.py` uses. The sharpen, shape and ticket skills
+  decide the same way, so one setting, or a ledger on `PATH` with `LEDGER_DB`,
+  switches the ledger on for all of them, and `none` switches it off for all of
+  them. The plugin's session-start hook uses only the setting: it never runs a
+  `ledger` from `PATH`.
 
 ## File resolution
 

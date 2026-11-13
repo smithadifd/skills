@@ -6,20 +6,20 @@ Release notes for the `sdlc` plugin, newest first.
 
 ### One rule decides whether the ledger is on
 
-`topic`, `sharpen`, `shape`, `ticket` and the session-start hook now decide whether the ledger is on the same way, with one rule in `skills/_lib/ledger_cli.py`. Before, `ticket` used a `ledger` on your `PATH` when `LEDGER_DB` named a database, while the others needed `ledger_cli` set in the topic config, so a machine could keep ticket cards in the ledger and never see the contract at session start.
+`topic`, `sharpen`, `shape`, `ticket` and the session-start hook now decide whether the ledger is on the same way, with one rule in `skills/_lib/ledger_cli.py`. Before, `ticket` used a `ledger` on your `PATH` when `LEDGER_DB` named a database, while the others needed `ledger_cli` set in the topic config, so `ticket` could keep its cards in the ledger while `topic`, `sharpen` and `shape` stayed on files. The session-start hook shares the rule but uses only an explicit setting, so it still needs `ledger_cli` set to print the contract.
 
 - An explicit setting wins: `ledger_cli` in the topic config and, for `ticket`, its own `TICKET_LEDGER_CLI`, which comes first. An explicit CLI that is missing or fails is reported as before.
 - `none`, in any case, turns the ledger off. `"ledger_cli": "none"` keeps every skill, `ticket` included, on files.
-- With no setting, the ledger is on when a `ledger` on `PATH` passes the check `ticket` already ran (`ledger append-many --help` names `--expect-revision`) and `LEDGER_DB` names an existing file. A `ledger` whose real path lies inside the working directory, such as one in a checkout's `bin` folder on your `PATH`, is never run, not even for the check, and the rule leaves the ledger off. Your home folder and the folders above it are exempt from this check. Anything else leaves it off, silently.
+- With no setting, `topic`, `sharpen`, `shape` and `ticket` turn the ledger on when you invoke them, a `ledger` on `PATH` passes the check `ticket` already ran (`ledger append-many --help` names `--expect-revision`), and `LEDGER_DB` names an existing file. The session-start hook does not use this case: it never looks up or runs a `ledger` from `PATH`, so it turns the ledger on only from an explicit setting. Anything else leaves it off, silently.
 - A `ledger_cli` value that is not a string, or a topic config file that exists but cannot be read, leaves the ledger off; it never falls through to the `PATH` rule. A broken `~/.claude/skill-config/topic.json` leaves the ledger off even when the shipped config names a CLI.
 - Each skill's first ledger line names the rule that chose, as `ledger on (<rule>: <detail>)`, where `<rule>` is `explicit setting`, `off by setting`, `ledger on PATH with LEDGER_DB` or `not configured`. The session-start hook prints it before the version line, `topic` before the item line, and `sharpen` and `shape` with a successful link or election. `ticket`'s open card reads `store: ledger (<rule>: <detail>)` or `store: markdown (<rule>: <detail>)`. `python3 skills/_lib/ledger_cli.py` adds `rule` and `line` to its JSON.
 
 What changes for you:
 
-- With `ledger` on your `PATH` and `LEDGER_DB` set, the session-start hook, `topic`, `sharpen` and `shape` now use the ledger with no `ledger_cli`. To keep them on files, set `"ledger_cli": "none"` in `~/.claude/skill-config/topic.json`.
+- With `ledger` on your `PATH` and `LEDGER_DB` set, `topic`, `sharpen` and `shape` now use the ledger with no `ledger_cli` when you invoke them. Like `ticket` since 0.12.0, such a skill runs the first `ledger` on your `PATH`; setting `ledger_cli` to an absolute path, or to `none`, avoids that lookup. To keep them on files, set `"ledger_cli": "none"` in `~/.claude/skill-config/topic.json`.
+- The session-start hook still needs `ledger_cli` set to print the brief, until the ledger's own plugin replaces the hook. An absolute path is recommended, for example the output of `command -v ledger`. The hook never uses a `ledger` from your `PATH`, even with `LEDGER_DB` set.
 - `ticket` now also follows `ledger_cli`: a CLI named there is used (and refused when it fails the check), and `none` there keeps the markdown store.
 - `"ledger_cli": null` in your override file no longer forces the ledger off. It clears the setting, and the `PATH` rule decides.
-- A session started in your home folder, or in a folder above it such as `/`, still finds `ledger` in `~/.local/bin`: those folders are exempt from the working-directory check. A session started in a project folder (`~/code/project`, for example) never runs a `ledger` that lies inside that project. To use one kept there, set `ledger_cli` to its path.
 
 ## 0.12.0
 

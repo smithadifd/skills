@@ -1,8 +1,9 @@
 """The plugin's SessionStart hook: reports ledger state without blocking startup.
 
-Whether the ledger is on is the shared rule's decision (`skills/_lib/ledger_cli.py`):
-an explicit `ledger_cli` setting, `none`, or a compatible `ledger` on PATH with
-`LEDGER_DB` naming an existing file.
+Whether the ledger is on is the shared rule's decision (`skills/_lib/ledger_cli.py`),
+called with `path_rule=False`: an explicit `ledger_cli` setting turns it on and
+`none` turns it off. The hook never looks up or runs a `ledger` from PATH, so a
+`ledger` on PATH with `LEDGER_DB` set leaves it silent.
 """
 
 import importlib.util
@@ -412,17 +413,17 @@ def test_it_writes_no_file_but_the_env_file(rig, tmp_path):
 # --- The shared rule: a ledger on PATH with LEDGER_DB, and `none` ------------------------
 
 
-def test_with_only_a_ledger_on_path_and_ledger_db_it_prints_the_brief(rig):
-    ledger = rig.path_ledger()
-    db = rig.database()
-    proc = rig.run(extra_env={"LEDGER_DB": str(db)})
+def test_with_only_a_ledger_on_path_and_ledger_db_the_hook_stays_silent_and_runs_nothing(rig):
+    # A compatible `ledger` on PATH and a LEDGER_DB that names a file turn the
+    # ledger on for the skills a person invokes, but the hook uses only an
+    # explicit setting: it never looks the `ledger` up, so nothing runs.
+    rig.path_ledger()
+    proc = rig.run(extra_env={"LEDGER_DB": str(rig.database())})
     assert proc.returncode == 0
-    assert proc.stdout == (
-        f"ledger on (ledger on PATH with LEDGER_DB: {ledger} found on PATH, LEDGER_DB names {db})\n"
-        + BRIEF_OUTPUT
-    )
-    assert rig.calls() == [["append-many", "--help"], ["resume", "--brief"], ["--version"]]
-    assert "export LEDGER_SESSION=sess-1" in rig.env_file.read_text(encoding="utf-8")
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    assert not rig.log.exists(), "the hook ran the ledger on PATH"
+    assert not rig.env_file.exists()
 
 
 @pytest.mark.parametrize("value", ["none", "NONE", " None "])
@@ -447,12 +448,12 @@ def test_a_ledger_on_path_without_a_usable_ledger_db_is_silent_and_never_run(rig
     assert not rig.env_file.exists()
 
 
-def test_an_incompatible_ledger_on_path_is_silent_after_the_check(rig):
+def test_an_incompatible_ledger_on_path_is_silent_and_never_checked(rig):
     rig.path_ledger()
     proc = rig.run(mode="nocapability", extra_env={"LEDGER_DB": str(rig.database())})
     assert proc.returncode == 0
     assert proc.stdout == ""
-    assert rig.calls() == [["append-many", "--help"]]
+    assert rig.calls() == [], "the hook ran the compatibility check on a ledger from PATH"
     assert not rig.env_file.exists()
 
 
@@ -468,58 +469,124 @@ def test_an_unreadable_setting_never_falls_through_to_the_ledger_on_path(rig):
     assert rig.calls() == []
 
 
-def test_a_ledger_on_path_inside_the_working_directory_is_never_run(rig, tmp_path):
-    # A checkout that is both the working directory and on PATH plants `ledger`.
-    project = tmp_path / "project"
-    (project / "bin").mkdir(parents=True)
-    planted = project / "bin" / "ledger"
-    planted.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
-    planted.chmod(planted.stat().st_mode | stat.S_IXUSR)
-    marker = tmp_path / "planted-ledger-ran.log"
-    db = rig.database()
-    env = {
-        "PATH": f"{project / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
-        "LEDGER_DB": str(db),
-        "FAKE_LEDGER_LOG": str(marker),
-    }
-    proc = rig.run(cwd=project, extra_env=env)
+# --- A ledger a checkout plants on PATH: the hook never runs it ------------------------
+
+# A compatible fake that appends each call to a marker file named in its own text.
+PLANTED = """#!__PYTHON__
+import sys
+with open(__MARKER__, "a", encoding="utf-8") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:2] == ["append-many"]:
+    sys.stdout.write("usage: ledger append-many ITEM [--expect-revision N]\\n")
+elif sys.argv[1:2] == ["resume"]:
+    sys.stdout.write("BRIEF: planted\\n")
+"""
+
+
+def _plant(folder, marker):
+    """A compatible fake `ledger` in `folder` that appends each call to `marker`; its path."""
+    folder.mkdir(parents=True, exist_ok=True)
+    ledger = folder / "ledger"
+    ledger.write_text(
+        PLANTED.replace("__PYTHON__", sys.executable).replace("__MARKER__", repr(str(marker))),
+        encoding="utf-8",
+    )
+    ledger.chmod(ledger.stat().st_mode | stat.S_IXUSR)
+    return ledger
+
+
+def _payload(path, marker):
+    """A shell script at `path` that appends to `marker` whenever anything runs it."""
+    path.write_text(f"#!/bin/sh\necho ran >> {shlex.quote(str(marker))}\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _first_on_path(folder):
+    return f"{folder}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
+def _silent_and_never_ran(proc, marker, rig):
     assert proc.returncode == 0
     assert proc.stdout == ""
     assert proc.stderr == ""
-    assert not marker.exists(), "the ledger inside the working directory was run"
+    assert not marker.exists(), "the hook ran a program a checkout put on PATH"
     assert not rig.env_file.exists()
-    # The same ledger with the working directory outside the project is on.
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    proc = rig.run(cwd=elsewhere, extra_env=env)
-    assert proc.stdout == (
-        f"ledger on (ledger on PATH with LEDGER_DB: {planted} found on PATH, LEDGER_DB names {db})\n"
-        + BRIEF_OUTPUT
+
+
+def test_a_ledger_planted_in_a_checkout_bin_on_path_is_never_run_from_the_checkout_root(rig, tmp_path):
+    checkout = tmp_path / "checkout"
+    marker = tmp_path / "planted-ran.log"
+    _plant(checkout / "bin", marker)
+    proc = rig.run(
+        cwd=checkout,
+        extra_env={"PATH": _first_on_path(checkout / "bin"), "LEDGER_DB": str(rig.database())},
     )
-    assert marker.exists()
+    _silent_and_never_ran(proc, marker, rig)
 
 
-@pytest.mark.parametrize("where", ["home", "above home"])
-def test_a_ledger_in_the_home_folder_prints_the_brief_from_a_session_started_in_home_or_above(rig, tmp_path, where):
-    # pipx installs `ledger` in the home folder's .local/bin. A session started in the home
-    # folder, or in a folder above it, still finds it: they are exempt.
-    local_bin = rig.fake_home / ".local" / "bin"
-    local_bin.mkdir(parents=True)
-    ledger = local_bin / "ledger"
-    ledger.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
-    ledger.chmod(ledger.stat().st_mode | stat.S_IXUSR)
-    db = rig.database()
-    cwd = rig.fake_home if where == "home" else rig.fake_home.parent
+def test_a_ledger_planted_in_a_checkout_bin_on_path_is_never_run_from_a_subfolder(rig, tmp_path):
+    checkout = tmp_path / "checkout"
+    (checkout / "sub").mkdir(parents=True)
+    marker = tmp_path / "planted-ran.log"
+    _plant(checkout / "bin", marker)
+    proc = rig.run(
+        cwd=checkout / "sub",
+        extra_env={"PATH": _first_on_path(checkout / "bin"), "LEDGER_DB": str(rig.database())},
+    )
+    _silent_and_never_ran(proc, marker, rig)
+
+
+@pytest.mark.parametrize("where", ["root", "subfolder"])
+@pytest.mark.parametrize("target", ["/bin/sh", "/usr/bin/env"])
+def test_a_planted_ledger_linked_to_a_system_program_never_runs_its_payload(rig, tmp_path, target, where):
+    # `bin/ledger` is a link to a program outside the checkout. Run for the
+    # compatibility check, `sh append-many --help` would run ./append-many from
+    # the working directory, and `env append-many --help` the bin/append-many
+    # first on PATH. Both payloads are the checkout's own.
+    checkout = tmp_path / "checkout"
+    (checkout / "bin").mkdir(parents=True)
+    cwd = checkout if where == "root" else checkout / "sub"
+    cwd.mkdir(exist_ok=True)
+    marker = tmp_path / "payload-ran.log"
+    (checkout / "bin" / "ledger").symlink_to(target)
+    if target == "/bin/sh":
+        _payload(cwd / "append-many", marker)
+    else:
+        _payload(checkout / "bin" / "append-many", marker)
     proc = rig.run(
         cwd=cwd,
-        extra_env={"PATH": f"{local_bin}{os.pathsep}{os.environ.get('PATH', '')}", "LEDGER_DB": str(db)},
+        extra_env={"PATH": _first_on_path(checkout / "bin"), "LEDGER_DB": str(rig.database())},
     )
-    assert proc.returncode == 0
-    assert proc.stdout == (
-        f"ledger on (ledger on PATH with LEDGER_DB: {ledger} found on PATH, LEDGER_DB names {db})\n"
-        + BRIEF_OUTPUT
-    )
-    assert rig.calls() == [["append-many", "--help"], ["resume", "--brief"], ["--version"]]
+    _silent_and_never_ran(proc, marker, rig)
+
+
+@pytest.mark.parametrize("shape", ["dot", "relative bin", "empty entry", "sibling checkout", "project below home"])
+def test_no_path_entry_shape_makes_the_hook_run_a_planted_ledger(rig, tmp_path, shape):
+    system = os.environ.get("PATH", "")
+    checkout = tmp_path / "checkout"
+    marker = tmp_path / "planted-ran.log"
+    if shape == "dot":
+        _plant(checkout / "bin", marker)
+        cwd, path = checkout / "bin", f".{os.pathsep}{system}"
+    elif shape == "relative bin":
+        _plant(checkout / "bin", marker)
+        cwd, path = checkout, f"bin{os.pathsep}{system}"
+    elif shape == "empty entry":
+        # An empty PATH entry is the working directory.
+        _plant(checkout / "bin", marker)
+        cwd, path = checkout / "bin", f"{os.pathsep}{system}"
+    elif shape == "sibling checkout":
+        sibling_bin = tmp_path / "sibling" / "bin"
+        _plant(sibling_bin, marker)
+        checkout.mkdir()
+        cwd, path = checkout, _first_on_path(sibling_bin)
+    else:
+        # The session starts in a temporary HOME; a checkout below it has its bin on PATH.
+        project_bin = rig.fake_home / "code" / "project" / "bin"
+        _plant(project_bin, marker)
+        cwd, path = rig.fake_home, _first_on_path(project_bin)
+    proc = rig.run(cwd=cwd, extra_env={"PATH": path, "LEDGER_DB": str(rig.database())})
+    _silent_and_never_ran(proc, marker, rig)
 
 
 def _plugin_with_shipped(root, shipped):
@@ -567,7 +634,7 @@ def test_an_explicit_setting_wins_over_the_ledger_on_path(rig):
     assert rig.calls() == [["resume", "--brief"], ["--version"]], "an explicit CLI is not probed"
 
 
-def test_the_check_and_the_brief_share_one_deadline(monkeypatch, tmp_path):
+def test_the_decision_and_the_brief_share_one_deadline(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("session_start_shared_deadline", HOOK)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -585,14 +652,11 @@ def test_the_check_and_the_brief_share_one_deadline(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_decide", decide)
     monkeypatch.setattr(module, "_brief", brief)
     monkeypatch.setattr(module, "_input_data", lambda: {})
-    monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "rig").mkdir()
     rig = Rig(tmp_path / "rig")
-    monkeypatch.setenv("PATH", f"{rig.bin}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("FAKE_LEDGER_LOG", str(rig.log))
-    monkeypatch.setenv("LEDGER_DB", str(rig.database()))
+    rig.configure()
+    monkeypatch.setenv("HOME", str(rig.fake_home))
     monkeypatch.delenv("CLAUDE_ENV_FILE", raising=False)
-    rig.path_ledger()
     assert module.main() == 0
     assert seen["brief"] == seen["deadline"]
 

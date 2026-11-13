@@ -2,10 +2,12 @@
 """SessionStart hook: report ledger state and tag the session for ledger writes.
 
 Decides whether the ledger is on by the rule every skill uses
-(`skills/_lib/ledger_cli.py`, `decide`): an explicit `ledger_cli` setting in the
-topic skill's config wins, `none` turns the ledger off, and otherwise a
-compatible `ledger` on `PATH` with `LEDGER_DB` naming an existing file turns it
-on. With the ledger off it prints nothing, writes nothing and exits 0.
+(`skills/_lib/ledger_cli.py`, `decide`), called with `path_rule=False`: an
+explicit `ledger_cli` setting in the topic skill's config turns the ledger on,
+`none` turns it off, and with no setting it is off. The hook never looks up or
+runs a `ledger` from `PATH`, even when `LEDGER_DB` is set; set `ledger_cli`
+(an absolute path is recommended) for the hook to print the brief. With the
+ledger off it prints nothing, writes nothing and exits 0.
 
 With it on, it runs `<cli> resume --brief`. The ledger line, the version line
 and the brief print only when that call succeeds with non-empty output: first
@@ -14,7 +16,7 @@ ledger on), then `ledger <version>` when `<cli> --version` succeeds, then the
 brief. A successful call with empty output prints nothing. Failure prints one
 bounded `ledger session-start: ...` line naming a non-zero exit, a program that
 could not run, or a timeout. Every path exits 0 so session start never blocks.
-The compatibility check and the brief share one deadline.
+The decision, the brief and the version call share one deadline.
 
 If `CLAUDE_ENV_FILE` is set and the ledger is on, the hook appends shell-quoted
 exports for a non-empty stdin `session_id` and `model` (the latter may also be an
@@ -81,7 +83,11 @@ def _decide(deadline: float):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     remaining = max(0.0, deadline - time.monotonic())
-    return module.decide(quiet=True, probe_timeout=min(module.PROBE_TIMEOUT_SECONDS, remaining))
+    return module.decide(
+        quiet=True,
+        probe_timeout=min(module.PROBE_TIMEOUT_SECONDS, remaining),
+        path_rule=False,
+    )
 
 
 def _brief(cli: str, deadline: float) -> tuple[str, str]:

@@ -27,22 +27,20 @@ of its own. It applies the first of these that holds:
    (rule: ledger on PATH with LEDGER_DB). The check is the one `ticket` has
    always run: `ledger append-many --help` exits 0 within the timeout and names
    `--expect-revision`. `LEDGER_DB` is tested first, so a `ledger` is never run
-   without a database. The `ledger` found on `PATH` is never run, not even for
-   the check, when its real path lies inside the current working directory:
-   that folder is usually a checkout, and its content must not choose a
-   program the rule runs. The home directory and the folders above it (`~`,
-   `/Users`, `/`) are exempt, so a session started there still finds a
-   `ledger` that pipx installed in the home directory's local bin folder; a
-   home directory that cannot be resolved exempts nothing.
+   without a database. This rule is for the skills a person invokes (`topic`,
+   `sharpen`, `shape`, `ticket`), which keep the default `path_rule=True`.
+   The session-start hook calls `decide` with `path_rule=False`: it never
+   looks up or runs a `ledger` from `PATH`, so only an explicit setting turns
+   the ledger on there.
 3. Anything else is off, silently (rule: not configured): no `ledger` on
-   `PATH`, a `ledger` on `PATH` inside the working directory, `LEDGER_DB`
-   unset, empty or not a file, a `ledger` that fails the check, a `ledger_cli`
-   value that is not a string, or a config file that exists but cannot be
-   read. The last two never fall through to rule 2: a setting that cannot be
-   read might have said `none`. Each config file keeps its own value and read
-   status, and they are weighed in precedence order: an override file that
-   cannot be read is off even when the shipped config names a CLI, because
-   the shipped value is never consulted beneath a broken override.
+   `PATH`, `LEDGER_DB` unset, empty or not a file, a `ledger` that fails the
+   check, no explicit setting for a caller that passes `path_rule=False`, a
+   `ledger_cli` value that is not a string, or a config file that exists but
+   cannot be read. The last two never fall through to rule 2: a setting that
+   cannot be read might have said `none`. Each config file keeps its own value
+   and read status, and they are weighed in precedence order: an override file
+   that cannot be read is off even when the shipped config names a CLI,
+   because the shipped value is never consulted beneath a broken override.
 
 The ledger line names the rule that chose, in one fixed form:
 
@@ -239,58 +237,12 @@ def probe(cli: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> Optional[str]:
     return None
 
 
-def _home_or_above(here: os.stat_result) -> bool:
-    """True when the working directory `here` is the home directory or one of its ancestors.
-
-    Home is `Path.home()` resolved to its real path, compared by identity like
-    the containment check. A home directory that cannot be resolved or
-    examined is False, so the containment check still applies.
-    """
-    try:
-        home = Path(os.path.realpath(Path.home()))
-        for folder in (home, *home.parents):
-            if os.path.samestat(os.stat(folder), here):
-                return True
-    except (OSError, RuntimeError, KeyError, ValueError):
-        return False
-    return False
-
-
-def _inside_working_directory(path: str) -> bool:
-    """True when `path`'s real path lies inside the current working directory, or that cannot be told.
-
-    Folders are compared by identity (`os.path.samestat`), not by spelling, so
-    a symlink, a relative `PATH` entry or a case-insensitive file system does
-    not hide the containment. A working directory or folder that cannot be
-    examined counts as inside: the answer fails closed. A working directory
-    that is the home directory or one of its ancestors is exempt: it is not a
-    checkout, and the local bin folder where pipx installs `ledger` lies
-    inside it.
-    """
-    try:
-        here = os.stat(os.getcwd())
-        if _home_or_above(here):
-            return False
-        for folder in Path(os.path.realpath(path)).parents:
-            if os.path.samestat(os.stat(folder), here):
-                return True
-    except (OSError, ValueError):
-        return True
-    return False
-
-
 def _on_path(probe_timeout: float) -> Decision:
     """Rule 2: a compatible `ledger` on PATH with a usable `LEDGER_DB`, or off with the reason."""
     found = shutil.which(LEDGER_COMMAND)
     if found is None:
         return Decision(
             None, RULE_NOT_CONFIGURED, f"no {LEDGER_COMMAND} CLI on PATH and no setting names one"
-        )
-    if _inside_working_directory(found):
-        return Decision(
-            None,
-            RULE_NOT_CONFIGURED,
-            f"the {LEDGER_COMMAND} CLI on PATH lies inside the working directory, so it is not run",
         )
     database = os.environ.get(LEDGER_DATABASE, "")
     if not database:
@@ -325,6 +277,7 @@ def decide(
     required_shipped: bool = False,
     quiet: bool = False,
     probe_timeout: float = PROBE_TIMEOUT_SECONDS,
+    path_rule: bool = True,
 ) -> Decision:
     """The one rule (see the module text): whether the ledger is on, through which CLI, and which rule chose.
 
@@ -335,6 +288,9 @@ def decide(
     long-standing behaviour); otherwise a missing one is silent, because a
     standalone install of one skill may not carry the topic skill. `quiet`
     mutes every stderr line. `probe_timeout` bounds the compatibility check.
+    `path_rule` False skips rule 2: with no explicit setting the decision is
+    `not configured`, and `shutil.which` is never called and nothing is run.
+    The session-start hook passes False; the skills keep the default True.
     """
     if selector_env:
         value = os.environ.get(selector_env, "").strip()
@@ -353,6 +309,12 @@ def decide(
         return _explicit(value, f"{CONFIG_SOURCE} is {OPT_OUT}", f"{CONFIG_SOURCE} names it")
     if problem is not None:
         return Decision(None, RULE_NOT_CONFIGURED, f"{problem}, so no ledger on PATH is used")
+    if not path_rule:
+        return Decision(
+            None,
+            RULE_NOT_CONFIGURED,
+            f"no setting names a {LEDGER_COMMAND} CLI, and this caller does not look on PATH",
+        )
     return _on_path(probe_timeout)
 
 

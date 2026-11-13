@@ -314,7 +314,8 @@ reorder its fields.
 
 Run `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`. It prints
 `{"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}`: the
-decision of the one rule every skill and the plugin's session-start hook share.
+decision of the one rule every skill shares (the plugin's session-start hook
+uses it too, but never the `PATH` case below).
 The topic skill's `ledger_cli` key wins when set, `none` turns the ledger off, and
 otherwise a compatible `ledger` on `PATH` with `LEDGER_DB` naming an existing
 database turns it on. When `ledger_cli` is `null`, skip this whole section;
