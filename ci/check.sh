@@ -320,7 +320,7 @@ check_lint_fixtures() {
 # network), and drives the hooks the tag's own plugin registers with recorded
 # hook inputs against a temporary database. No model is called. Every step
 # that fails is named in the message, and none is skipped.
-LEDGER_E2E_URL=https://github.com/smithadifd/ledger.git
+# The ledger repository is the sibling of this checkout's origin, named ledger.
 LEDGER_E2E_TAG=v0.2.0
 # The commit the tag points at: the clone is checked against it.
 LEDGER_E2E_SHA=ba1e6758c276ea1ab8ba8b8fd05dd40a142d9f18
@@ -461,6 +461,15 @@ assert not os.path.exists(os.path.join(root, "hooks")), "hooks/"
 PY
 
   # The pinned ledger: the tag's own tree, checked against its commit.
+  origin_url=$(git -C "$repo_dir" remote get-url origin 2> /dev/null) || origin_url=
+  case $origin_url in
+    https://github.com/*/*) ledger_e2e_path=${origin_url#https://github.com/} ;;
+    git@github.com:*/*) ledger_e2e_path=${origin_url#git@github.com:} ;;
+    *) ledger_e2e_fail setup "origin is not a github.com URL: $origin_url" ;;
+  esac
+  ledger_e2e_path=${ledger_e2e_path%/}
+  ledger_e2e_path=${ledger_e2e_path%.git}
+  LEDGER_E2E_URL=https://github.com/${ledger_e2e_path%/*}/ledger.git
   git clone -q --depth 1 --branch "$LEDGER_E2E_TAG" "$LEDGER_E2E_URL" "$scratch/ledger" 2> /dev/null ||
     ledger_e2e_fail ledger-install "git clone of $LEDGER_E2E_URL at $LEDGER_E2E_TAG failed"
   [ "$(git -C "$scratch/ledger" rev-parse HEAD)" = "$LEDGER_E2E_SHA" ] ||
