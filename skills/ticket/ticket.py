@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import dataclasses
 import errno
 import fcntl
 import functools
@@ -137,6 +138,17 @@ def _items(value: Any) -> list:
 
 
 @dataclass(frozen=True)
+class SpecVersion:
+    """The spec of a ledger item as one ``spec show`` reported it: its version and content hash (design 6.5)."""
+
+    version: int
+    content_hash: str
+
+    def record(self) -> dict[str, Any]:
+        return {"version": self.version, "content_hash": self.content_hash}
+
+
+@dataclass(frozen=True)
 class Ticket:
     key: str
     title: str
@@ -145,6 +157,8 @@ class Ticket:
     acceptance_criteria: tuple[str, ...]
     links: tuple[dict[str, str], ...] = ()
     updated_at: str | None = None
+    # The spec version a ledger-item source read on this pull; None for every other source (design 6.5).
+    spec: SpecVersion | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Ticket":
@@ -301,6 +315,8 @@ class PlanCard:
             data["diff_statement"] = self.diff_statement
         if ticket.updated_at:
             data["ticket_updated_at"] = ticket.updated_at
+        if ticket.spec is not None:
+            data["ticket_spec"] = ticket.spec.record()
         return data
 
     @classmethod
@@ -505,7 +521,7 @@ def _validate_review(review: Any) -> None:
 
 _PLAN_FIELDS = frozenset(
     ("schema", "key", "title", "revision", "pass", "criteria", "steps", "diff_statement",
-     "open_questions", "ticket_status", "ticket_updated_at")
+     "open_questions", "ticket_status", "ticket_updated_at", "ticket_spec")
 )
 
 
@@ -525,6 +541,12 @@ def _validate_plan(plan: Any, key: str) -> None:
         raise TicketError("a plan snapshot's ticket_status must be text")
     if "ticket_updated_at" in plan and type(plan["ticket_updated_at"]) is not str:
         raise TicketError("a plan snapshot's ticket_updated_at must be text")
+    if "ticket_spec" in plan:
+        spec = plan["ticket_spec"]
+        if type(spec) is not dict or set(spec) != {"version", "content_hash"}:
+            raise TicketError("a plan snapshot's ticket_spec names exactly a version and a content_hash")
+        _whole(spec["version"], "a plan snapshot's spec version")
+        _text(spec["content_hash"], "a plan snapshot's spec content_hash")
     questions = plan.get("open_questions")
     if type(questions) is not list or not all(_is_text(item) for item in questions):
         raise TicketError("a plan snapshot's open_questions must be a list of non-empty text")
@@ -852,6 +874,30 @@ def _source_differences(stored: Sequence[str], source: Sequence[str]) -> list[st
     return lines
 
 
+def _spec_differences(plan: Mapping[str, Any], ticket: Ticket) -> list[str]:
+    """How the ticket's current spec differs from the one the stored plan was made against (design 6.5).
+
+    The plan snapshot holds the spec version and content hash the presenting
+    pass read; the ticket holds the ones ``spec show`` reported on this open.
+    Any difference is a change, handled as a criteria edit is: another version
+    (a source-only move included), other content under the same version, a
+    spec where the plan had none, or none where it had one. Two sources with
+    no spec never differ.
+    """
+
+    stored = plan.get("ticket_spec")
+    current = None if ticket.spec is None else ticket.spec.record()
+    if stored == current:
+        return []
+    if stored is None:
+        return [f"the ticket now has spec v{current['version']} and the plan was stored without one"]
+    if current is None:
+        return [f"the plan was stored against spec v{stored['version']} and the ticket source has no spec"]
+    if stored["version"] != current["version"]:
+        return [f"the ticket's spec changed: v{stored['version']} -> v{current['version']}"]
+    return [f"the ticket's spec v{current['version']} now holds other content"]
+
+
 def _card_side_changes(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]], key: str) -> list[str]:
     """F11: a review or plan go of the plan's revision that no longer covers it."""
 
@@ -959,13 +1005,13 @@ def _derive(card: Mapping[str, Any], ticket: Ticket, pass_id: str | None, key: s
                 "Nothing was written; a person repairs the card.",
                 code="close_invalid",
             )
-        differences = _source_differences(identity[1], ticket.acceptance_criteria)
+        differences = _source_differences(identity[1], ticket.acceptance_criteria) + _spec_differences(card["plan"], ticket)
         flags = [_f7("; ".join(differences))] if differences else []
         return "closed", flags + _source_flags(card["plan"], ticket), identity
     if identity is None:
         return "orient", [], None
     revision = identity[0]
-    source_changes = _source_differences(identity[1], ticket.acceptance_criteria)
+    source_changes = _source_differences(identity[1], ticket.acceptance_criteria) + _spec_differences(card["plan"], ticket)
     card_changes = _card_side_changes(card, identity, key)
     rounds = len(card["reviews"])
     final = _passing_final(card, identity)
@@ -1981,6 +2027,241 @@ def _probe_ledger(cli: str) -> None:
         raise _ledger_incompatible(cli, failure)
 
 
+# --- The ledger-item source (design 6.5) ------------------------------------
+
+# An acceptance line that starts like a list item but is not a ``- `` bullet at
+# the very start of the line: another marker, or a marker after indentation.
+_NOT_A_BULLET = re.compile(r"\s*(?:[-*+]|[0-9]+[.)])(?:\s|$)")
+# A spec's content hash as the ledger writes it: a SHA-256 hex digest.
+_SPEC_HASH = re.compile(r"[0-9a-f]{64}")
+
+
+def _ledger_read(cli: str, *args: str) -> _Answer:
+    """One read call of the ledger CLI, ``<cli> --json <args>``, as the ledger store makes its calls."""
+
+    result = subprocess.run([cli, "--json", *args], input="", capture_output=True, encoding="utf-8", check=False)
+    return _ledger_answer(result.returncode, result.stdout, result.stderr)
+
+
+def spec_set_command(cli: str, key: str, title: str) -> str:
+    """The command that gives ledger item ``key`` a spec, shell-quoted; the person fills in the two placeholders."""
+
+    return shlex.join([cli, "spec", "set", key, "--title", title]) + " --body-file <body.md> --acceptance <criteria>"
+
+
+def _parse_acceptance(text: str) -> list[str]:
+    """A spec's acceptance text as ordered criteria, by the grammar of design 6.5.
+
+    Two forms are accepted. Every non-blank line is a bullet (``- `` at the
+    very start of the line), and each bullet's text is one criterion. Or no
+    line starts like a list item, and the whole text is one criterion. Blank
+    lines are ignored. Anything else raises ``ValueError`` naming the first
+    line that breaks the grammar; nothing is guessed.
+    """
+
+    lines = [(number, line) for number, line in enumerate(text.splitlines(), 1) if line.strip()]
+    if any(line.startswith("- ") for _, line in lines):
+        criteria = []
+        for number, line in lines:
+            if not line.startswith("- "):
+                raise ValueError(f"line {number} is not a `- ` bullet at the start of the line, but other lines are bullets")
+            if not line[2:].strip():
+                raise ValueError(f"line {number} is a bullet with no text")
+            criteria.append(line[2:].strip())
+        return criteria
+    for number, line in lines:
+        if _NOT_A_BULLET.match(line):
+            raise ValueError(f"line {number} starts like a list item, but not with `- ` at the start of the line")
+    return [text.strip()]
+
+
+def _item_unreadable(key: str, verb: str, why: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"the ledger's `{verb}` answer for item {key} cannot be read: {why}. Nothing was written, and no earlier "
+        "read stands in for it; a person checks the ledger.",
+        code="item_unreadable",
+    )
+
+
+class LedgerItemSource:
+    """A ticket that is a ledger item (design 6.5): its title and status (``query --item``), its current
+    spec (``spec show``) and its links (``links``), read through the ledger CLI.
+
+    Every ``pull`` reads all three again and keeps nothing between pulls, so an
+    open plans or resumes only from the spec version it read itself. The spec's
+    body is the description, its acceptance text gives the criteria, and its
+    version and content hash travel on the ticket as ``spec``. An item with no
+    spec, or a spec with no acceptance criteria, is refused by name with the
+    ``spec set`` command that fixes it; a read that fails or cannot be parsed
+    is refused, never answered from an earlier read. The pass keeps its card on
+    the same item, through the ledger store of the same CLI.
+    """
+
+    def __init__(self, cli: str | Path):
+        self.cli = str(cli)
+
+    def _data(self, key: str, verb: str, answer: _Answer) -> Any:
+        if answer.ok:
+            return answer.data
+        if answer.code == "usage":
+            raise _ledger_incompatible(self.cli, f"{verb}: {answer.code}: {answer.message}")
+        said = f"{answer.code}: {answer.message}" if answer.code else f"no envelope, exit status {answer.status}: {answer.output}"
+        raise StoreUnavailable(
+            f"the ledger refused `{verb}` for ticket {key} ({said}). Nothing was written, and no earlier read stands "
+            "in for it; a person reads the ledger's reason.",
+            code="ledger_refused",
+        )
+
+    def _row(self, key: str, answer: _Answer) -> Mapping[str, Any]:
+        """The item's row from a ``query --item`` answer."""
+
+        data = self._data(key, "query", answer)
+        rows = data.get("items") if type(data) is dict else None
+        if type(rows) is not list:
+            raise _item_unreadable(key, "query", "it lists no items")
+        row = next((row for row in rows if type(row) is dict and row.get("item_id") == key), None)
+        if row is None:
+            raise _item_unreadable(key, "query", f"it does not list item {key}")
+        if not _is_text(row.get("title")) or not _is_text(row.get("status")):
+            raise _item_unreadable(key, "query", "the item's title or status is not text")
+        return row
+
+    def read_spec(self, key: str, title: str) -> tuple[SpecVersion, str, list[str], str | None]:
+        """The item's current spec: its version, body, criteria and recorded time, read now."""
+
+        answer = _ledger_read(self.cli, "spec", "show", key)
+        if answer.ok is False and answer.code == "no_spec":
+            raise StoreUnavailable(
+                f"ledger item {key} has no spec, so there is nothing to plan against. Nothing was written. Give it "
+                f"one with `{spec_set_command(self.cli, key, title)}`, then open the ticket again.",
+                code="no_spec",
+            )
+        data = self._data(key, "spec show", answer)
+        if type(data) is not dict or data.get("item_id") != key:
+            raise _item_unreadable(key, "spec show", f"it is not the spec of item {key}")
+        version = data.get("version")
+        if type(version) is not int or version < 1:
+            raise _item_unreadable(key, "spec show", f"its version {version!r} is not a whole number of at least 1")
+        content_hash = data.get("content_hash")
+        if type(content_hash) is not str or not _SPEC_HASH.fullmatch(content_hash):
+            raise _item_unreadable(key, "spec show", f"its content_hash {content_hash!r} is not a SHA-256 hex digest")
+        body = data.get("body_md")
+        if not _is_text(body):
+            raise _item_unreadable(key, "spec show", "its body is not text")
+        recorded = data.get("recorded_at")
+        if recorded is not None and not _is_text(recorded):
+            raise _item_unreadable(key, "spec show", "its recorded_at is not text")
+        acceptance = data.get("acceptance")
+        if acceptance is not None and type(acceptance) is not str:
+            raise _item_unreadable(key, "spec show", "its acceptance is not text")
+        if acceptance is None or not acceptance.strip():
+            raise StoreUnavailable(
+                f"spec v{version} of ledger item {key} has no acceptance criteria, so a review has nothing to check. "
+                f"Nothing was written. Set them with `{spec_set_command(self.cli, key, title)}`, then open the "
+                "ticket again.",
+                code="no_acceptance",
+            )
+        try:
+            criteria = _parse_acceptance(acceptance)
+        except ValueError as exc:
+            raise StoreUnavailable(
+                f"the acceptance criteria of spec v{version} of ledger item {key} cannot be read: {exc}. Nothing was "
+                "written. Write them as `- ` bullets, one per line, or as one text with no list markers, with "
+                f"`{spec_set_command(self.cli, key, title)}`.",
+                code="acceptance_unparseable",
+            ) from exc
+        return SpecVersion(version, content_hash), body, criteria, recorded
+
+    def _links(self, key: str) -> list[dict[str, str]]:
+        """The item's links: each outgoing link as its relation, each incoming one as ``<relation> (incoming)``."""
+
+        answer = _ledger_read(self.cli, "links", key)
+        if answer.ok is False and answer.code == "empty":
+            return []
+        data = self._data(key, "links", answer)
+        if type(data) is not dict or type(data.get("outgoing")) is not list or type(data.get("incoming")) is not list:
+            raise _item_unreadable(key, "links", "it does not list outgoing and incoming links")
+        links = []
+        for direction, end, suffix in (("outgoing", "target", ""), ("incoming", "source", " (incoming)")):
+            for row in data[direction]:
+                if type(row) is not dict or not _is_text(row.get("rel")) or not _is_text(row.get(end)):
+                    raise _item_unreadable(key, "links", f"an {direction} link does not name its relation and {end}")
+                links.append({"kind": row["rel"] + suffix, "url": row[end]})
+        return links
+
+    def pull(self, key: str) -> Ticket:
+        if not _KEY.fullmatch(key):
+            raise TicketError(f"unsafe ticket key: {key!r}")
+        row = self._row(key, _ledger_read(self.cli, "query", "--item", key))
+        spec, body, criteria, recorded = self.read_spec(key, row["title"])
+        ticket = Ticket.from_mapping(
+            {
+                "key": key,
+                "title": row["title"],
+                "status": row["status"],
+                "description": body,
+                "acceptance_criteria": criteria,
+                "updated_at": recorded,
+                "links": self._links(key),
+            }
+        )
+        return dataclasses.replace(ticket, spec=spec)
+
+    def confirm(self, ticket: Ticket) -> None:
+        """Refuse ``stale`` unless the item's spec is still the one ``ticket`` was pulled at.
+
+        ``open`` calls it after the card read: a spec set before the read is
+        seen here, and one after it moves the item's revision past the held
+        token, so the claim and every later write are refused ``stale``.
+        """
+
+        current = self.read_spec(ticket.key, ticket.title)[0]
+        if current != ticket.spec:
+            held = "none" if ticket.spec is None else f"v{ticket.spec.version}"
+            raise _stale(ticket.key, f"its spec moved from {held} to v{current.version} while the pass opened")
+
+
+def ledger_item_source(key: str) -> LedgerItemSource | None:
+    """The source for ``/ticket <key>`` when no tracker key and no JSON file matched it (design 6.5).
+
+    With the ledger off by the shared rule, or no item ``key`` in it, this
+    returns None: the key names no ticket, as before. An item that exists gives
+    its source; the open then refuses it ``no_spec`` when it has no spec. A
+    named CLI that fails the capability check is refused as ``choose_store``
+    refuses it, and any other ledger refusal is ``ledger_refused``.
+    """
+
+    if not _KEY.fullmatch(key):
+        raise TicketError(f"unsafe ticket key: {key!r}")
+    chosen = select_store()
+    if chosen.cli is None:
+        return None
+    source = LedgerItemSource(chosen.cli)
+    answer = _ledger_read(source.cli, "query", "--item", key)
+    if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+        return None
+    source._row(key, answer)
+    return source
+
+
+def _check_item_store(key: str, source: Any, store: Any) -> None:
+    """A ledger item's card lives on that same item: refuse any other store before anything is read (design 6.5)."""
+
+    if not isinstance(source, LedgerItemSource):
+        return
+    if isinstance(store, LedgerStore) and store.key == key and store.cli == source.cli:
+        return
+    given = (
+        f"the ledger store of item {store.key} through {store.cli}" if isinstance(store, LedgerStore)
+        else f"a {type(store).__name__}"
+    )
+    raise StoreUnavailable(
+        f"ticket {key} is a ledger item read through {source.cli}, so its card lives on that item, but this open "
+        f"was given {given}. Nothing was read or written; open it with the store choose_store gives for {key}.",
+        code="source_store_mismatch",
+    )
+
+
 # --- The pass ----------------------------------------------------------------
 
 
@@ -2052,17 +2333,22 @@ class TicketPass:
         pulled or read; the guard is the store's own check, under its lock,
         when the claim or join reaches it, so a handle that becomes used during
         the open is refused there. Then the source is pulled, the card is read
-        and its state derived. A refused card writes nothing; a stopped or
+        and its state derived. A ledger-item source is checked against the
+        store first (``source_store_mismatch``) and its spec is read again
+        after the card (``stale`` when it moved). A refused card writes nothing; a stopped or
         closed ticket is reported and takes no claim. The open writes nothing
         into a store: a new pass sends its claim, a join sends a ``join`` event.
         """
 
         if store.pass_id is not None or store.ended is not None:
             raise _handle_used(key, store.pass_id or store.ended)
+        _check_item_store(key, source, store)
         ticket = source.pull(key)
         if ticket.key != key:
             raise TicketError(f"the source returned ticket {ticket.key!r}, expected {key!r}")
         card, token = store.read()
+        if isinstance(source, LedgerItemSource):
+            source.confirm(ticket)
         state, flags, identity = _derive(card, ticket, pass_id, key)
         session = cls(ticket, store, card, token, identity)
         session._phase = state

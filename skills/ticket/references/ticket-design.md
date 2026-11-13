@@ -96,7 +96,8 @@ atomic with `append-many --expect-revision`.
       "steps": [{"name", "status", "skip"?} x 6],       # orient research plan build review outward; as presented (3.6)
       "diff_statement"?: "<one sentence>",   # only while the plan step is skipped
       "open_questions": ["<text>", ...],
-      "ticket_status"?: "<text>", "ticket_updated_at"?: "<text>"
+      "ticket_status"?: "<text>", "ticket_updated_at"?: "<text>",
+      "ticket_spec"?: {"version": <int >= 1>, "content_hash": "<text>"}   # a ledger item's spec (6.5)
   },
   "decisions": [{"who", "who_kind", "relayed_by"?, "standing", "source": {"what", "ref", "who"?, "text"?},
                  "effect", "tags": [{"type", "id"}], "verbatim", "phase", "evidence"?,
@@ -326,7 +327,12 @@ Leading and trailing whitespace is stripped by `Ticket.from_mapping` on both sid
 whitespace, case and punctuation count. Why occurrences: a membership diff sees `["A", "A"]` and
 `["A"]` as the same set and falls through to "reordered", which names nothing a person can act on; the
 multiset diff names the extra or missing occurrence. A change to status, title, description, links or
-`updated_at` is never a change. The three the plan snapshot stores are compared explicitly against
+`updated_at` is never a change. A ledger item's spec (section 6.5) is: the spec version and content
+hash the plan snapshot stores are compared with the ones the open read, and any difference adds one
+line to the same list (`the ticket's spec changed: v{A} -> v{B}`, `the ticket's spec v{A} now holds
+other content`, `the ticket now has spec v{B} and the plan was stored without one`, or `the plan was
+stored against spec v{A} and the ticket source has no spec`), after the criteria lines, so F1, F2, F3,
+F6 and F7 carry it in `{what}` exactly as they carry a criteria edit. The three the plan snapshot stores are compared explicitly against
 the fresh source and are flags, in this order: status (F9), update time (F10), title (F12). The update
 time is nullable: a time that appears where the snapshot stored none, one that disappears, and one
 that differs are each F10. Description and links are not stored, so they are not compared. The flags
@@ -374,6 +380,11 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `stale` | the card changed since this pass last read or wrote it: a write refused under the held token, a fresh read whose token differs from the held one, or on the ledger a batch key already taken (`conflict`); the message names the newest writer when the store knows it (ledger) or says the card on disk changed (markdown) | the held token detects every change under a live pass at every write and every fresh read, so there is one code and one place that raises it |
 | `ledger_refused` | the ledger CLI refused a read or write for a reason that is not a race (section 6.2.4: validation, environment, a missing item or database, integrity, or an unresolved ambiguous answer); the message carries the CLI's `error.code` and message | a permanent refusal is never reported as the retryable `stale` |
 | `ledger_incompatible` | the selected ledger CLI lacks `append-many` or `--expect-revision`, or answers `usage` to a command the store sends | |
+| `no_spec` | a ledger-item source's item has no spec (6.5); nothing was written | the message names the exact `spec set` command, shell-quoted, with the body file and criteria as placeholders |
+| `no_acceptance` | the item's spec records no acceptance criteria, or only blank text (6.5); nothing was written | names the same `spec set` command |
+| `acceptance_unparseable` | the spec's acceptance text breaks the grammar of 6.5; nothing was written | names the first line that breaks it and why |
+| `item_unreadable` | an answer of `query`, `spec show` or `links` for a ledger-item source is not the shape 6.5 reads (a version that is not a whole number of at least 1, a content hash that is not a SHA-256 hex digest, a body or acceptance that is not text, a row with no title or status, a link with no relation or end) | never answered from an earlier read |
+| `source_store_mismatch` | a ledger-item source was opened with a store that is not the ledger store of the same item through the same CLI; nothing was read or written | raised by `open` before `source.pull` |
 | `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
@@ -825,6 +836,62 @@ cards, is `ledger item exists with different history`: never a merge, never a se
 cards, `TicketPass.open` adds one line to `reconciliation`: it names the exact command
 (`python3 <skill-dir>/ticket.py import-cards <repo>`, absolute and shell-quoted) and is printed once per
 open. The markdown store never prints it.
+
+### 6.5 A ledger item as the ticket source
+
+A person can file a ticket as a ledger item (`ledger new --type ticket`, then `ledger spec set`) and work
+it with `/ticket <item-id>`. The item is then both the ticket source and the card's store.
+
+**The invariant.** A ledger-item source reads the item's current spec version from the ledger on every
+open and resume, and the pass's card events live on that same item. A pass never plans or resumes from a
+spec version it did not read in that open.
+
+**Choosing the source.** The grammar of the key, first match wins:
+
+| The key | Source |
+|---|---|
+| matches a tracker key (the agent's connector) or names a JSON ticket file | that source, unchanged |
+| otherwise, the 6.3 rule turns the ledger on and `query --item <key>` lists the item | `ledger_item_source(key)` returns a `LedgerItemSource`; its pull refuses `no_spec` when the item has no spec |
+| otherwise (the ledger is off, or `query` answers `not_found` or `empty`) | `ledger_item_source` returns None: the key names no ticket, as before |
+
+`ledger_item_source` refuses an unsafe key (`TicketError`), a named CLI that fails the 6.2 probe
+(`ledger_incompatible`), a `usage` answer (`ledger_incompatible`) and any other refusal of `query`
+(`ledger_refused`).
+
+**The reads.** `pull(key)` calls `query --item <key>` (title and status), `spec show <key>` (version,
+content hash, body, acceptance, recorded time) and `links <key>` (outgoing rows as `{kind: rel, url:
+target}`, incoming rows as `{kind: "<rel> (incoming)", url: source}`; `empty` is no links). These are the
+verbs of ledger 0.1.22 (`links` since 0.1.19). The ticket's description is the spec's body, its
+`updated_at` the spec's recorded time, and its `spec` the `(version, content_hash)` pair. Nothing read is
+kept on the source: the next pull reads again. `present_plan` writes that pair into the snapshot as
+`ticket_spec`, and `_derive` compares it as section 4.2 says. Every version counts, including a source-only
+version the ledger writes for the same content hash: the conservative reading of "the spec version it
+read", at the cost of one re-plan when only the spec's source moved.
+
+**Acceptance grammar.** Blank lines are ignored. Either every non-blank line starts with `- ` (a dash and
+a space at column one), and each bullet's text, stripped, is one criterion; or no non-blank line starts
+like a list item (`-`, `*` or `+`, or digits and `.` or `)`, followed by whitespace or the end of the
+line, after any indentation), and the whole text, stripped, is one criterion. Near misses, each refused
+`acceptance_unparseable` with the line number: a line that is not a bullet among bullets (an intro line,
+a wrapped continuation, a fence, `-A` with no space, another marker), a bullet with no text, and a line
+that starts like a list item where no line is a bullet (an indented `- `, `* `, `1. `, `1) `, `-` and a
+tab). A spec with no acceptance text, or only blank text, is `no_acceptance`.
+
+**Where the card lives.** `open` refuses `source_store_mismatch` unless the store is a `LedgerStore` for
+the same key through the same CLI string the source reads, before anything is pulled or read. The card
+events are those of 6.2 on the item itself; because the item already exists, the claim is an
+`append-many` under the item's revision, never `item.created`.
+
+**Concurrent writers.** `ledger spec set` is the one writer of the spec, and it appends an `item.spec`
+event to the same item, so it moves the item's revision. After `store.read()` the open reads the spec
+again (`confirm`). A spec set between the pull and that check is refused `stale` (the message names the
+two versions), and one set after the check moves the revision past the held token, so the claim and
+every later write of the pass are refused `stale`. Either way nothing is written for the old version,
+and the next open sees the new one and returns to `plan` (4.4). A spec read that fails or cannot be
+parsed is refused: there is no cached spec to fall back on.
+
+**Failure path.** The source writes nothing, so a stop at any read leaves the item as it was, and a rerun
+reads again from the start. The writes are those of 6.2, with their failure paths.
 
 ## 7. Non-goals
 

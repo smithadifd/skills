@@ -8,6 +8,7 @@ answer to a verb.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -25,7 +26,7 @@ FAKE_CLI = Path(__file__).resolve().parent / "fake_ledger_cli.py"
 EXIT = {
     "stale_revision": 5, "conflict": 3, "validation": 3, "missing_harness": 3, "shared_database": 3,
     "synced_path": 3, "not_found": 1, "empty": 1, "missing_db": 1, "integrity": 4, "usage": 2, "error": 3,
-    "unusable": 3,
+    "unusable": 3, "no_spec": 1,
 }
 WRITER = "ticket"
 
@@ -107,6 +108,54 @@ class FakeLedger:
             })
 
         self._change(append)
+
+    def _append(self, item, kind, payload, key, **extra):
+        """An event the ledger's own verbs write (``new``, ``spec set``, ``link``), appended straight into the fake."""
+
+        def append(state):
+            events = state["events"]
+            events.append({
+                "id": (events[-1]["id"] if events else 0) + 1, "kind": kind, "payload": payload, "payload_version": 1,
+                "item_id": item, "idempotency_key": key, "actor": "person", "session": None, **extra,
+            })
+
+        self._change(append)
+
+    def new_item(self, title=TITLE, kind="ticket", item=KEY):
+        """``ledger new --type <kind> --title <title> --id <item>``: the item a person files before ``/ticket``."""
+
+        self._append(item, "item.created", {"type": kind, "title": title, "status": "open"}, f"new/{item}")
+
+    def set_spec(self, acceptance, body="Build the change the criteria describe.", title=TITLE, item=KEY, source=None):
+        """``ledger spec set``: the next version when the content or the source changed; otherwise nothing.
+
+        The content hash is the ledger's: SHA-256 over the canonical JSON of the
+        five content fields, an absent one as null. Returns the current version.
+        """
+
+        content = {"title": title, "body_md": body, "acceptance": acceptance, "size": None, "merge_class": None}
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        specs = [e for e in self.events() if e["item_id"] == item and e["kind"] == "item.spec"]
+        current = specs[-1]["payload"] if specs else None
+        if current is not None and current["content_hash"] == digest and (source is None or current.get("source") == source):
+            return current["version"]
+        version = 1 if current is None else current["version"] + 1
+        payload = {"version": version, "content_hash": digest, **{k: v for k, v in content.items() if v is not None}}
+        if source is not None:
+            payload["source"] = source
+        self._append(item, "item.spec", payload, f"spec:{item}:v{version}", recorded_at=f"2026-11-12T10:00:{version:02d}Z")
+        return version
+
+    def link(self, rel, target, item=KEY):
+        """``ledger link <item> <target> --rel <rel>``."""
+
+        self._append(item, "item.linked", {"rel": rel, "target": target}, f"link/{item}/{rel}/{target}")
+
+    def spec_hash(self, item=KEY):
+        """The content hash of the item's current spec."""
+
+        return [e for e in self.events() if e["item_id"] == item and e["kind"] == "item.spec"][-1]["payload"]["content_hash"]
 
 
 def open_ledger(cli, src, pass_id=None, handle=None):
