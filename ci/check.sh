@@ -320,7 +320,9 @@ check_lint_fixtures() {
 # network), and drives the hooks the tag's own plugin registers with recorded
 # hook inputs against a temporary database. No model is called. Every step
 # that fails is named in the message, and none is skipped.
-# The ledger repository is the sibling of this checkout's origin, named ledger.
+# The ledger repository's clone URL is the opaque input LEDGER_E2E_URL, which CI
+# sets and a local run must set. The check never parses or prints it; the commit
+# pin below is the integrity check, so any URL that yields that commit works.
 LEDGER_E2E_TAG=v0.2.0
 # The commit the tag points at: the clone is checked against it.
 LEDGER_E2E_SHA=ba1e6758c276ea1ab8ba8b8fd05dd40a142d9f18
@@ -370,6 +372,9 @@ ledger_e2e_json() {
 
 check_ledger_e2e() {
   local scratch home python out asked name
+  # Fail closed: no URL, no run. The message names the variable, never a value.
+  [ -n "${LEDGER_E2E_URL:-}" ] ||
+    ledger_e2e_fail setup "LEDGER_E2E_URL is unset; set it to the ledger repository's clone URL"
   local fixtures="$repo_dir/ci/fixtures"
   local f_session="$fixtures/ledger-e2e-session-start.json"
   local f_prompt="$fixtures/ledger-e2e-prompt.json"
@@ -395,83 +400,49 @@ check_ledger_e2e() {
   # The throwaway install itself must hold no hooks. install.sh writes only
   # ~/.claude/skills/<name>/, so ~/.claude/hooks must not exist at all (a
   # dangling symlink counts; nothing is walked), no settings*.json under
-  # ~/.claude may carry a "hooks" key, and no installed skill's frontmatter
-  # may declare "hooks:".
+  # ~/.claude may carry a "hooks" key, and no installed skill's frontmatter may
+  # declare "hooks". The repository's own plugin root is not inspected here: the
+  # plugin no-hooks test owns it.
   local hooks_path="$home/.claude/hooks"
   if [ -e "$hooks_path" ] || [ -L "$hooks_path" ]; then
     ledger_e2e_fail install "install.sh --all created $hooks_path: $(ls -la -- "$hooks_path" 2>&1 | tr '\n' ' ')"
   fi
-  local installed_hooks
-  # -E -P rather than -I: PyYAML may live in the user site, which -I drops.
-  installed_hooks=$("$python" -E -P - "$home/.claude" <<'PY'
+  local installed_settings
+  installed_settings=$("$python" -I - "$home/.claude" <<'PY'
 import json, os, re, sys
-try:
-    import yaml
-except ImportError:
-    print("yaml-unavailable")
-    sys.exit(0)
-root = sys.argv[1]
 found = []
-for base, _dirs, files in os.walk(root):
+for base, _dirs, files in os.walk(sys.argv[1]):
     for name in files:
+        if not re.fullmatch(r"settings.*\.json", name):
+            continue
         path = os.path.join(base, name)
-        if re.fullmatch(r"settings.*\.json", name):
-            try:
-                data = json.load(open(path, encoding="utf-8"))
-            except (OSError, ValueError):
-                found.append("settings:" + path + " (unreadable)")
-                continue
-            if isinstance(data, dict) and "hooks" in data:
-                found.append("settings:" + path + " (hooks key)")
-        elif name == "SKILL.md":
-            lines = open(path, encoding="utf-8").read().split("\n")
-            if not lines or lines[0].strip() != "---":
-                found.append("frontmatter:" + path + " (no opening ---)")
-                continue
-            end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
-            if end is None:
-                found.append("frontmatter:" + path + " (no closing ---)")
-                continue
-            try:
-                meta = yaml.safe_load("\n".join(lines[1:end]))
-            except yaml.YAMLError as exc:
-                found.append("frontmatter:" + path + " (does not parse: " + str(exc).replace("\n", " ") + ")")
-                continue
-            if not isinstance(meta, dict):
-                found.append("frontmatter:" + path + " (not a mapping)")
-            elif "hooks" in meta:
-                found.append("skill:" + path)
+        try:
+            data = json.load(open(path, encoding="utf-8"))
+        except (OSError, ValueError):
+            found.append(path + " (unreadable)")
+            continue
+        if isinstance(data, dict) and "hooks" in data:
+            found.append(path + " (hooks key)")
 print("\n".join(found))
 PY
-  ) || ledger_e2e_fail install 'the installed home could not be scanned for hooks'
-  case $installed_hooks in
-    '') ;;
-    yaml-unavailable) ledger_e2e_fail install 'PyYAML cannot be imported, so skill frontmatter cannot be parsed' ;;
-    skill:*) ledger_e2e_fail install "installed skill declares hooks: ${installed_hooks#skill:}" ;;
-    frontmatter:*) ledger_e2e_fail install "installed skill frontmatter is unusable: ${installed_hooks#frontmatter:}" ;;
-    *) ledger_e2e_fail install "install.sh --all wrote a hooks key: ${installed_hooks#settings:}" ;;
-  esac
-  "$python" -I - "$repo_dir" <<'PY' || ledger_e2e_fail sdlc-plugin 'the sdlc plugin declares hooks, or its manifest is unreadable'
-import json, os, sys
-root = sys.argv[1]
-for name in ("plugin.json", "marketplace.json"):
-    manifest = json.load(open(os.path.join(root, ".claude-plugin", name), encoding="utf-8"))
-    assert "hooks" not in manifest, name
-assert not os.path.exists(os.path.join(root, "hooks")), "hooks/"
-PY
+  ) || ledger_e2e_fail install 'the installed home could not be scanned for settings files'
+  [ -z "$installed_settings" ] ||
+    ledger_e2e_fail install "install.sh --all wrote a hooks key or an unreadable settings file: $installed_settings"
+  # The installed SKILL.md files go through the same parser the lint uses
+  # (ci/frontmatter.py); -E -P keep PyYAML in the user site reachable.
+  local installed_docs installed_frontmatter frontmatter_status=0
+  shopt -s nullglob
+  installed_docs=("$home"/.claude/skills/*/SKILL.md)
+  shopt -u nullglob
+  ((${#installed_docs[@]} > 0)) || ledger_e2e_fail install 'no installed SKILL.md files were found to check'
+  installed_frontmatter=$("$python" -E -P "$repo_dir/ci/frontmatter.py" "${installed_docs[@]}" 2>&1) ||
+    frontmatter_status=$?
+  [ "$frontmatter_status" -eq 0 ] ||
+    ledger_e2e_fail install "installed skill frontmatter check failed (exit $frontmatter_status): ${installed_frontmatter//$'\n'/; }"
 
   # The pinned ledger: the tag's own tree, checked against its commit.
-  origin_url=$(git -C "$repo_dir" remote get-url origin 2> /dev/null) || origin_url=
-  case $origin_url in
-    https://github.com/*/*) ledger_e2e_path=${origin_url#https://github.com/} ;;
-    git@github.com:*/*) ledger_e2e_path=${origin_url#git@github.com:} ;;
-    *) ledger_e2e_fail setup "origin is not a github.com URL: $origin_url" ;;
-  esac
-  ledger_e2e_path=${ledger_e2e_path%/}
-  ledger_e2e_path=${ledger_e2e_path%.git}
-  LEDGER_E2E_URL=https://github.com/${ledger_e2e_path%/*}/ledger.git
-  git clone -q --depth 1 --branch "$LEDGER_E2E_TAG" "$LEDGER_E2E_URL" "$scratch/ledger" 2> /dev/null ||
-    ledger_e2e_fail ledger-install "git clone of $LEDGER_E2E_URL at $LEDGER_E2E_TAG failed"
+  GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 --branch "$LEDGER_E2E_TAG" "$LEDGER_E2E_URL" "$scratch/ledger" 2> /dev/null ||
+    ledger_e2e_fail ledger-install "git clone of LEDGER_E2E_URL at $LEDGER_E2E_TAG failed"
   [ "$(git -C "$scratch/ledger" rev-parse HEAD)" = "$LEDGER_E2E_SHA" ] ||
     ledger_e2e_fail ledger-install "$LEDGER_E2E_TAG is not commit $LEDGER_E2E_SHA"
   ledger_e2e_plugin="$scratch/ledger/plugins/ledger-hooks"
