@@ -732,7 +732,7 @@ refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once
 ### 6.3 Store selection
 
 `choose_store(repo, key, title)` decides once (`select_store`) and returns the store with the choice and its
-reason on it. The decision is the shared rule every skill and the session-start hook use, `decide` in
+reason on it. The decision is the shared rule every skill uses, `decide` in
 `skills/_lib/ledger_cli.py`, with `TICKET_LEDGER_CLI` named as an explicit setting ahead of the topic skill's
 `ledger_cli` key. The reason starts with the rule that chose (`explicit setting`, `off by setting`,
 `ledger on PATH with LEDGER_DB`, `not configured`):

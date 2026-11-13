@@ -2,8 +2,8 @@
 """ledger_item.py — open or resume a topic as a ledger item.
 
 Whether the ledger route is on is decided by the rule every skill shares,
-`decide` in `skills/_lib/ledger_cli.py` (also used by sharpen, shape, ticket
-and the session-start hook). `config.json`'s `ledger_cli` key, the path or name
+`decide` in `skills/_lib/ledger_cli.py` (also used by sharpen, shape and
+ticket). `config.json`'s `ledger_cli` key, the path or name
 of an external ledger CLI that implements the contract in `SKILL.md`, wins when
 it is set, and `none` turns the route off. With the key absent, null or empty,
 a compatible `ledger` on `PATH` with `LEDGER_DB` naming an existing file turns

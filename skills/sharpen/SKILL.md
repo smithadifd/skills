@@ -314,8 +314,7 @@ reorder its fields.
 
 Run `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py`. It prints
 `{"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}`: the
-decision of the one rule every skill shares (the plugin's session-start hook
-uses it too, but never the `PATH` case below).
+decision of the one rule every skill shares.
 The topic skill's `ledger_cli` key wins when set, `none` turns the ledger off, and
 otherwise a compatible `ledger` on `PATH` with `LEDGER_DB` naming an existing
 database turns it on. When `ledger_cli` is `null`, skip this whole section;
@@ -443,7 +442,7 @@ on an existing plan.
 | `skills/sharpen/config.json` | directory keys, filename pattern, optional source filenames, commit behavior |
 | `skills/sharpen/paths.py` | executable resolver for the write directory and optional sources |
 | `skills/sharpen/ledger_capture.py` | links the brief and records its ratification in the ledger, when the ledger is on |
-| `skills/_lib/ledger_cli.py` | the one rule that decides whether the ledger is on, shared with topic, shape, ticket and the session-start hook |
+| `skills/_lib/ledger_cli.py` | the one rule that decides whether the ledger is on, shared with topic, shape and ticket |
 | `<roadmaps>/sharpen-<slug>-<date>.md` | the mini-brief — the ONLY file this skill writes |
 | `<standards>/process.md` (`process_standard`) | optional install-specific process and citation rules; local fallback above |
 | `<roadmaps>/direction.md` (`direction_record`) | optional quote-freshness boundary; conservative local fallback above |

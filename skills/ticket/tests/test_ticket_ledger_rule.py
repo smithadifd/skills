@@ -1,7 +1,7 @@
 """Store selection follows the rule every skill shares (``skills/_lib/ledger_cli.py``).
 
 ``TICKET_LEDGER_CLI`` comes first; then the topic skill's ``ledger_cli`` key, the explicit
-setting every other skill and the session-start hook read; then a compatible ``ledger`` on
+setting every other skill reads; then a compatible ``ledger`` on
 ``PATH`` with ``LEDGER_DB``. ``none`` in either setting keeps the markdown store, and the reason
 on the open card starts with the rule that chose.
 """

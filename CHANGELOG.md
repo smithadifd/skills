@@ -4,6 +4,15 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The ledger's brief at session start comes from the ledger's own plugin
+
+This plugin no longer declares a `SessionStart` hook: `hooks/hooks.json` and `hooks/session-start.py` are gone, and the plugin declares no hooks at all. The ledger's brief at the start of a session now comes from the ledger's own plugin, `ledger-hooks`, from ledger v0.2.0 or later, which also records your submitted prompts and question-picker answers. Install it from the ledger repository, following the Claude Code plugin section of its README.
+
+- With an earlier release of this plugin (0.12.0) still installed beside the ledger's plugin, the brief may print twice, once from each. Update this plugin to this release, or remove the older one, and it prints once.
+- The ledger's plugin takes no `ledger_cli` setting: it runs the first `ledger` on the `PATH` Claude Code runs hooks with, when `LEDGER_DB` names a database. `ledger_cli` still decides which program `topic`, `sharpen`, `shape` and `ticket` run.
+- The ledger's plugin sets `LEDGER_SESSION` and, when unset, `LEDGER_AGENT` and `LEDGER_HARNESS`. It does not set `LEDGER_MODEL`, which this plugin's hook used to take from the session's model id; set it in the `env` block of `~/.claude/settings.json` if you want it.
+- The shared rule's `decide` no longer takes a `path_rule` argument, which only the removed hook used.
+
 ### `ticket` records the ticket it pulled in the ledger
 
 On the ledger store, every open of a tracker or JSON-file ticket now records that ticket as the item's spec with `ledger spec set`: its title, description and acceptance criteria, with `ticket:<key> <url>` as the source. An unchanged ticket writes nothing. A changed one writes the next version, and the open adds the `ledger spec diff` from the version before it to `session.reconciliation`. The tracker's status is not part of the spec, and the ledger never records it.
@@ -27,18 +36,17 @@ On the ledger store, every open of a tracker or JSON-file ticket now records tha
 
 ### One rule decides whether the ledger is on
 
-`topic`, `sharpen`, `shape`, `ticket` and the session-start hook now decide whether the ledger is on the same way, with one rule in `skills/_lib/ledger_cli.py`. Before, `ticket` used a `ledger` on your `PATH` when `LEDGER_DB` named a database, while the others needed `ledger_cli` set in the topic config, so `ticket` could keep its cards in the ledger while `topic`, `sharpen` and `shape` stayed on files. The session-start hook shares the rule but uses only an explicit setting, so it still needs `ledger_cli` set to print the contract.
+`topic`, `sharpen`, `shape` and `ticket` now decide whether the ledger is on the same way, with one rule in `skills/_lib/ledger_cli.py`. Before, `ticket` used a `ledger` on your `PATH` when `LEDGER_DB` named a database, while the others needed `ledger_cli` set in the topic config, so `ticket` could keep its cards in the ledger while `topic`, `sharpen` and `shape` stayed on files.
 
 - An explicit setting wins: `ledger_cli` in the topic config and, for `ticket`, its own `TICKET_LEDGER_CLI`, which comes first. An explicit CLI that is missing or fails is reported as before.
 - `none`, in any case, turns the ledger off. `"ledger_cli": "none"` keeps every skill, `ticket` included, on files.
-- With no setting, `topic`, `sharpen`, `shape` and `ticket` turn the ledger on when you invoke them, a `ledger` on `PATH` passes the check `ticket` already ran (`ledger append-many --help` names `--expect-revision`), and `LEDGER_DB` names an existing file. The session-start hook does not use this case: with no setting it does not look on `PATH`, so it turns the ledger on only from an explicit setting, and it runs the program that setting names (a bare name is looked up on `PATH`, so use an absolute path). Anything else leaves it off, silently.
+- With no setting, `topic`, `sharpen`, `shape` and `ticket` turn the ledger on when you invoke them, a `ledger` on `PATH` passes the check `ticket` already ran (`ledger append-many --help` names `--expect-revision`), and `LEDGER_DB` names an existing file. Anything else leaves it off, silently.
 - A `ledger_cli` value that is not a string, or a topic config file that exists but cannot be read, leaves the ledger off; it never falls through to the `PATH` rule. A broken `~/.claude/skill-config/topic.json` leaves the ledger off even when the shipped config names a CLI.
-- Each skill's first ledger line names the rule that chose, as `ledger on (<rule>: <detail>)`, where `<rule>` is `explicit setting`, `off by setting`, `ledger on PATH with LEDGER_DB` or `not configured`. The session-start hook prints it before the version line, `topic` before the item line, and `sharpen` and `shape` with a successful link or election. `ticket`'s open card reads `store: ledger (<rule>: <detail>)` or `store: markdown (<rule>: <detail>)`. `python3 skills/_lib/ledger_cli.py` adds `rule` and `line` to its JSON.
+- Each skill's first ledger line names the rule that chose, as `ledger on (<rule>: <detail>)`, where `<rule>` is `explicit setting`, `off by setting`, `ledger on PATH with LEDGER_DB` or `not configured`. `topic` prints it before the item line, and `sharpen` and `shape` with a successful link or election. `ticket`'s open card reads `store: ledger (<rule>: <detail>)` or `store: markdown (<rule>: <detail>)`. `python3 skills/_lib/ledger_cli.py` adds `rule` and `line` to its JSON.
 
 What changes for you:
 
 - With `ledger` on your `PATH` and `LEDGER_DB` set, `topic`, `sharpen` and `shape` now use the ledger with no `ledger_cli` when you invoke them. Like `ticket` since 0.12.0, such a skill runs the first `ledger` on your `PATH`; setting `ledger_cli` to an absolute path, or to `none`, avoids that lookup. To keep them on files, set `"ledger_cli": "none"` in `~/.claude/skill-config/topic.json`.
-- The session-start hook still needs `ledger_cli` set to print the brief, until the ledger's own plugin replaces the hook. An absolute path is recommended, for example the output of `command -v ledger`. With no setting the hook does not look on your `PATH`, even with `LEDGER_DB` set. It runs only the program `ledger_cli` names, and a bare name such as `ledger` is looked up on your `PATH`, so set an absolute path.
 - `ticket` now also follows `ledger_cli`: a CLI named there is used (and refused when it fails the check), and `none` there keeps the markdown store.
 - `"ledger_cli": null` in your override file no longer forces the ledger off. It clears the setting, and the `PATH` rule decides.
 

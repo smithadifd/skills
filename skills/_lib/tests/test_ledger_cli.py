@@ -463,41 +463,6 @@ def test_no_ledger_on_path_is_off(tmp_path, monkeypatch):
     )
 
 
-# --- path_rule=False: the session-start hook's call ----------------------------------
-
-WITHOUT_PATH_RULE = "no setting names a ledger CLI, and this caller does not look on PATH"
-
-
-def test_without_the_path_rule_no_setting_is_off_and_nothing_is_looked_up_on_path(machine, monkeypatch):
-    # A compatible ledger is on PATH and LEDGER_DB names a file, so the default call is on.
-    module = _load()
-    machine.use(monkeypatch)
-    looked_up = []
-
-    def which(*args, **kwargs):
-        looked_up.append(args)
-        return None
-
-    monkeypatch.setattr(module.shutil, "which", which)
-    assert module.decide(path_rule=False) == module.Decision(None, NOT_CONFIGURED, WITHOUT_PATH_RULE)
-    assert looked_up == [], "path_rule=False looked a ledger up on PATH"
-    assert machine.calls() == [], "path_rule=False ran a ledger"
-
-
-@pytest.mark.parametrize(
-    "value, cli, rule",
-    [("/opt/x-ledger", "/opt/x-ledger", EXPLICIT), ("none", None, OFF), (" NONE ", None, OFF)],
-)
-def test_without_the_path_rule_an_explicit_setting_and_none_decide_as_before(machine, monkeypatch, value, cli, rule):
-    module = _load()
-    _override(machine.home_dir, ledger_cli=value)
-    machine.use(monkeypatch)
-    decision = module.decide(path_rule=False)
-    assert (decision.cli, decision.rule) == (cli, rule)
-    assert decision == module.decide()
-    assert machine.calls() == []
-
-
 def test_resolve_is_the_cli_the_rule_chose(machine, monkeypatch):
     module = _load()
     machine.use(monkeypatch)
