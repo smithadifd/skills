@@ -402,8 +402,14 @@ check_ledger_e2e() {
     ledger_e2e_fail install "install.sh --all created $hooks_path: $(ls -la -- "$hooks_path" 2>&1 | tr '\n' ' ')"
   fi
   local installed_hooks
-  installed_hooks=$("$python" -I - "$home/.claude" <<'PY'
+  # -E -P rather than -I: PyYAML may live in the user site, which -I drops.
+  installed_hooks=$("$python" -E -P - "$home/.claude" <<'PY'
 import json, os, re, sys
+try:
+    import yaml
+except ImportError:
+    print("yaml-unavailable")
+    sys.exit(0)
 root = sys.argv[1]
 found = []
 for base, _dirs, files in os.walk(root):
@@ -419,19 +425,30 @@ for base, _dirs, files in os.walk(root):
                 found.append("settings:" + path + " (hooks key)")
         elif name == "SKILL.md":
             lines = open(path, encoding="utf-8").read().split("\n")
-            if lines and lines[0].strip() == "---":
-                for line in lines[1:]:
-                    if line.strip() == "---":
-                        break
-                    if re.match(r"hooks\s*:", line):
-                        found.append("skill:" + path)
-                        break
+            if not lines or lines[0].strip() != "---":
+                found.append("frontmatter:" + path + " (no opening ---)")
+                continue
+            end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
+            if end is None:
+                found.append("frontmatter:" + path + " (no closing ---)")
+                continue
+            try:
+                meta = yaml.safe_load("\n".join(lines[1:end]))
+            except yaml.YAMLError as exc:
+                found.append("frontmatter:" + path + " (does not parse: " + str(exc).replace("\n", " ") + ")")
+                continue
+            if not isinstance(meta, dict):
+                found.append("frontmatter:" + path + " (not a mapping)")
+            elif "hooks" in meta:
+                found.append("skill:" + path)
 print("\n".join(found))
 PY
   ) || ledger_e2e_fail install 'the installed home could not be scanned for hooks'
   case $installed_hooks in
     '') ;;
+    yaml-unavailable) ledger_e2e_fail install 'PyYAML cannot be imported, so skill frontmatter cannot be parsed' ;;
     skill:*) ledger_e2e_fail install "installed skill declares hooks: ${installed_hooks#skill:}" ;;
+    frontmatter:*) ledger_e2e_fail install "installed skill frontmatter is unusable: ${installed_hooks#frontmatter:}" ;;
     *) ledger_e2e_fail install "install.sh --all wrote a hooks key: ${installed_hooks#settings:}" ;;
   esac
   "$python" -I - "$repo_dir" <<'PY' || ledger_e2e_fail sdlc-plugin 'the sdlc plugin declares hooks, or its manifest is unreadable'
