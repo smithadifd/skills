@@ -71,10 +71,11 @@ def _env(home, **extra):
     return env
 
 
-def _run(script, home, *args, **extra):
+def _run(script, home, *args, cwd=None, **extra):
     return subprocess.run(
         [sys.executable, str(script), *args],
         env=_env(home, **extra),
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
@@ -117,10 +118,10 @@ class Machine:
         self.db.touch()
         self.path = f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}"
 
-    def run(self, *args, script=LIB_SCRIPT, **extra):
+    def run(self, *args, script=LIB_SCRIPT, cwd=None, **extra):
         extra.setdefault("PATH", self.path)
         extra.setdefault("LEDGER_DB", str(self.db))
-        return _run(script, self.home_dir, *args, **extra)
+        return _run(script, self.home_dir, *args, cwd=cwd, **extra)
 
     def calls(self):
         if not self.log.exists():
@@ -300,6 +301,38 @@ def test_a_config_that_cannot_be_read_is_off_and_never_falls_through_to_path(mac
     assert machine.calls() == []
 
 
+@pytest.mark.parametrize("broken", ["{not json", "[1, 2]", "directory"])
+def test_a_broken_override_is_off_though_the_shipped_config_names_a_cli(machine, tmp_path, broken):
+    # Each config source keeps its own read status: the override comes first,
+    # and a value in the shipped config beneath a broken override is never used.
+    script = _layout(tmp_path / "plugin", {"ledger_cli": str(machine.ledger)})
+    override = machine.home_dir / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    if broken == "directory":
+        override.mkdir()
+    else:
+        override.write_text(broken, encoding="utf-8")
+    assert _out(machine.run(script=script)) == {
+        "ledger_cli": None,
+        "rule": NOT_CONFIGURED,
+        "line": f"ledger off (not configured: {override} could not be read, so no ledger on PATH is used)",
+    }
+    assert machine.calls() == []
+
+
+def test_a_broken_shipped_config_beneath_an_override_value_keeps_the_override(machine, tmp_path):
+    script = _layout(tmp_path / "plugin", {})
+    (tmp_path / "plugin" / "skills" / "topic" / "config.json").write_text("{not json", encoding="utf-8")
+    _override(machine.home_dir, ledger_cli="mine")
+    out = _out(machine.run(script=script))
+    assert (out["ledger_cli"], out["rule"]) == ("mine", EXPLICIT)
+    # An override that clears the key leaves the broken shipped file standing: off, not PATH.
+    _override(machine.home_dir, ledger_cli=None)
+    out = _out(machine.run(script=script))
+    assert (out["ledger_cli"], out["rule"]) == (None, NOT_CONFIGURED)
+    assert machine.calls() == []
+
+
 def test_an_explicit_config_file_that_is_missing_is_off_and_never_falls_through_to_path(machine, tmp_path):
     out = _out(machine.run("--config", str(tmp_path / "absent.json")))
     assert (out["ledger_cli"], out["rule"]) == (None, NOT_CONFIGURED)
@@ -429,6 +462,77 @@ def test_no_ledger_on_path_is_off(tmp_path, monkeypatch):
     assert module.decide() == module.Decision(
         None, NOT_CONFIGURED, "no ledger CLI on PATH and no setting names one"
     )
+
+
+INSIDE = "ledger off (not configured: the ledger CLI on PATH lies inside the working directory, so it is not run)"
+
+
+def test_a_ledger_on_path_inside_the_working_directory_is_never_run(tmp_path):
+    # A checkout that is the working directory and whose bin folder is on PATH
+    # must not choose the program the rule runs: the planted `ledger` is never
+    # run, not even for the compatibility check. Its log is the side effect.
+    project = tmp_path / "project"
+    project.mkdir()
+    machine = Machine(project)
+    out = _out(machine.run(cwd=project))
+    assert out == {"ledger_cli": None, "rule": NOT_CONFIGURED, "line": INSIDE}
+    assert not machine.log.exists(), "the ledger inside the working directory was run"
+    # The same ledger with the working directory elsewhere is on.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    out = _out(machine.run(cwd=elsewhere))
+    assert (out["ledger_cli"], out["rule"]) == (str(machine.ledger), ON_PATH)
+    assert machine.calls() == [["append-many", "--help"]]
+
+
+@pytest.mark.parametrize("entry", ["symlink", "relative", "nested"])
+def test_a_ledger_reached_through_any_path_entry_inside_the_working_directory_is_never_run(tmp_path, entry):
+    project = tmp_path / "project"
+    project.mkdir()
+    machine = Machine(project)
+    cwd = project
+    if entry == "symlink":
+        # A PATH folder outside the project whose `ledger` links into it.
+        outer = tmp_path / "outer-bin"
+        outer.mkdir()
+        (outer / "ledger").symlink_to(machine.ledger)
+        path = str(outer)
+    elif entry == "relative":
+        path = "bin"
+    else:
+        # The working directory is the project's parent: the project is inside it.
+        path = str(machine.bin)
+        cwd = tmp_path
+    out = _out(machine.run(cwd=cwd, PATH=path))
+    assert out == {"ledger_cli": None, "rule": NOT_CONFIGURED, "line": INSIDE}
+    assert not machine.log.exists(), "the ledger inside the working directory was run"
+
+
+def test_a_working_directory_that_cannot_be_examined_leaves_the_ledger_off(machine, tmp_path, monkeypatch):
+    # The ledger lies outside the working directory, but the working directory
+    # is gone, so containment cannot be told: the rule fails closed.
+    module = _load()
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    machine.use(monkeypatch)
+    assert module.decide() == module.Decision(
+        None,
+        NOT_CONFIGURED,
+        "the ledger CLI on PATH lies inside the working directory, so it is not run",
+    )
+    assert machine.calls() == []
+
+
+def test_an_explicit_setting_naming_a_ledger_inside_the_working_directory_is_still_used(tmp_path):
+    # The person chose it: the working-directory skip belongs to the PATH rule only.
+    project = tmp_path / "project"
+    project.mkdir()
+    machine = Machine(project)
+    _override(machine.home_dir, ledger_cli=str(machine.ledger))
+    out = _out(machine.run(cwd=project))
+    assert (out["ledger_cli"], out["rule"]) == (str(machine.ledger), EXPLICIT)
 
 
 def test_resolve_is_the_cli_the_rule_chose(machine, monkeypatch):

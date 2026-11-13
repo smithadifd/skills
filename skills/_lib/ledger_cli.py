@@ -27,12 +27,19 @@ of its own. It applies the first of these that holds:
    (rule: ledger on PATH with LEDGER_DB). The check is the one `ticket` has
    always run: `ledger append-many --help` exits 0 within the timeout and names
    `--expect-revision`. `LEDGER_DB` is tested first, so a `ledger` is never run
-   without a database.
+   without a database. The `ledger` found on `PATH` is never run, not even for
+   the check, when its real path lies inside the current working directory:
+   that folder is usually a checkout, and its content must not choose a
+   program the rule runs.
 3. Anything else is off, silently (rule: not configured): no `ledger` on
-   `PATH`, `LEDGER_DB` unset, empty or not a file, a `ledger` that fails the
-   check, a `ledger_cli` value that is not a string, or a config file that
-   exists but cannot be read. The last two never fall through to rule 2: a
-   setting that cannot be read might have said `none`.
+   `PATH`, a `ledger` on `PATH` inside the working directory, `LEDGER_DB`
+   unset, empty or not a file, a `ledger` that fails the check, a `ledger_cli`
+   value that is not a string, or a config file that exists but cannot be
+   read. The last two never fall through to rule 2: a setting that cannot be
+   read might have said `none`. Each config file keeps its own value and read
+   status, and they are weighed in precedence order: an override file that
+   cannot be read is off even when the shipped config names a CLI, because
+   the shipped value is never consulted beneath a broken override.
 
 The ledger line names the rule that chose, in one fixed form:
 
@@ -171,7 +178,16 @@ def _read_object(
 def _config_value(
     config_path: Optional[Path], who: str, required_shipped: bool, quiet: bool
 ) -> tuple[Any, Optional[str]]:
-    """The raw `ledger_cli` value and the first config problem met, if any."""
+    """The raw `ledger_cli` value and the config problem that stands, if any.
+
+    An explicit `config_path` is the only source. Otherwise each source keeps
+    its own value and read status, weighed in precedence order: the override
+    file, then the shipped config. A source that cannot be read stops the
+    walk with its problem and no value, so a value beneath it is never used.
+    A source that holds the key (even as null) settles the value; a problem in
+    a source beneath it is still returned, so an unset value never falls
+    through to the PATH rule past a broken file.
+    """
     if config_path is not None:
         config, problem = _read_object(Path(config_path), True, who, quiet)
         return config.get(CONFIG_KEY), problem
@@ -179,7 +195,12 @@ def _config_value(
     override, override_problem = _read_object(
         Path(OVERRIDE_PATH).expanduser(), False, who, quiet
     )
-    return {**shipped, **override}.get(CONFIG_KEY), shipped_problem or override_problem
+    for config, problem in ((override, override_problem), (shipped, shipped_problem)):
+        if problem is not None:
+            return None, problem
+        if CONFIG_KEY in config:
+            return config[CONFIG_KEY], shipped_problem
+    return None, None
 
 
 def _explicit(value: str, off_detail: str, on_detail: str) -> Decision:
@@ -215,12 +236,36 @@ def probe(cli: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> Optional[str]:
     return None
 
 
+def _inside_working_directory(path: str) -> bool:
+    """True when `path`'s real path lies inside the current working directory, or that cannot be told.
+
+    Folders are compared by identity (`os.path.samestat`), not by spelling, so
+    a symlink, a relative `PATH` entry or a case-insensitive file system does
+    not hide the containment. A working directory or folder that cannot be
+    examined counts as inside: the answer fails closed.
+    """
+    try:
+        here = os.stat(os.getcwd())
+        for folder in Path(os.path.realpath(path)).parents:
+            if os.path.samestat(os.stat(folder), here):
+                return True
+    except (OSError, ValueError):
+        return True
+    return False
+
+
 def _on_path(probe_timeout: float) -> Decision:
     """Rule 2: a compatible `ledger` on PATH with a usable `LEDGER_DB`, or off with the reason."""
     found = shutil.which(LEDGER_COMMAND)
     if found is None:
         return Decision(
             None, RULE_NOT_CONFIGURED, f"no {LEDGER_COMMAND} CLI on PATH and no setting names one"
+        )
+    if _inside_working_directory(found):
+        return Decision(
+            None,
+            RULE_NOT_CONFIGURED,
+            f"the {LEDGER_COMMAND} CLI on PATH lies inside the working directory, so it is not run",
         )
     database = os.environ.get(LEDGER_DATABASE, "")
     if not database:

@@ -117,7 +117,7 @@ class Rig:
         path.mkdir(parents=True, exist_ok=True)
         (path / "topic.json").write_text(json.dumps({"ledger_cli": value}), encoding="utf-8")
 
-    def run(self, stdin='{"session_id": "sess-1"}', mode="ok", env_file=True, extra_env=None, drop=()):
+    def run(self, stdin='{"session_id": "sess-1"}', mode="ok", env_file=True, extra_env=None, drop=(), cwd=None):
         env = {
             k: v
             for k, v in os.environ.items()
@@ -136,6 +136,7 @@ class Rig:
             [sys.executable, str(self.hook)],
             input=stdin,
             env=env,
+            cwd=cwd,
             capture_output=True,
             text=True,
             check=False,
@@ -465,6 +466,74 @@ def test_an_unreadable_setting_never_falls_through_to_the_ledger_on_path(rig):
     assert proc.stdout == ""
     assert proc.stderr == ""
     assert rig.calls() == []
+
+
+def test_a_ledger_on_path_inside_the_working_directory_is_never_run(rig, tmp_path):
+    # A checkout that is both the working directory and on PATH plants `ledger`.
+    project = tmp_path / "project"
+    (project / "bin").mkdir(parents=True)
+    planted = project / "bin" / "ledger"
+    planted.write_text(FAKE.replace("__PYTHON__", sys.executable), encoding="utf-8")
+    planted.chmod(planted.stat().st_mode | stat.S_IXUSR)
+    marker = tmp_path / "planted-ledger-ran.log"
+    db = rig.database()
+    env = {
+        "PATH": f"{project / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+        "LEDGER_DB": str(db),
+        "FAKE_LEDGER_LOG": str(marker),
+    }
+    proc = rig.run(cwd=project, extra_env=env)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    assert not marker.exists(), "the ledger inside the working directory was run"
+    assert not rig.env_file.exists()
+    # The same ledger with the working directory outside the project is on.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    proc = rig.run(cwd=elsewhere, extra_env=env)
+    assert proc.stdout == (
+        f"ledger on (ledger on PATH with LEDGER_DB: {planted} found on PATH, LEDGER_DB names {db})\n"
+        + BRIEF_OUTPUT
+    )
+    assert marker.exists()
+
+
+def _plugin_with_shipped(root, shipped):
+    """A copy of the plugin layout whose shipped topic config is `shipped`; the hook's path."""
+    plugin = root / "plugin"
+    (plugin / "hooks").mkdir(parents=True)
+    shutil.copy(HOOK, plugin / "hooks" / "session-start.py")
+    shutil.copytree(
+        REPO_ROOT / "skills" / "_lib",
+        plugin / "skills" / "_lib",
+        ignore=shutil.ignore_patterns("tests", "__pycache__"),
+    )
+    (plugin / "skills" / "topic").mkdir()
+    (plugin / "skills" / "topic" / "config.json").write_text(json.dumps(shipped), encoding="utf-8")
+    return plugin / "hooks" / "session-start.py"
+
+
+@pytest.mark.parametrize("broken", ["{not json", "[1, 2]", "directory"])
+def test_a_broken_override_keeps_the_hook_silent_though_the_shipped_config_names_a_cli(rig, tmp_path, broken):
+    rig.hook = _plugin_with_shipped(tmp_path, {"ledger_cli": str(rig.bin / "fakeledger")})
+    # Control: with no override file, the shipped CLI runs.
+    proc = rig.run()
+    assert proc.stdout == EXPLICIT_LINE + BRIEF_OUTPUT
+    rig.log.unlink()
+    rig.env_file.unlink()
+    override = rig.fake_home / ".claude" / "skill-config" / "topic.json"
+    override.parent.mkdir(parents=True)
+    if broken == "directory":
+        override.mkdir()
+    else:
+        override.write_text(broken, encoding="utf-8")
+    proc = rig.run()
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    assert rig.calls() == [], "the shipped CLI ran beneath a broken override"
+    assert not rig.env_file.exists()
 
 
 def test_an_explicit_setting_wins_over_the_ledger_on_path(rig):
