@@ -2,7 +2,7 @@
 
 Whether the ledger is on is the shared rule's decision (`skills/_lib/ledger_cli.py`),
 called with `path_rule=False`: an explicit `ledger_cli` setting turns it on and
-`none` turns it off. The hook never looks up or runs a `ledger` from PATH, so a
+`none` turns it off. With no setting the hook does not look on PATH, so a
 `ledger` on PATH with `LEDGER_DB` set leaves it silent.
 """
 

@@ -4,9 +4,10 @@
 Decides whether the ledger is on by the rule every skill uses
 (`skills/_lib/ledger_cli.py`, `decide`), called with `path_rule=False`: an
 explicit `ledger_cli` setting in the topic skill's config turns the ledger on,
-`none` turns it off, and with no setting it is off. The hook never looks up or
-runs a `ledger` from `PATH`, even when `LEDGER_DB` is set; set `ledger_cli`
-(an absolute path is recommended) for the hook to print the brief. With the
+`none` turns it off, and with no setting it is off: the hook does not look on
+`PATH`, even when `LEDGER_DB` is set. With a setting it runs only the program
+`ledger_cli` names, and a bare name such as `ledger` is looked up on `PATH`, so
+set an absolute path (the output of `command -v ledger`). With the
 ledger off it prints nothing, writes nothing and exits 0.
 
 With it on, it runs `<cli> resume --brief`. The ledger line, the version line

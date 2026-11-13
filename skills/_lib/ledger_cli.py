@@ -29,9 +29,11 @@ of its own. It applies the first of these that holds:
    `--expect-revision`. `LEDGER_DB` is tested first, so a `ledger` is never run
    without a database. This rule is for the skills a person invokes (`topic`,
    `sharpen`, `shape`, `ticket`), which keep the default `path_rule=True`.
-   The session-start hook calls `decide` with `path_rule=False`: it never
-   looks up or runs a `ledger` from `PATH`, so only an explicit setting turns
-   the ledger on there.
+   The session-start hook calls `decide` with `path_rule=False`: with no
+   setting it does not look on `PATH`, so only an explicit setting turns the
+   ledger on there. It then runs the program that setting names, and a bare
+   name such as `ledger` is looked up on `PATH`, so an absolute path is
+   recommended.
 3. Anything else is off, silently (rule: not configured): no `ledger` on
    `PATH`, `LEDGER_DB` unset, empty or not a file, a `ledger` that fails the
    check, no explicit setting for a caller that passes `path_rule=False`, a
