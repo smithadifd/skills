@@ -410,12 +410,14 @@ CREATED = {"kind": "item.created", "item_id": KEY, "idempotency_key": f"ticket-i
 
 def test_H23_the_first_open_creates_the_item_before_it_records_the_spec_and_claims(fake):
     # Design 6.6: the intake needs the item, so the open creates it in a batch of its own under
-    # --expect-revision none, records the spec, then reads the card and claims under that revision.
+    # --expect-revision none, records the spec, then reads the card, confirms the spec is still the one it
+    # recorded, and claims under that revision.
     session = open_ledger(fake, Source())
     create, claim = fake.appends()
     assert create.argv[-2:] == ["--expect-revision", "none"]
     assert create.batch == [CREATED]
-    assert [call.verb for call in fake.calls()] == ["query", "append-many", "spec", "query", "export-item", "append-many"]
+    assert [call.verb for call in fake.calls()] == [
+        "query", "append-many", "spec", "query", "export-item", "spec", "append-many"]
     assert kinds(fake.events()) == ["item.created", "item.spec", "session.opened"]
     assert claim.argv[-2:] == ["--expect-revision", str(fake.events()[1]["id"])]
     (opened,) = claim.batch

@@ -1871,8 +1871,8 @@ class LedgerStore:
             )
         return row
 
-    def record_spec(self, ticket: Ticket) -> tuple[str, ...]:
-        """Record the pulled ``ticket`` as the item's spec; return the lines the open prints (design 6.6).
+    def record_spec(self, ticket: Ticket) -> tuple[SpecVersion, tuple[str, ...]]:
+        """Record the pulled ``ticket`` as the item's spec; return the spec it left current and the lines the open prints (design 6.6).
 
         One ``spec set`` sends the ticket's title, description and criteria
         with ``intake_source(ticket)``; the ledger appends the next version
@@ -1885,19 +1885,38 @@ class LedgerStore:
         key, under ``--expect-revision none``; an item of another type is
         refused before anything is written. A ``spec set`` that fails or
         answers what cannot be read is ``spec_set_failed``, a ``spec diff``
-        that does is ``spec_diff_failed``; neither is retried.
+        that does is ``spec_diff_failed``; neither is retried. The spec it
+        returns is the version and content hash ``spec set`` reported, a new
+        version or the one it found unchanged; ``open`` confirms after the card
+        read that it is still the item's current spec (``confirm_spec``).
         """
 
         with self._threads:
             if self._ticket_row() is None:
                 self._send([self._created()], NO_TOKEN)
-            version = self._spec_set(ticket)
-            if version is None or version == 1:
-                return ()
-            return (self._spec_diff(version),)
+            recorded, written = self._spec_set(ticket)
+            if not written or recorded.version == 1:
+                return recorded, ()
+            return recorded, (self._spec_diff(recorded.version),)
 
-    def _spec_set(self, ticket: Ticket) -> int | None:
-        """One ``spec set`` of the ticket: the new version, or None when the ledger answered ``unchanged``."""
+    def confirm_spec(self, recorded: SpecVersion) -> None:
+        """Refuse ``stale`` unless the item's current spec is still ``recorded``, the one ``record_spec`` left current.
+
+        ``open`` calls it after the card read, as it calls
+        ``LedgerItemSource.confirm`` for a ledger item (design 6.6): a spec
+        another open recorded after this record and before the read is seen
+        here, and one recorded after the read moves the item's revision past
+        the held token, so the claim and every later write are refused
+        ``stale``. A ``spec show`` that fails or cannot be read is refused by
+        name; the recorded spec never stands in for it.
+        """
+
+        with self._threads:
+            current = _spec_identity(self.key, self._data(self._run("spec", "show", self.key), "read the spec of"))
+        _confirm_spec(self.key, recorded, current)
+
+    def _spec_set(self, ticket: Ticket) -> tuple[SpecVersion, bool]:
+        """One ``spec set`` of the ticket: the spec it left current, and whether it wrote it (False when ``unchanged``)."""
 
         source = intake_source(ticket)
         args = (
@@ -1921,7 +1940,16 @@ class LedgerStore:
         if type(version) is not int or version < 1:
             why = f"answered what cannot be read: version {version!r} is not a whole number of at least 1"
             raise _spec_set_failed(self.key, command, why)
-        return None if data["unchanged"] else version
+        event = data.get("event")
+        payload = event.get("payload") if type(event) is dict else None
+        content_hash = payload.get("content_hash") if type(payload) is dict else None
+        if type(payload) is not dict or type(payload.get("version")) is not int or payload["version"] != version:
+            why = f"answered what cannot be read: its event is not spec v{version}"
+            raise _spec_set_failed(self.key, command, why)
+        if type(content_hash) is not str or not _SPEC_HASH.fullmatch(content_hash):
+            why = f"answered what cannot be read: its event gives no SHA-256 content hash for spec v{version}"
+            raise _spec_set_failed(self.key, command, why)
+        return SpecVersion(version, content_hash), not data["unchanged"]
 
     def _spec_diff(self, version: int) -> str:
         """The ledger's ``spec diff`` from version ``version - 1`` to ``version``, as the lines the open prints."""
@@ -2243,6 +2271,28 @@ def _item_unreadable(key: str, verb: str, why: str) -> StoreUnavailable:
     )
 
 
+def _spec_identity(key: str, data: Any) -> SpecVersion:
+    """The version and content hash of a ``spec show`` answer for item ``key``; any other shape is ``item_unreadable``."""
+
+    if type(data) is not dict or data.get("item_id") != key:
+        raise _item_unreadable(key, "spec show", f"it is not the spec of item {key}")
+    version = data.get("version")
+    if type(version) is not int or version < 1:
+        raise _item_unreadable(key, "spec show", f"its version {version!r} is not a whole number of at least 1")
+    content_hash = data.get("content_hash")
+    if type(content_hash) is not str or not _SPEC_HASH.fullmatch(content_hash):
+        raise _item_unreadable(key, "spec show", f"its content_hash {content_hash!r} is not a SHA-256 hex digest")
+    return SpecVersion(version, content_hash)
+
+
+def _confirm_spec(key: str, held: SpecVersion | None, current: SpecVersion) -> None:
+    """Refuse ``stale`` unless ``current``, the item's spec read after the card, is still ``held``, the one the open holds."""
+
+    if current != held:
+        shown = "none" if held is None else f"v{held.version}"
+        raise _stale(key, f"its spec moved from {shown} to v{current.version} while the pass opened")
+
+
 class LedgerItemSource:
     """A ticket that is a ledger item (design 6.5): its title and status (``query --item``), its current
     spec (``spec show``) and its links (``links``), read through the ledger CLI.
@@ -2297,14 +2347,8 @@ class LedgerItemSource:
                 code="no_spec",
             )
         data = self._data(key, "spec show", answer)
-        if type(data) is not dict or data.get("item_id") != key:
-            raise _item_unreadable(key, "spec show", f"it is not the spec of item {key}")
-        version = data.get("version")
-        if type(version) is not int or version < 1:
-            raise _item_unreadable(key, "spec show", f"its version {version!r} is not a whole number of at least 1")
-        content_hash = data.get("content_hash")
-        if type(content_hash) is not str or not _SPEC_HASH.fullmatch(content_hash):
-            raise _item_unreadable(key, "spec show", f"its content_hash {content_hash!r} is not a SHA-256 hex digest")
+        spec = _spec_identity(key, data)
+        version = spec.version
         body = data.get("body_md")
         if not _is_text(body):
             raise _item_unreadable(key, "spec show", "its body is not text")
@@ -2330,7 +2374,7 @@ class LedgerItemSource:
                 f"`{spec_set_command(self.cli, key, title)}`.",
                 code="acceptance_unparseable",
             ) from exc
-        return SpecVersion(version, content_hash), body, criteria, recorded
+        return spec, body, criteria, recorded
 
     def _links(self, key: str) -> list[dict[str, str]]:
         """The item's links: each outgoing link as its relation, each incoming one as ``<relation> (incoming)``."""
@@ -2375,10 +2419,7 @@ class LedgerItemSource:
         token, so the claim and every later write are refused ``stale``.
         """
 
-        current = self.read_spec(ticket.key, ticket.title)[0]
-        if current != ticket.spec:
-            held = "none" if ticket.spec is None else f"v{ticket.spec.version}"
-            raise _stale(ticket.key, f"its spec moved from {held} to v{current.version} while the pass opened")
+        _confirm_spec(ticket.key, ticket.spec, self.read_spec(ticket.key, ticket.title)[0])
 
 
 def ledger_item_source(key: str) -> LedgerItemSource | None:
@@ -2498,7 +2539,9 @@ class TicketPass:
         after the card (``stale`` when it moved). On the ledger store, any
         other source's ticket is recorded as the item's spec between the pull
         and the card read (``LedgerStore.record_spec``, design 6.6), and a
-        failure there stops the open before the card is read. A refused card
+        failure there stops the open before the card is read; after the card
+        read that spec is confirmed still current (``stale`` when another open
+        recorded a newer one). A refused card
         writes nothing more; a stopped or closed ticket is reported and takes
         no claim. Beyond that spec record the open writes nothing into a store:
         a new pass sends its claim, a join sends a ``join`` event.
@@ -2512,11 +2555,15 @@ class TicketPass:
             raise TicketError(f"the source returned ticket {ticket.key!r}, expected {key!r}")
         # Before the card read, so the token it reads already holds any spec version this wrote.
         intake: tuple[str, ...] = ()
+        recorded: SpecVersion | None = None
         if isinstance(store, LedgerStore) and not isinstance(source, LedgerItemSource):
-            intake = store.record_spec(ticket)
+            recorded, intake = store.record_spec(ticket)
         card, token = store.read()
         if isinstance(source, LedgerItemSource):
             source.confirm(ticket)
+        elif recorded is not None:
+            # Another open may have recorded a newer spec between this record and the card read.
+            store.confirm_spec(recorded)
         state, flags, identity = _derive(card, ticket, pass_id, key)
         session = cls(ticket, store, card, token, identity)
         session._phase = state

@@ -11,6 +11,7 @@ On the ledger store, every open of a tracker or JSON-file ticket now records tha
 - Give a tracker ticket its URL as `url` in the ticket mapping. A `url` that is empty or holds whitespace is refused.
 - When the ledger has no item for the key yet, the open creates it before it records the spec, so the claim no longer creates it.
 - A `spec set` that fails stops the open as `spec_set_failed` before the card is read, and a `spec diff` that fails stops it as `spec_diff_failed`. Each names the command and what the ledger said. A ticket with an empty description cannot be recorded, because a spec needs a body, so on the ledger store it stops the open.
+- After it reads the card, the open checks that the spec it recorded is still the item's current one. When another open recorded a newer version in between, the open stops as `stale` and plans nothing. A spec read that fails stops the open by name.
 - A ledger item as the ticket, and the markdown store, record nothing.
 - The ledger CLI must have `spec set` and `spec diff`, as ledger 0.1.22 does.
 

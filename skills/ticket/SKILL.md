@@ -127,6 +127,11 @@ content or the source changed.
 - A version moves the item's revision. An open made while another pass is
   live still records the ticket before it is refused `held`, and the live
   pass's next write is then `stale`. Open the ticket again to continue.
+- After it reads the card, the open reads the item's spec again (`ledger spec
+  show <KEY>`). When another open recorded a newer version after this one
+  recorded its ticket, the open stops as `stale` and plans nothing; open the
+  ticket again. A spec read that fails or cannot be read stops the open by
+  name, and the version the open recorded never stands in for it.
 - A ledger item as the ticket records nothing: its spec is already the
   ledger's. The markdown store makes no ledger call.
 
@@ -193,8 +198,9 @@ prints one JSON envelope, `{"ok": true, "data": ...}` or
   `data.outgoing` rows with `rel` and `target` and `data.incoming` rows with
   `rel` and `source`, where `empty` means no link names the item.
 - For a tracker or JSON-file ticket: `spec set <item> --title=<t> --body=<b>
-  --acceptance=<a> --source=<s>` gives `data` with `item_id`, `version` and
-  `unchanged`, and writes a version only when the content or the source
+  --acceptance=<a> --source=<s>` gives `data` with `item_id`, `version`,
+  `unchanged` and `event` (whose `payload` holds that `version` and its
+  `content_hash`), and writes a version only when the content or the source
   changed; `spec diff <item> <from> <to>` gives `data.fields` rows with `field`
   and `diff` lines. Ledger 0.1.22 has both.
 - `usage` is an unknown command or flag. Codes such as `validation` and

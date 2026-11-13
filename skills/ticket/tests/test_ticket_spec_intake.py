@@ -14,7 +14,7 @@ import shlex
 import pytest
 
 import ticket
-from ledger_support import FakeLedger, machine
+from ledger_support import FakeLedger, ReadHook, machine
 from ticket_support import A, B, B_EDITED, EDIT_WHAT, F1, F7, KEY, TITLE, Source, go_outward, go_plan, passing, present, refusal
 
 URL = "https://tracker.example/browse/EK-14"
@@ -87,6 +87,9 @@ def test_a_fixture_ticket_opened_twice_writes_one_spec_version(repo, fake, path)
         ["--json", "spec", "set", KEY, f"--title={TITLE}", f"--body={DESCRIPTION}", f"--acceptance=- {A}\n- {B}",
          f"--source={SOURCE}"]] * 2
     assert spec_calls(fake, "diff") == []
+    # Each open confirms after its card read that the spec it recorded is still the item's current one.
+    assert [call.verb for call in fake.calls()][-4:] == ["query", "export-item", "spec", "append-many"]
+    assert [call.argv[1:4] for call in fake.calls("spec")] == [["spec", "set", KEY], ["spec", "show", KEY]] * 2
     assert first.reconciliation[1:] == () and second.reconciliation[1:] == ()
     assert second.live is True
 
@@ -207,8 +210,18 @@ def test_an_item_a_person_filed_is_not_created_again(repo, fake, path):
         ({"stdout": json.dumps({"ok": True, "data": {"item_id": KEY, "version": 0, "unchanged": False}, "error": None}),
           "status": 0},
          "answered what cannot be read: version 0 is not a whole number of at least 1"),
+        ({"stdout": json.dumps({"ok": True, "data": {"item_id": KEY, "version": 1, "unchanged": False}, "error": None}),
+          "status": 0},
+         "answered what cannot be read: its event is not spec v1"),
+        ({"stdout": json.dumps({"ok": True, "data": {"item_id": KEY, "version": 1, "unchanged": False, "event": {
+            "payload": {"version": 2, "content_hash": "a" * 64}}}, "error": None}), "status": 0},
+         "answered what cannot be read: its event is not spec v1"),
+        ({"stdout": json.dumps({"ok": True, "data": {"item_id": KEY, "version": 1, "unchanged": False, "event": {
+            "payload": {"version": 1, "content_hash": "A" * 64}}}, "error": None}), "status": 0},
+         "answered what cannot be read: its event gives no SHA-256 content hash for spec v1"),
     ],
-    ids=["refused", "refused with stderr", "no envelope", "lost", "no unchanged flag", "another item", "version 0"],
+    ids=["refused", "refused with stderr", "no envelope", "lost", "no unchanged flag", "another item", "version 0",
+         "no event", "event of another version", "content hash not a digest"],
 )
 def test_a_failing_spec_set_stops_the_open_by_name_before_the_card_is_read(repo, fake, path, answer, said):
     src = write_ticket(path)
@@ -255,8 +268,13 @@ def test_a_description_the_ledger_cannot_take_stops_the_open_and_is_never_altere
          "answered what cannot be read as the diff of those two versions"),
         ({"data": {"item_id": KEY, "from": 1, "to": 2, "changed": ["body_md"], "fields": [{"field": "body_md", "diff": "-a"}]}},
          "answered what cannot be read as the diff of those two versions"),
+        # The right newer version, but not from the version before it: the header would name the wrong older version.
+        ({"data": {"item_id": KEY, "from": 2, "to": 2, "changed": [], "fields": []}},
+         "answered what cannot be read as the diff of those two versions"),
+        ({"data": {"item_id": KEY, "from": "1", "to": 2, "changed": [], "fields": []}},
+         "answered what cannot be read as the diff of those two versions"),
     ],
-    ids=["refused", "no fields", "other versions", "diff not a list"],
+    ids=["refused", "no fields", "other versions", "diff not a list", "from not the older version", "from as text"],
 )
 def test_a_failing_spec_diff_stops_the_open_and_a_rerun_records_nothing_more(repo, fake, path, answer, said):
     src = write_ticket(path)
@@ -329,3 +347,82 @@ def test_a_held_open_still_records_the_ticket_and_the_live_pass_then_writes_stal
     assert refusal(excinfo) == "stale"
     resumed = open_ticket(repo, src)
     assert resumed.live is True and versions(fake) == [1, 2]
+
+
+class RecordHook(ticket.LedgerStore):
+    """A ledger handle that runs ``after_record`` once, right after its ``record_spec`` returns: before the card read."""
+
+    def __init__(self, cli, key, title, after_record):
+        super().__init__(cli, key, title)
+        self._after_record = after_record
+
+    def record_spec(self, pulled):
+        result = super().record_spec(pulled)
+        after, self._after_record = self._after_record, None
+        if after is not None:
+            after()
+        return result
+
+
+def another_open_records(fake, path):
+    """What a second open of the edited ticket writes first: its own ``spec set``, through a handle of its own."""
+
+    def record():
+        edited = write_ticket(path.with_name("EK-14-edited.json"), description=EDITED).pull(KEY)
+        ticket.LedgerStore(fake.path, KEY, TITLE).record_spec(edited)
+
+    return record
+
+
+@pytest.mark.parametrize("hook", [RecordHook, ReadHook], ids=["between the record and the card read", "after the card read"])
+def test_a_newer_spec_another_open_records_while_this_one_opens_refuses_it_stale(repo, fake, path, hook):
+    src = write_ticket(path)
+    handle = hook(fake.path, KEY, TITLE, another_open_records(fake, path))
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        ticket.TicketPass.open(KEY, src, handle)
+    assert refusal(excinfo) == "stale"
+    assert "its spec moved from v1 to v2 while the pass opened" in str(excinfo.value)
+    # The other open's ticket is the item's current spec, and this open took no claim, so it plans nothing.
+    assert versions(fake) == [1, 2] and fake.specs()[-1]["payload"]["body_md"] == EDITED
+    assert claims(fake) == []
+    # Uncontended, the same ticket opens: it records itself again as v3 and prints the diff from the other open's v2.
+    again = open_ticket(repo, src)
+    assert again.live is True and versions(fake) == [1, 2, 3]
+    assert again.reconciliation[1].splitlines()[0] == (
+        f"ledger spec diff {KEY} 2 3: the ticket changed since spec v2, and spec v3 records it (changed: body_md)")
+
+
+@pytest.mark.parametrize(
+    "answer, code, said",
+    [
+        ({"code": "error", "message": "the read failed"}, "ledger_refused",
+         f"the ledger refused to read the spec of ticket {KEY} (error: the read failed)"),
+        ({"stdout": "Traceback (most recent call last): boom", "status": 1}, "ledger_refused",
+         f"the ledger refused to read the spec of ticket {KEY} (no envelope, exit status 1: "
+         "Traceback (most recent call last): boom)"),
+        ({"data": {"item_id": "EK-15", "version": 1, "content_hash": "a" * 64}}, "item_unreadable",
+         f"the ledger's `spec show` answer for item {KEY} cannot be read: it is not the spec of item {KEY}"),
+        ({"data": {"item_id": KEY, "version": 1, "content_hash": "not a digest"}}, "item_unreadable",
+         f"the ledger's `spec show` answer for item {KEY} cannot be read: its content_hash 'not a digest' is not a "
+         "SHA-256 hex digest"),
+    ],
+    ids=["refused", "no envelope", "another item", "content hash not a digest"],
+)
+def test_a_spec_read_after_the_card_that_fails_refuses_the_open_and_never_falls_back_to_the_recorded_spec(
+        repo, fake, path, answer, code, said):
+    src = write_ticket(path)
+    fake.script("spec", commit=True)  # the spec set lands as the ledger answers it
+    if "code" in answer:
+        fake.answer("spec", answer["code"], message=answer["message"])
+    elif "data" in answer:
+        fake.script("spec", stdout=json.dumps({"ok": True, "data": answer["data"], "error": None}) + "\n", status=0)
+    else:
+        fake.script("spec", stdout=answer["stdout"], status=answer["status"])
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        open_ticket(repo, src)
+    assert refusal(excinfo) == code
+    assert said in str(excinfo.value)
+    assert [call.argv[2] for call in fake.calls("spec")] == ["set", "show"]
+    assert versions(fake) == [1] and claims(fake) == []
+    again = open_ticket(repo, src)
+    assert again.live is True and versions(fake) == [1]
