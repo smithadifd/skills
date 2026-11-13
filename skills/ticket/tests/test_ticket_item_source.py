@@ -170,6 +170,31 @@ def test_a_spec_changed_between_passes_sends_the_pass_back_to_plan(repo, fake, e
     assert resumed.review_round == 1
 
 
+def test_a_spec_whose_content_changed_under_the_same_version_sends_the_pass_back_to_plan(repo, fake):
+    """The ledger reports version 1 again with another content hash: the plan's snapshot no longer matches."""
+
+    fake.new_item()
+    fake.set_spec(BULLETS)
+    src = source_for(fake)
+    session = open_item(repo, src)
+    present(session)
+    go_plan(session)
+    session.begin_build()
+    changes(session)
+    session.end()
+    stored = plan_records(fake)[0]["ticket_spec"]
+    other = "0" * 64
+    assert stored == {"version": 1, "content_hash": fake.spec_hash()} and other != stored["content_hash"]
+
+    for _ in range(2):  # the pull, then the check after the card read: both report the same version under another hash
+        fake.script("spec", stdout=spec_data(fake, content_hash=other), status=0)
+    resumed = open_item(repo, src)
+    assert resumed.ticket.spec == ticket.SpecVersion(1, other)
+    assert resumed.phase == "plan"
+    # No F10 line: the item's update time did not move, only the spec's content under its version.
+    assert resumed.reconciliation[1:] == (F1(1, "the ticket's spec v1 now holds other content"),)
+
+
 @pytest.mark.parametrize("stage, phase", [("S3", "plan"), ("S6", "closed")])
 def test_a_spec_changed_after_a_passing_round_or_the_close_flags_as_a_criteria_edit_does(repo, fake, stage, phase):
     fake.new_item()
