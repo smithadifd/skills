@@ -135,6 +135,8 @@ The alternative is `install.sh`, which copies skills into `~/.claude/skills/` an
    Claude Code runs hooks with and takes no `ledger_cli` setting. An earlier release of this plugin (0.12.0) printed the
    brief itself; with that release installed beside the ledger's plugin the brief may print twice, so update this plugin.
 
+[Where each skill fits](docs/lifecycle.md#the-same-four-situations-with-the-ledger-on) takes the four everyday situations through the skills with the ledger on.
+
 Already installed? Follow the 0.12.0 [Upgrading](CHANGELOG.md#upgrading) steps in the changelog.
 
 ```sh
