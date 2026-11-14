@@ -264,7 +264,8 @@ def test_the_real_repo_tree_passes():
 
 
 def test_check_sh_invokes_source_shape_exactly_twice():
-    # One call refuses a bad tree before the installs; one loads names() for the footprint allowlist.
+    # One call refuses a bad tree before the installs; one reads names() for the footprint allowlist,
+    # also before the installs. The footprint check itself never loads the module.
     lines = [
         line
         for line in (REPO_ROOT / "ci" / "check.sh").read_text(encoding="utf-8").splitlines()
