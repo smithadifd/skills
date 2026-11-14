@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -494,7 +495,11 @@ SETUP_TOKENS = (
     "ledger_cli_setup_exists",
     "ledger_cli_setup_config_changed",
     "ledger_cli_setup_write_failed",
+    "ledger_cli_setup_lock_failed",
 )
+
+
+LOCK_NAME = "topic.json.lock"
 
 
 def _plant(directory, marker):
@@ -542,7 +547,17 @@ def _refusal(proc, token):
 def _no_temp_files(home):
     folder = _override_file(home).parent
     if folder.is_dir():
-        assert [p.name for p in folder.iterdir() if p.name != "topic.json"] == []
+        assert [p.name for p in folder.iterdir() if p.name not in ("topic.json", LOCK_NAME)] == []
+
+
+def _nothing_written(home):
+    """Setup refused: no override file, and at most the empty lock file beside where it would be."""
+    assert not _override_file(home).exists()
+    folder = _override_file(home).parent
+    if folder.is_dir():
+        assert [p.name for p in folder.iterdir()] in ([], [LOCK_NAME])
+        lock = folder / LOCK_NAME
+        assert not lock.exists() or lock.read_bytes() == b""
 
 
 @pytest.mark.parametrize(
@@ -766,8 +781,7 @@ def test_setup_with_no_ledger_on_path_writes_nothing(machine, tmp_path):
     empty.mkdir()
     line = _refusal(machine.run("setup", PATH=str(empty)), "ledger_cli_setup_not_found")
     assert "no ledger CLI on PATH" in line
-    assert not _override_file(machine.home_dir).exists()
-    assert not (machine.home_dir / ".claude").exists()
+    _nothing_written(machine.home_dir)
     path = _put_override(machine.home_dir, '{"keep": 1}')
     _refusal(machine.run("setup", PATH=str(empty)), "ledger_cli_setup_not_found")
     assert path.read_bytes() == b'{"keep": 1}'
@@ -778,7 +792,7 @@ def test_setup_with_an_incompatible_ledger_writes_nothing_and_names_what_failed(
     machine = Machine(tmp_path, mode)
     line = _refusal(machine.run("setup"), "ledger_cli_setup_incompatible")
     assert str(machine.ledger) in line and "append-many --help exited" in line
-    assert not (machine.home_dir / ".claude").exists()
+    _nothing_written(machine.home_dir)
     path = _put_override(machine.home_dir, '{"keep": 1}')
     _refusal(machine.run("setup"), "ledger_cli_setup_incompatible")
     assert path.read_bytes() == b'{"keep": 1}'
@@ -862,6 +876,107 @@ def test_a_file_created_while_setup_runs_is_never_replaced(machine, monkeypatch,
     assert path.read_text(encoding="utf-8") == '{"made": "meanwhile"}'
 
 
+def test_two_setup_runs_that_race_end_with_one_pin_and_the_other_refusing_exists(
+    machine, tmp_path, monkeypatch, capsys
+):
+    module = _load()
+    machine.use(monkeypatch)
+    other_bin = tmp_path / "other-bin"
+    other_bin.mkdir()
+    other = other_bin / "ledger"
+    shutil.copy2(machine.ledger, other)
+    # Run "a" finds one compatible ledger and run "b" another, so a silent overwrite shows in the file.
+    found = {"setup-a": str(machine.ledger), "setup-b": str(other)}
+    monkeypatch.setattr(module.shutil, "which", lambda name, *args, **kwargs: found[threading.current_thread().name])
+    paused = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+
+    def replace_after_a_pause_in_run_a(source, destination):
+        # Run "a" has read, compared and written its temp file; hold it just before the replace.
+        if threading.current_thread().name == "setup-a":
+            paused.set()
+            release.wait(30)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(module.os, "replace", replace_after_a_pause_in_run_a)
+    results = {}
+
+    def run(name):
+        results[name] = module.setup()
+
+    first = threading.Thread(target=run, args=("setup-a",), name="setup-a")
+    second = threading.Thread(target=run, args=("setup-b",), name="setup-b")
+    first.start()
+    assert paused.wait(30), "run a never reached its replace"
+    second.start()
+    second.join(1)
+    still_waiting = second.is_alive()
+    release.set()
+    first.join(30)
+    second.join(30)
+    assert not first.is_alive() and not second.is_alive()
+    captured = capsys.readouterr()
+    assert still_waiting, f"run b did not wait for run a's lock; results {results}, stderr {captured.err!r}"
+    assert results == {"setup-a": 0, "setup-b": 1}
+    pinned = json.loads(_override_file(machine.home_dir).read_text(encoding="utf-8"))
+    assert pinned == {"ledger_cli": str(machine.ledger)}
+    assert captured.out == f"ledger_cli set to {machine.ledger} in {_override_file(machine.home_dir)}\n"
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("ledger_cli_setup_exists: ledger_cli in ")
+    assert f"is already set to {machine.ledger}; setup does not change it" in captured.err
+    _no_temp_files(machine.home_dir)
+
+
+def test_setup_that_cannot_open_the_lock_refuses_by_name_and_writes_nothing(machine):
+    folder = _override_file(machine.home_dir).parent
+    folder.mkdir(parents=True)
+    (folder / LOCK_NAME).mkdir()
+    line = _refusal(machine.run("setup"), "ledger_cli_setup_lock_failed")
+    assert LOCK_NAME in line and "nothing was written" in line
+    assert not _override_file(machine.home_dir).exists()
+    assert machine.calls() == []
+
+
+def test_setup_that_cannot_take_the_lock_refuses_by_name_and_runs_no_program(machine, monkeypatch, capsys):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+
+    def refuse_to_lock(descriptor, operation):
+        raise OSError(35, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(module.fcntl, "flock", refuse_to_lock)
+    assert module.setup() == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.startswith("ledger_cli_setup_lock_failed: ")
+    assert len(captured.err.splitlines()) == 1 and "nothing was written" in captured.err
+    assert path.read_text(encoding="utf-8") == '{"keep": 1}'
+    assert machine.calls() == []
+    _no_temp_files(machine.home_dir)
+
+
+def test_the_lock_file_stays_after_setup_and_a_later_run_takes_it_again(machine):
+    path = _override_file(machine.home_dir)
+    lock = path.parent / LOCK_NAME
+    _pin(machine)
+    assert lock.is_file() and lock.read_bytes() == b""
+    written = path.read_bytes()
+    _refusal(machine.run("setup"), "ledger_cli_setup_exists")
+    assert lock.is_file() and path.read_bytes() == written
+
+
+def test_the_lock_descriptor_is_not_inherited_by_the_program_setup_runs(machine, monkeypatch):
+    module = _load()
+    machine.use(monkeypatch)
+    _override_file(machine.home_dir).parent.mkdir(parents=True)
+    descriptor = module._take_lock(_override_file(machine.home_dir))
+    try:
+        assert not os.get_inheritable(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def test_every_setup_refusal_token_is_a_distinct_fixed_name():
     module = _load()
     assert (
@@ -871,6 +986,7 @@ def test_every_setup_refusal_token_is_a_distinct_fixed_name():
         module.SETUP_EXISTS,
         module.SETUP_CONFIG_CHANGED,
         module.SETUP_WRITE_FAILED,
+        module.SETUP_LOCK_FAILED,
     ) == SETUP_TOKENS
     assert module.MOVED_TOKEN == "ledger_cli_moved:"
 

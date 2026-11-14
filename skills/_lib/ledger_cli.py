@@ -63,20 +63,33 @@ and writes its absolute path (made absolute, symlinks kept) as `ledger_cli` in
 temp file in the same directory, then `os.replace`) and refuses, exit 1 with one
 stderr line that starts with its token and nothing written, unless it can write:
 
+- `ledger_cli_setup_lock_failed`: the lock file beside the override could not
+  be opened or locked. Checked first, with no program run.
 - `ledger_cli_setup_config_unreadable`: the override file exists and is not a
-  readable UTF-8 JSON object. Checked first, with no program run.
+  readable UTF-8 JSON object. Checked next, with no program run.
 - `ledger_cli_setup_exists`: `ledger_cli` already holds a non-blank value (any
   string, `none` in any case included, or any non-string value other than
   null), unless that value is an absolute path (after `~` expansion) that is no
   longer an executable file, which is the moved case and is replaced. A live
   setting is never changed and the file stays byte-identical. Null, an empty
-  or a blank string count as unset. Checked second, with no program run.
+  or a blank string count as unset. Checked after that, with no program run.
 - `ledger_cli_setup_not_found`: no `ledger` on `PATH`.
 - `ledger_cli_setup_incompatible`: the one found fails the compatibility check;
   the line names what failed.
 - `ledger_cli_setup_config_changed`: the override file changed between setup
-  reading it and writing it, so a concurrent writer's edit is never lost; rerun.
+  reading it and writing it, by a writer that does not take the lock (an editor,
+  say), so that writer's edit is never lost; rerun.
 - `ledger_cli_setup_write_failed`: the directory or file could not be written.
+
+Concurrent setup runs serialize. Setup holds an exclusive `fcntl.flock` on
+`topic.json.lock`, a file beside the override (created if absent, never deleted,
+and the folder is created first when it is missing), from its first read of the
+override through the `os.replace`, and the second run waits for it. Once it holds
+the lock it reads the file afresh and applies the same rules above, so it finds
+the first run's pin and refuses `ledger_cli_setup_exists`: two runs never both
+write, and neither pin is silently overwritten. The lock is released when setup
+ends or dies; the descriptor is not inherited by the program the compatibility
+check runs.
 
 Setup runs the first `ledger` on `PATH` once, for the compatibility check, so
 run it from a shell whose `PATH` you trust. A rerun after a stop at any step is
@@ -98,6 +111,7 @@ and in a standalone `install.sh` copy alike.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shlex
@@ -141,6 +155,9 @@ SETUP_CONFIG_UNREADABLE = "ledger_cli_setup_config_unreadable"
 SETUP_EXISTS = "ledger_cli_setup_exists"
 SETUP_CONFIG_CHANGED = "ledger_cli_setup_config_changed"
 SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
+SETUP_LOCK_FAILED = "ledger_cli_setup_lock_failed"
+# The lock file sits beside the override and is named by appending this to its name.
+LOCK_SUFFIX = ".lock"
 
 
 class ConfigError(ValueError):
@@ -447,7 +464,11 @@ class _ConfigChanged(Exception):
 
 
 def _write_atomic(target: Path, text: str, expected: Optional[bytes]) -> None:
-    """Replace `target` with `text` in one step, only if it still holds `expected` (None: absent)."""
+    """Replace `target` with `text` in one step, only if it still holds `expected` (None: absent).
+
+    The caller holds the setup lock, which serializes setup runs; the comparison guards
+    against a writer that takes no lock.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     try:
@@ -468,11 +489,47 @@ def _write_atomic(target: Path, text: str, expected: Optional[bytes]) -> None:
         raise
 
 
+def _take_lock(target: Path) -> int:
+    """Open the lock file beside `target` (created if absent, never deleted) and flock it exclusively.
+
+    Blocks until any other setup run lets go. The caller closes the returned descriptor to release
+    the lock. The descriptor is not inheritable, so a program setup runs never holds it.
+    """
+    descriptor = os.open(target.parent / (target.name + LOCK_SUFFIX), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def setup() -> int:
     """Pin the ledger CLI: see the module text, Setup. Exit 0 when written, 1 on a named refusal."""
     override = Path(OVERRIDE_PATH).expanduser()
     # Follow a symlinked override so the link itself is kept and its target is rewritten.
     target = Path(os.path.realpath(override))
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _refuse_setup(
+            SETUP_WRITE_FAILED, f"could not write {target} ({_one_line(exc.strerror or str(exc))}); nothing was written"
+        )
+    try:
+        lock = _take_lock(target)
+    except OSError as exc:
+        return _refuse_setup(
+            SETUP_LOCK_FAILED,
+            f"could not lock {target.name + LOCK_SUFFIX} beside {target} ({_one_line(exc.strerror or str(exc))}); nothing was written",
+        )
+    try:
+        return _setup_locked(override, target)
+    finally:
+        os.close(lock)
+
+
+def _setup_locked(override: Path, target: Path) -> int:
+    """Setup's read, checks and write, run with the lock held."""
     try:
         before = _current_bytes(override)
     except OSError as exc:
