@@ -331,6 +331,22 @@ ledger_e2e_fail() {
   fail "ledger-e2e step $1: $2"
 }
 
+# The EXIT trap of the step: removes the one scratch directory check_ledger_e2e
+# made, with everything under it (home, bin, data, the source copy and the
+# pinned ledger clone). It removes only the path that this run's own mktemp
+# returned, recorded in ledger_e2e_scratch right after it; an empty variable or
+# a directory that is already gone does nothing. The write bit is restored
+# first, because a read-only directory in the copy would otherwise stop its
+# entries from being removed. The trap never changes the script's exit status.
+ledger_e2e_scratch=
+ledger_e2e_cleanup() {
+  if [ -n "$ledger_e2e_scratch" ] && [ -d "$ledger_e2e_scratch" ]; then
+    chmod -R u+w -- "$ledger_e2e_scratch" 2> /dev/null || true
+    rm -r -- "$ledger_e2e_scratch" 2> /dev/null || true
+  fi
+  return 0
+}
+
 # The command lines hooks.json registers for one event (and tool), one per line.
 ledger_e2e_hook_commands() {
   "$1" -I - "$2" "$3" "$4" <<'PY'
@@ -411,7 +427,11 @@ check_ledger_e2e() {
   # Fail closed: no URL, no run. The message names the variable, never a value.
   [ -n "${LEDGER_E2E_URL:-}" ] ||
     ledger_e2e_fail setup "LEDGER_E2E_URL is unset; set it to the ledger repository's clone URL"
-  scratch=$(mktemp -d)
+  # An explicit template under TMPDIR: a bare `mktemp -d` ignores TMPDIR on
+  # macOS, which would put the scratch directory outside the one a caller names.
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/ledger-e2e.XXXXXXXX")
+  ledger_e2e_scratch=$scratch
+  trap ledger_e2e_cleanup EXIT
   home="$scratch/home"
   mkdir -p -- "$home" "$scratch/bin" "$scratch/data"
 
@@ -433,8 +453,6 @@ check_ledger_e2e() {
   # decoys; a change made and fully reverted during the installs, modification
   # time included.
   local src="$scratch/src"
-  ledger_e2e_src=$src
-  trap 'rm -r -- "$ledger_e2e_src" 2> /dev/null' EXIT
   "$python" -I -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True, ignore=shutil.ignore_patterns(".git"))' "$repo_dir" "$src" ||
     ledger_e2e_fail install 'copying the source tree failed'
   # install.sh reads skills/ and agents/ through globs and [ -d ] / [ -f ] tests
