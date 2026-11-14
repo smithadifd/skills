@@ -17,11 +17,21 @@ jobs:
       NO_PERSON_DENY: ${{ secrets.NO_PERSON_DENY }}
       OWNER: ${{ github.repository_owner }}
       REPO: ${{ github.event.repository.name }}
+      # The stand-alone ledger check clones the ledger repository from here; it
+      # is an opaque input, and no account handle enters a tracked file.
+      LEDGER_E2E_URL: https://github.com/${{ github.repository_owner }}/ledger.git
     steps:
       - uses: actions/checkout@v4
       # `claude plugin validate .` is not run here: the Claude Code CLI is not
       # part of the hosted runner image, and it runs in the release
       # verification step instead.
+      # ci/lint-skills.sh and ci/check.sh both parse skill frontmatter with
+      # PyYAML (ci/frontmatter.py) and fail if they cannot import it.
+      - name: Install PyYAML
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install PyYAML==6.0.3
       - name: Verify standalone installation and lint
         shell: bash
         run: |
