@@ -157,7 +157,13 @@ If you write your own skill, this is the path:
 - Run `claude plugin validate .` to check the plugin's structure.
 - Run `claude plugin eval` to check how the skill behaves.
 - Run `ci/lint-skills.sh` to check this repository's own contract: a trigger and a NOT-for case in each description, size limits, a `tests/` directory for every skill that ships a script, a README row for every skill and agent, and no hard-coded install paths.
-- Run `python3 -m pytest skills/<name>/tests -q` for a skill's tests, and `ci/check.sh` for the whole repository: it installs everything into a throwaway home, checks the installed files for outside references, and runs the lint and the lint's own fixtures.
+- Run `python3 -m pytest skills/<name>/tests -q` for a skill's tests.
+- Run `ci/check.sh` for the whole repository: it installs everything into a throwaway home, checks the installed files for outside references, runs the lint and the lint's own fixtures, and ends with a stand-alone check of the ledger hooks against a pinned ledger release. It needs:
+  - `LEDGER_E2E_URL`, set to the clone URL of the ledger repository. The last step clones the ledger's `v0.2.0` tag from it and compares the clone with a pinned commit, so any URL that yields that commit works. With it unset, `ci/check.sh` stops at that step with `ledger-e2e step setup: LEDGER_E2E_URL is unset; set it to the ledger repository's clone URL`, after the earlier checks have run. CI sets it from the repository owner.
+  - Network access to that URL, for the one clone, and `git`.
+  - PyYAML for the `python3` on your `PATH` (`python3 -m pip install PyYAML`; CI installs 6.0.3). The lint and the installed-file check read frontmatter with it, and stop with `PyYAML cannot be imported` when it is missing.
+  - A `python3` on your `PATH` that is 3.11 or newer. The ledger step checks it and refuses an older one with `the pinned ledger needs Python 3.11 or newer`. The lint and the frontmatter parser check no version of their own.
+  - Optionally, `NO_PERSON_DENY`, a grep extended regular expression of private words to scan the installed files for. Unset, that scan is skipped with a notice, except that the lint refuses an unset or empty value when `CI` or `GITHUB_ACTIONS` is `true`.
 
 ## Built on
 
@@ -176,7 +182,7 @@ Little here is new. Each line names what this repository took from the source; s
 
 To report a problem or ask a question, open an issue on the repository's GitHub issue tracker. Say which skill or agent it concerns, what you ran, what you expected and what happened.
 
-To propose a change, open a pull request from a branch. Keep it to one change, and add or update a test that fails without it. Before you ask for review, `ci/check.sh`, `ci/lint-skills.sh` and every skill's test suite (`python3 -m pytest skills/<name>/tests -q`) must pass.
+To propose a change, open a pull request from a branch. Keep it to one change, and add or update a test that fails without it. Before you ask for review, `ci/check.sh` (with the setup listed under "Writing and checking a skill"), `ci/lint-skills.sh` and every skill's test suite (`python3 -m pytest skills/<name>/tests -q`) must pass.
 
 ## License
 
