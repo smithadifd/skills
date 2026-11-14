@@ -2,8 +2,9 @@
 """ledger_cli.py — the one rule that decides whether the ledger is on, for every skill.
 
     python3 ledger_cli.py [--config <path>]
+    python3 ledger_cli.py setup
 
-Prints one JSON object and exits 0:
+With no subcommand it prints one JSON object and exits 0:
 
     {"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}
 
@@ -20,7 +21,12 @@ of these that holds:
    (rule: off by setting). Any other non-blank string names the ledger CLI
    (rule: explicit setting); a leading `~` is expanded. An explicit CLI is not
    checked here: a CLI that is missing or fails is reported by the call that
-   runs it, as before.
+   runs it. While a setting names a CLI nothing looks `ledger` up on `PATH`: a
+   skill runs that CLI or refuses, and never falls back. A CLI whose path (after
+   `~` expansion) is absolute and is no longer an executable file is refused
+   before anything runs, in one line that starts with the fixed token
+   `ledger_cli_moved:`, names the path and gives the `setup` command to rerun
+   (see Setup below).
 2. With no explicit setting (the key absent, null, empty or blank, and the
    variable unset or blank), the ledger is on when `LEDGER_DB` names an
    existing file and a `ledger` found on `PATH` passes the compatibility check
@@ -28,7 +34,9 @@ of these that holds:
    always run: `ledger append-many --help` exits 0 within the timeout and names
    `--expect-revision`. `LEDGER_DB` is tested first, so a `ledger` is never run
    without a database. This rule is for the skills a person invokes (`topic`,
-   `sharpen`, `shape`, `ticket`).
+   `sharpen`, `shape`, `ticket`). It reads `PATH`, so a writable folder put on
+   `PATH` ahead of the real install can plant a `ledger`; `setup` below removes
+   that lookup by pinning the real one.
 3. Anything else is off, silently (rule: not configured): no `ledger` on
    `PATH`, `LEDGER_DB` unset, empty or not a file, a `ledger` that fails the
    check, a `ledger_cli` value that is not a string, or a config file that
@@ -47,9 +55,40 @@ where `<rule>` is exactly one of `explicit setting`, `off by setting`,
 `ledger on PATH with LEDGER_DB` and `not configured`. `Decision.reason` is the
 part in parentheses; the ticket skill prints it as `store: <store> (<reason>)`.
 
+Setup. `python3 ledger_cli.py setup` is the one step that pins the ledger CLI:
+it resolves `ledger` once (`shutil.which`), runs the compatibility check on it,
+and writes its absolute path (made absolute, symlinks kept) as `ledger_cli` in
+`~/.claude/skill-config/topic.json`, keeping every other key. From then on rule
+1 decides for every skill and nothing reads `PATH`. Setup writes atomically (a
+temp file in the same directory, then `os.replace`) and refuses, exit 1 with one
+stderr line that starts with its token and nothing written, unless it can write:
+
+- `ledger_cli_setup_config_unreadable`: the override file exists and is not a
+  readable UTF-8 JSON object. Checked first, with no program run.
+- `ledger_cli_setup_exists`: `ledger_cli` already holds a non-blank value (any
+  string, `none` in any case included, or any non-string value other than
+  null), unless that value is an absolute path (after `~` expansion) that is no
+  longer an executable file, which is the moved case and is replaced. A live
+  setting is never changed and the file stays byte-identical. Null, an empty
+  or a blank string count as unset. Checked second, with no program run.
+- `ledger_cli_setup_not_found`: no `ledger` on `PATH`.
+- `ledger_cli_setup_incompatible`: the one found fails the compatibility check;
+  the line names what failed.
+- `ledger_cli_setup_config_changed`: the override file changed between setup
+  reading it and writing it, so a concurrent writer's edit is never lost; rerun.
+- `ledger_cli_setup_write_failed`: the directory or file could not be written.
+
+Setup runs the first `ledger` on `PATH` once, for the compatibility check, so
+run it from a shell whose `PATH` you trust. A rerun after a stop at any step is
+safe: the file is either as it was or holds the pinned path, and a rerun after
+success refuses `ledger_cli_setup_exists`. This plugin declares no hooks: the
+ledger's brief at session start comes from the ledger's own `ledger-hooks`
+plugin, which takes no `ledger_cli` setting and which this file does not govern.
+
 Also holds the small pieces the callers share: the argv of the `link` call and a
 `call` that runs the CLI with a timeout and turns a failure into one
-`LedgerCallError` line.
+`LedgerCallError` line, `ledger_cli_moved:` included; a caller that runs the CLI
+itself calls `require_runnable` first to get the same refusal.
 
 Python 3 stdlib only. It lives in the `_lib` directory beside the skills, so a
 skill reaches it as `${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py` in the plugin
@@ -61,9 +100,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -91,6 +132,15 @@ LEDGER_DATABASE = "LEDGER_DB"
 PROBE_TIMEOUT_SECONDS = 10.0
 # How the topic config's key is named in a ledger line.
 CONFIG_SOURCE = f"{CONFIG_KEY} in the topic config"
+# The fixed first word of the refusal for an explicit CLI that is no longer an executable file.
+MOVED_TOKEN = "ledger_cli_moved:"
+# The fixed first word of every `setup` refusal is one of these, then a colon.
+SETUP_NOT_FOUND = "ledger_cli_setup_not_found"
+SETUP_INCOMPATIBLE = "ledger_cli_setup_incompatible"
+SETUP_CONFIG_UNREADABLE = "ledger_cli_setup_config_unreadable"
+SETUP_EXISTS = "ledger_cli_setup_exists"
+SETUP_CONFIG_CHANGED = "ledger_cli_setup_config_changed"
+SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
 
 
 class ConfigError(ValueError):
@@ -323,8 +373,37 @@ def link_argv(item: str, target: str) -> list[str]:
     return ["link", item, "--rel", "url", "--target", target]
 
 
+def setup_command() -> str:
+    """The exact command that pins the ledger CLI, for a refusal to name."""
+    return f"python3 {shlex.quote(str(LIB_DIR / 'ledger_cli.py'))} setup"
+
+
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _moved(cli: str) -> bool:
+    """True when `cli`, after `~` expansion, is an absolute path that is not an executable file."""
+    path = os.path.expanduser(cli)
+    return os.path.isabs(path) and not _is_executable_file(path)
+
+
+def require_runnable(cli: str) -> None:
+    """Raise LedgerCallError (`ledger_cli_moved: ...`) when an absolute `cli` is not an executable file.
+
+    A bare name is not checked: it is looked up the way the person who wrote it
+    meant. No branch of this function reads `PATH`.
+    """
+    if _moved(cli):
+        raise LedgerCallError(
+            f"{MOVED_TOKEN} the ledger CLI {_one_line(cli)} is not an executable file, so nothing was run; "
+            f"rerun setup with `{setup_command()}`"
+        )
+
+
 def call(cli: str, argv: list[str]) -> subprocess.CompletedProcess:
     """Run `<cli> <argv>`; raise LedgerCallError unless it exits 0."""
+    require_runnable(cli)
     verb = argv[0] if argv else "?"
     try:
         proc = subprocess.run(
@@ -350,10 +429,114 @@ def call(cli: str, argv: list[str]) -> subprocess.CompletedProcess:
     return proc
 
 
+def _refuse_setup(token: str, detail: str) -> int:
+    sys.stderr.write(f"{token}: {_one_line(detail)}\n")
+    return 1
+
+
+def _current_bytes(path: Path) -> Optional[bytes]:
+    """The file's bytes, or None when it is absent."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+class _ConfigChanged(Exception):
+    """The override file is not what setup read."""
+
+
+def _write_atomic(target: Path, text: str, expected: Optional[bytes]) -> None:
+    """Replace `target` with `text` in one step, only if it still holds `expected` (None: absent)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if expected is not None:
+            shutil.copymode(target, temp)
+        if _current_bytes(target) != expected:
+            raise _ConfigChanged()
+        os.replace(temp, target)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def setup() -> int:
+    """Pin the ledger CLI: see the module text, Setup. Exit 0 when written, 1 on a named refusal."""
+    override = Path(OVERRIDE_PATH).expanduser()
+    # Follow a symlinked override so the link itself is kept and its target is rewritten.
+    target = Path(os.path.realpath(override))
+    try:
+        before = _current_bytes(override)
+    except OSError as exc:
+        return _refuse_setup(SETUP_CONFIG_UNREADABLE, f"could not read {override} ({exc}); nothing was written")
+    config: dict[str, Any] = {}
+    if before is not None:
+        try:
+            data = json.loads(before.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            return _refuse_setup(
+                SETUP_CONFIG_UNREADABLE, f"{override} is not valid UTF-8 JSON ({exc}); nothing was written"
+            )
+        if not isinstance(data, dict):
+            return _refuse_setup(
+                SETUP_CONFIG_UNREADABLE, f"{override} is not a JSON object; nothing was written"
+            )
+        config = data
+    existing = config.get(CONFIG_KEY)
+    if existing is not None:
+        if not isinstance(existing, str):
+            return _refuse_setup(
+                SETUP_EXISTS,
+                f"{CONFIG_KEY} in {override} is already set to {json.dumps(existing)}; setup does not change it",
+            )
+        text = existing.strip()
+        if text and not _moved(text):
+            return _refuse_setup(
+                SETUP_EXISTS,
+                f"{CONFIG_KEY} in {override} is already set to {text}; setup does not change it",
+            )
+    found = shutil.which(LEDGER_COMMAND)
+    if found is None:
+        return _refuse_setup(SETUP_NOT_FOUND, f"no {LEDGER_COMMAND} CLI on PATH; nothing was written")
+    pinned = os.path.abspath(found)
+    failure = probe(pinned)
+    if failure is not None:
+        return _refuse_setup(
+            SETUP_INCOMPATIBLE, f"{pinned} fails the compatibility check ({failure}); nothing was written"
+        )
+    config[CONFIG_KEY] = pinned
+    try:
+        _write_atomic(target, json.dumps(config, indent=2) + "\n", before)
+    except _ConfigChanged:
+        return _refuse_setup(
+            SETUP_CONFIG_CHANGED, f"{override} changed while setup was running; nothing was written, rerun setup"
+        )
+    except OSError as exc:
+        return _refuse_setup(
+            SETUP_WRITE_FAILED, f"could not write {target} ({_one_line(exc.strerror or str(exc))}); nothing was written"
+        )
+    print(f"{CONFIG_KEY} set to {pinned} in {target}")
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=None)
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("setup", help="pin the ledger CLI's absolute path in the topic config override")
     args = parser.parse_args(argv)
+    if args.command == "setup":
+        if args.config is not None:
+            parser.error("setup takes no --config: it writes ~/.claude/skill-config/topic.json")
+        return setup()
     try:
         decision = decide(args.config)
     except Exception as exc:  # the contract: report, never raise

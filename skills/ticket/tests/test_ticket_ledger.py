@@ -861,3 +861,90 @@ def test_a_release_naming_another_pass_leaves_the_live_pass_holding(fake):
     assert fake.events() == before
     fake.outside("session.closed", {"outcome": "released by hand"}, key=f"ticket-pass/{KEY}/{live.pass_id}/released")
     assert fake.store().read()[0]["pass"] is None
+
+
+# --- A pinned ledger CLI: nothing is looked up on PATH, and a moved one is refused by name ----------------
+
+
+def _pin_topic_cli(cli):
+    """Write the topic skill's override file under this test's HOME, as the setup step does."""
+
+    import json as _json
+
+    path = Path(os.environ["HOME"]) / ".claude" / "skill-config" / "topic.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps({"ledger_cli": str(cli)}), encoding="utf-8")
+
+
+def _planted_ahead_on_path(tmp_path, monkeypatch):
+    """A `ledger` first on PATH that writes a marker file whenever it is run with any argument."""
+
+    marker = tmp_path / "planted.marker"
+    folder = tmp_path / "evil"
+    folder.mkdir()
+    plant = folder / "ledger"
+    plant.write_text(f'#!/bin/sh\necho "ran: $*" >> {marker}\nexit 1\n', encoding="utf-8")
+    plant.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+    return marker
+
+
+def test_a_pinned_cli_runs_every_ticket_call_and_a_planted_ledger_on_path_never_runs(tmp_path, monkeypatch, capsys):
+    from ledger_support import machine
+
+    pinned = FakeLedger(tmp_path / "pinned")
+    machine(monkeypatch, tmp_path)
+    _pin_topic_cli(pinned.path)
+    marker = _planted_ahead_on_path(tmp_path, monkeypatch)
+    # The store selection, the opened pass and the item-source read all run the pinned CLI.
+    chosen = ticket.choose_store(tmp_path, KEY, TITLE)
+    assert isinstance(chosen, ticket.LedgerStore) and chosen.cli == str(pinned.path)
+    assert chosen.selection == "ledger (explicit setting: ledger_cli in the topic config names it)"
+    session = ticket.TicketPass.open(KEY, Source(), chosen)
+    assert session.reconciliation[0] == f"store: {chosen.selection}"
+    answer = ticket._ledger_read(chosen.cli, "query", "--item", KEY)
+    assert answer is not None
+    assert pinned.calls(), "the pinned CLI was run"
+    assert not marker.exists(), marker.read_text() if marker.exists() else ""
+
+
+def test_a_moved_pinned_cli_is_refused_by_name_before_any_ticket_call_runs(tmp_path, monkeypatch):
+    from ledger_support import machine
+
+    pinned = FakeLedger(tmp_path / "pinned")
+    machine(monkeypatch, tmp_path)
+    _pin_topic_cli(pinned.path)
+    marker = _planted_ahead_on_path(tmp_path, monkeypatch)
+    live = ticket.choose_store(tmp_path, KEY, TITLE)
+    calls = len(pinned.calls())
+    pinned.path.unlink()
+    # The store selection refuses (not `ledger_incompatible`): the probe is never reached.
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        ticket.choose_store(tmp_path, KEY, TITLE)
+    assert refusal(excinfo) == "ledger_cli_moved"
+    line = str(excinfo.value)
+    assert line.startswith("ledger_cli_moved: ") and str(pinned.path) in line and " setup" in line and "\n" not in line
+    # A handle chosen before the move refuses on its first call, through the store's own runner.
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        ticket.TicketPass.open(KEY, Source(), live)
+    assert refusal(excinfo) == "ledger_cli_moved"
+    # And the item-source read refuses the same way.
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        ticket._ledger_read(str(pinned.path), "query", "--item", KEY)
+    assert refusal(excinfo) == "ledger_cli_moved"
+    assert len(pinned.calls()) == calls
+    assert not marker.exists()
+
+
+def test_a_moved_pinned_cli_stops_import_cards_by_name(tmp_path, monkeypatch, capsys):
+    from ledger_support import machine
+
+    pinned = FakeLedger(tmp_path / "pinned")
+    machine(monkeypatch, tmp_path)
+    _pin_topic_cli(pinned.path)
+    marker = _planted_ahead_on_path(tmp_path, monkeypatch)
+    pinned.path.unlink()
+    assert ticket.main(["import-cards", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("ticket.py: ledger_cli_moved: ") and len(err.splitlines()) == 1
+    assert not marker.exists()
