@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The source-tree shape check names skills by the rule `install.sh` uses
+
+`ci/source_shape.py`, which the ledger-e2e step of `ci/check.sh` uses to list the skills the installer should leave behind, counted every non-dot directory under `skills/` as a skill, so a local `skills/__pycache__` was expected in the throwaway home and the step failed when `install.sh` rightly did not install it. It now names a skill by the same rule as `install.sh`: a directory with a `SKILL.md`, plus `_lib`, and never a dot-name, `__pycache__` or any other directory without a `SKILL.md`. With a local `skills/__pycache__` present, a full `ci/check.sh` now passes. CI runs on a clean checkout, so only local runs were affected.
+
 ### `ci/check.sh` discovers skills by the rule `install.sh` uses
 
 `ci/check.sh` listed skills with the bare glob `skills/*`, so a leftover `skills/__pycache__` from a local test run was counted as a skill, `install.sh --all` correctly skipped it, and the `install-all` and `install-one` checks failed. It now discovers a skill exactly as `install.sh` does: a directory with a `SKILL.md`, plus `_lib`, and never a dot-name, `__pycache__` or any other directory without a `SKILL.md`. The `install-all` check also fails when `install.sh` installs an entry the script did not discover, so the two copies of the rule cannot drift apart unseen. CI runs on a clean checkout, so only local runs were affected.
