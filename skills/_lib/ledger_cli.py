@@ -100,10 +100,11 @@ the backup's bytes with what it read. Equal: it links the temp file to the
 path, again never replacing a file. Different: it links the backup back to the
 path and refuses `config_changed`. If at either link a file has reappeared at
 the path, setup leaves that file, keeps the backup and refuses `config_changed`
-naming it. No step renames or replaces onto the path. Setup removes the backup
-only after a successful commit, and then only while it still holds the bytes
-setup read, or after a successful restore, and then only while it is the same
-file as the one at the path.
+naming it. No step renames or replaces onto the path. After a successful
+commit setup never removes the backup: it stays beside the override as the
+record of the version it displaced, and the success line names it. Setup
+removes a backup only after a successful restore, and then only while it is
+the same file as the one at the path.
 
 The backup has that fixed name so a later run finds it. A run that stopped
 while the path was absent left the file's version in the backup: the next run,
@@ -115,10 +116,14 @@ it rather than move a file over it: check it, remove it and rerun.
 
 Residual: a writer that edits in place, on a descriptor it opened before the
 move, and writes after setup's compare, lands its edit in the backup file. When
-that write lands before setup's last read of the backup, setup keeps the
-backup, names it and exits 1 (`config_changed`), though `ledger_cli` is already
-written at the path; a write that lands after that last read goes to the
-removed backup and is lost. Editors that save by writing a new file and
+that write lands before setup's last read of the backup, setup names the
+backup and exits 1 (`config_changed`), though `ledger_cli` is already written
+at the path; a write that lands after that last read is in the backup too,
+which setup keeps, and setup exits 0 naming it. Merge any such edit by hand.
+A kept backup beside a present file is never restored (recovery restores only
+while the path is absent). The next run that would move the file aside refuses
+`config_changed` naming the backup rather than replace it: check it, remove it
+and rerun. Editors that save by writing a new file and
 renaming it over the path are covered. After a restore, the check that the
 backup is the file at the path and its removal are two steps: a save by rename
 that lands between them replaces the restored version at the path, as that
@@ -561,7 +566,7 @@ def _recover(target: Path) -> None:
     _drop_backup_if_restored(target, backup)
 
 
-def _commit(target: Path, text: str, expected: Optional[bytes]) -> Optional[Path]:
+def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optional[Path], bool]:
     """Write `text` at `target`, the version setup read being `expected` (None: absent).
 
     Setup never removes or overwrites a version of the override file it did not read. It commits
@@ -572,9 +577,11 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> Optional[Path
 
     The caller holds the setup lock, which serializes setup runs; the move aside and the no-clobber
     links guard against a writer that takes no lock. Nothing renames or replaces onto `target`.
-    Raises _Refusal or OSError with nothing committed. Returns None once committed with the backup
-    removed, or the backup's path when committed but the backup no longer holds `expected` (a
-    writer edited it in place after the compare) or could not be removed: it is kept.
+    Raises _Refusal or OSError with nothing committed. The backup is never removed after a commit.
+    Returns (backup, edited): backup is None when the file was created (nothing displaced), else
+    the kept backup's path; edited is True when a re-read of the backup shows it no longer holds
+    `expected` (a writer edited it in place after the compare) or could not be read. A write that
+    lands after that re-read is in the kept backup too.
     """
     backup = _backup_path(target)
     fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
@@ -593,7 +600,7 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> Optional[Path
                     f"{target} was created while setup was running; it is left as it is and nothing "
                     "was written, rerun setup",
                 ) from None
-            return None
+            return None, False
         # (2) A backup already here may hold a version setup never read: never move a file over it.
         if os.path.lexists(backup):
             raise _Refusal(
@@ -635,14 +642,12 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> Optional[Path
         except OSError:
             _restore(target, backup)
             raise
-        # Committed. Drop the backup only while it still holds the version setup read.
+        # Committed. The backup stays as the record of the displaced version; note whether an
+        # in-place writer has already edited it.
         try:
-            if backup.read_bytes() != expected:
-                return backup
-            os.unlink(backup)
+            return backup, backup.read_bytes() != expected
         except OSError:
-            return backup
-        return None
+            return backup, True
     finally:
         try:
             os.unlink(temp)
@@ -736,21 +741,24 @@ def _setup_locked(override: Path, target: Path) -> int:
         )
     config[CONFIG_KEY] = pinned
     try:
-        kept = _commit(target, json.dumps(config, indent=2) + "\n", before)
+        kept, edited = _commit(target, json.dumps(config, indent=2) + "\n", before)
     except _Refusal as refusal:
         return _refuse_setup(refusal.token, refusal.detail)
     except OSError as exc:
         return _refuse_setup(
             SETUP_WRITE_FAILED, f"could not write {target} ({_one_line(exc.strerror or str(exc))}); nothing was written"
         )
-    if kept is not None:
+    if edited:
         return _refuse_setup(
             SETUP_CONFIG_CHANGED,
             f"{CONFIG_KEY} is set to {pinned} in {target}, but the version it replaced, kept at {kept}, "
-            "was edited after setup compared it or could not be removed: merge any edit in it by hand, "
+            "was edited after setup compared it or could not be read: merge any edit in it by hand, "
             "then remove it",
         )
-    print(f"{CONFIG_KEY} set to {pinned} in {target}")
+    if kept is not None:
+        print(f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced is kept at {kept}")
+    else:
+        print(f"{CONFIG_KEY} set to {pinned} in {target}")
     return 0
 
 
