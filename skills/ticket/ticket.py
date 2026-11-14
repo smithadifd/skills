@@ -1813,6 +1813,7 @@ class LedgerStore:
         )
 
     def _run(self, *args: str, stdin: str = "") -> _Answer:
+        _require_runnable(self.cli)
         result = subprocess.run([self.cli, "--json", *args], input=stdin, capture_output=True, encoding="utf-8", check=False)
         return _ledger_answer(result.returncode, result.stdout, result.stderr)
 
@@ -2207,9 +2208,23 @@ def choose_store(repo: str | Path, key: str, title: str) -> Store:
     return store
 
 
-def _probe_ledger(cli: str) -> None:
-    """Refuse ``ledger_incompatible`` unless ``cli`` passes the shared capability probe."""
+def _require_runnable(cli: str) -> None:
+    """Refuse ``ledger_cli_moved`` when ``cli`` is an absolute path that is no longer an executable file.
 
+    The check is the shared rule's, the one its ``call`` makes: this skill runs the CLI itself, so it asks first.
+    Nothing is looked up on PATH, and the refusal line starts with the fixed token ``ledger_cli_moved:``.
+    """
+
+    try:
+        _LEDGER_RULE.require_runnable(cli)
+    except _LEDGER_RULE.LedgerCallError as exc:
+        raise StoreUnavailable(str(exc), code="ledger_cli_moved") from exc
+
+
+def _probe_ledger(cli: str) -> None:
+    """Refuse ``ledger_cli_moved`` for a pinned CLI that is gone, else ``ledger_incompatible`` unless ``cli`` passes the shared capability probe."""
+
+    _require_runnable(cli)
     failure = _LEDGER_RULE.probe(cli, LEDGER_PROBE_TIMEOUT)
     if failure is not None:
         raise _ledger_incompatible(cli, failure)
@@ -2227,6 +2242,7 @@ _SPEC_HASH = re.compile(r"[0-9a-f]{64}")
 def _ledger_read(cli: str, *args: str) -> _Answer:
     """One read call of the ledger CLI, ``<cli> --json <args>``, as the ledger store makes its calls."""
 
+    _require_runnable(cli)
     result = subprocess.run([cli, "--json", *args], input="", capture_output=True, encoding="utf-8", check=False)
     return _ledger_answer(result.returncode, result.stdout, result.stderr)
 

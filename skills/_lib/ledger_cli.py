@@ -2,8 +2,9 @@
 """ledger_cli.py — the one rule that decides whether the ledger is on, for every skill.
 
     python3 ledger_cli.py [--config <path>]
+    python3 ledger_cli.py setup
 
-Prints one JSON object and exits 0:
+With no subcommand it prints one JSON object and exits 0:
 
     {"ledger_cli": <path or null>, "rule": <rule>, "line": <the ledger line>}
 
@@ -20,7 +21,12 @@ of these that holds:
    (rule: off by setting). Any other non-blank string names the ledger CLI
    (rule: explicit setting); a leading `~` is expanded. An explicit CLI is not
    checked here: a CLI that is missing or fails is reported by the call that
-   runs it, as before.
+   runs it. While a setting names a CLI nothing looks `ledger` up on `PATH`: a
+   skill runs that CLI or refuses, and never falls back. A CLI whose path (after
+   `~` expansion) is absolute and is no longer an executable file is refused
+   before anything runs, in one line that starts with the fixed token
+   `ledger_cli_moved:`, names the path and gives the `setup` command to rerun
+   (see Setup below).
 2. With no explicit setting (the key absent, null, empty or blank, and the
    variable unset or blank), the ledger is on when `LEDGER_DB` names an
    existing file and a `ledger` found on `PATH` passes the compatibility check
@@ -28,7 +34,9 @@ of these that holds:
    always run: `ledger append-many --help` exits 0 within the timeout and names
    `--expect-revision`. `LEDGER_DB` is tested first, so a `ledger` is never run
    without a database. This rule is for the skills a person invokes (`topic`,
-   `sharpen`, `shape`, `ticket`).
+   `sharpen`, `shape`, `ticket`). It reads `PATH`, so a writable folder put on
+   `PATH` ahead of the real install can plant a `ledger`; `setup` below removes
+   that lookup by pinning the real one.
 3. Anything else is off, silently (rule: not configured): no `ledger` on
    `PATH`, `LEDGER_DB` unset, empty or not a file, a `ledger` that fails the
    check, a `ledger_cli` value that is not a string, or a config file that
@@ -47,9 +55,97 @@ where `<rule>` is exactly one of `explicit setting`, `off by setting`,
 `ledger on PATH with LEDGER_DB` and `not configured`. `Decision.reason` is the
 part in parentheses; the ticket skill prints it as `store: <store> (<reason>)`.
 
+Setup. `python3 ledger_cli.py setup` is the one step that pins the ledger CLI:
+it resolves `ledger` once (`shutil.which`), runs the compatibility check on it,
+and writes its absolute path (made absolute, symlinks kept) as `ledger_cli` in
+`~/.claude/skill-config/topic.json`, keeping every other key. From then on rule
+1 decides for every skill and nothing reads `PATH`. Setup refuses, exit 1 with
+one stderr line that starts with its token, unless it can write; every refusal
+writes nothing, except the one `ledger_cli_setup_config_changed` case after a
+commit that the residual below describes:
+
+- `ledger_cli_setup_lock_failed`: the lock file beside the override could not
+  be opened or locked. Checked first, with no program run.
+- `ledger_cli_setup_config_unreadable`: the override file exists and is not a
+  readable UTF-8 JSON object. Checked next, with no program run.
+- `ledger_cli_setup_exists`: `ledger_cli` already holds a non-blank value (any
+  string, `none` in any case included, or any non-string value other than
+  null), unless that value is an absolute path (after `~` expansion) that is no
+  longer an executable file, which is the moved case and is replaced. A live
+  setting is never changed and the file stays byte-identical. Null, an empty
+  or a blank string count as unset. Checked after that, with no program run.
+- `ledger_cli_setup_not_found`: no `ledger` on `PATH`.
+- `ledger_cli_setup_incompatible`: the one found fails the compatibility check;
+  the line names what failed.
+- `ledger_cli_setup_config_changed`: when setup came to write, the override
+  file was not the version setup read, because a writer that does not take the
+  lock (an editor, say) saved it meanwhile, or a backup from an earlier run
+  stands beside it (below). The file that writer left stays at the path; the
+  line names the backup when setup kept one; rerun.
+- `ledger_cli_setup_write_failed`: the directory or file could not be written.
+
+How setup writes. Setup never removes or overwrites a version of the override
+file it did not read. It commits only by (1) creating the file when absent, or
+(2) moving the existing file aside, confirming its bytes equal what setup read,
+and creating the new file no-clobber. In every other case the file a
+non-locking writer left is the one at the path when setup exits, and setup
+exits 1. While (2) runs, the path is briefly absent.
+
+In detail: the new text goes to a temp file in the same folder. (1) With no
+file at the path, setup links the temp file there (`os.link`, which fails rather
+than replace a file that appeared meanwhile; that refuses `config_changed`).
+(2) Otherwise setup renames the file to `topic.json.setup-backup` beside it,
+which captures exactly the version at the path at that instant, and compares
+the backup's bytes with what it read. Equal: it links the temp file to the
+path, again never replacing a file. Different: it links the backup back to the
+path and refuses `config_changed`. If at either link a file has reappeared at
+the path, setup leaves that file, keeps the backup and refuses `config_changed`
+naming it. No step renames or replaces onto the path. Setup removes the backup
+only after a successful commit, and then only while it still holds the bytes
+setup read, or after a successful restore, and then only while it is the same
+file as the one at the path.
+
+The backup has that fixed name so a later run finds it. A run that stopped
+while the path was absent left the file's version in the backup: the next run,
+before it reads anything, links the backup back to the path. A backup that is
+the same file as the one at the path (a run that stopped after its restore) is
+dropped. Any other backup found beside a present file is a version setup cannot
+place, so a run that would move the file aside refuses `config_changed` naming
+it rather than move a file over it: check it, remove it and rerun.
+
+Residual: a writer that edits in place, on a descriptor it opened before the
+move, and writes after setup's compare, lands its edit in the backup file. When
+that write lands before setup's last read of the backup, setup keeps the
+backup, names it and exits 1 (`config_changed`), though `ledger_cli` is already
+written at the path; a write that lands after that last read goes to the
+removed backup and is lost. Editors that save by writing a new file and
+renaming it over the path are covered. After a restore, the check that the
+backup is the file at the path and its removal are two steps: a save by rename
+that lands between them replaces the restored version at the path, as that
+save would have without setup, and the backup's link to it goes with it.
+
+Concurrent setup runs serialize. Setup holds an exclusive `fcntl.flock` on
+`topic.json.lock`, a file beside the override (created if absent, never deleted,
+and the folder is created first when it is missing), from its first read of the
+override through its commit or restore, and the second run waits for it. Once it holds
+the lock it reads the file afresh and applies the same rules above, so it finds
+the first run's pin and refuses `ledger_cli_setup_exists`: two runs never both
+write, and neither pin is silently overwritten. The lock is released when setup
+ends or dies; the descriptor is not inherited by the program the compatibility
+check runs.
+
+Setup runs the first `ledger` on `PATH` once, for the compatibility check, so
+run it from a shell whose `PATH` you trust. A rerun after a stop at any step is
+safe: the file is either as it was, holds the pinned path, or is absent with its
+version in the backup, which the rerun restores before it reads; a rerun after
+success refuses `ledger_cli_setup_exists`. This plugin declares no hooks: the
+ledger's brief at session start comes from the ledger's own `ledger-hooks`
+plugin, which takes no `ledger_cli` setting and which this file does not govern.
+
 Also holds the small pieces the callers share: the argv of the `link` call and a
 `call` that runs the CLI with a timeout and turns a failure into one
-`LedgerCallError` line.
+`LedgerCallError` line, `ledger_cli_moved:` included; a caller that runs the CLI
+itself calls `require_runnable` first to get the same refusal.
 
 Python 3 stdlib only. It lives in the `_lib` directory beside the skills, so a
 skill reaches it as `${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py` in the plugin
@@ -59,11 +155,14 @@ and in a standalone `install.sh` copy alike.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -91,6 +190,20 @@ LEDGER_DATABASE = "LEDGER_DB"
 PROBE_TIMEOUT_SECONDS = 10.0
 # How the topic config's key is named in a ledger line.
 CONFIG_SOURCE = f"{CONFIG_KEY} in the topic config"
+# The fixed first word of the refusal for an explicit CLI that is no longer an executable file.
+MOVED_TOKEN = "ledger_cli_moved:"
+# The fixed first word of every `setup` refusal is one of these, then a colon.
+SETUP_NOT_FOUND = "ledger_cli_setup_not_found"
+SETUP_INCOMPATIBLE = "ledger_cli_setup_incompatible"
+SETUP_CONFIG_UNREADABLE = "ledger_cli_setup_config_unreadable"
+SETUP_EXISTS = "ledger_cli_setup_exists"
+SETUP_CONFIG_CHANGED = "ledger_cli_setup_config_changed"
+SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
+SETUP_LOCK_FAILED = "ledger_cli_setup_lock_failed"
+# The lock file sits beside the override and is named by appending this to its name.
+LOCK_SUFFIX = ".lock"
+# The fixed name, beside the override, that setup moves the file it displaces to.
+BACKUP_SUFFIX = ".setup-backup"
 
 
 class ConfigError(ValueError):
@@ -323,8 +436,37 @@ def link_argv(item: str, target: str) -> list[str]:
     return ["link", item, "--rel", "url", "--target", target]
 
 
+def setup_command() -> str:
+    """The exact command that pins the ledger CLI, for a refusal to name."""
+    return f"python3 {shlex.quote(str(LIB_DIR / 'ledger_cli.py'))} setup"
+
+
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _moved(cli: str) -> bool:
+    """True when `cli`, after `~` expansion, is an absolute path that is not an executable file."""
+    path = os.path.expanduser(cli)
+    return os.path.isabs(path) and not _is_executable_file(path)
+
+
+def require_runnable(cli: str) -> None:
+    """Raise LedgerCallError (`ledger_cli_moved: ...`) when an absolute `cli` is not an executable file.
+
+    A bare name is not checked: it is looked up the way the person who wrote it
+    meant. No branch of this function reads `PATH`.
+    """
+    if _moved(cli):
+        raise LedgerCallError(
+            f"{MOVED_TOKEN} the ledger CLI {_one_line(cli)} is not an executable file, so nothing was run; "
+            f"rerun setup with `{setup_command()}`"
+        )
+
+
 def call(cli: str, argv: list[str]) -> subprocess.CompletedProcess:
     """Run `<cli> <argv>`; raise LedgerCallError unless it exits 0."""
+    require_runnable(cli)
     verb = argv[0] if argv else "?"
     try:
         proc = subprocess.run(
@@ -350,10 +492,278 @@ def call(cli: str, argv: list[str]) -> subprocess.CompletedProcess:
     return proc
 
 
+def _refuse_setup(token: str, detail: str) -> int:
+    sys.stderr.write(f"{token}: {_one_line(detail)}\n")
+    return 1
+
+
+def _current_bytes(path: Path) -> Optional[bytes]:
+    """The file's bytes, or None when it is absent."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+class _Refusal(Exception):
+    """Setup stops with one named refusal: its token and the rest of its line."""
+
+    def __init__(self, token: str, detail: str):
+        super().__init__(f"{token}: {detail}")
+        self.token = token
+        self.detail = detail
+
+
+def _backup_path(target: Path) -> Path:
+    """The one fixed place beside `target` that setup moves the displaced file to."""
+    return target.parent / (target.name + BACKUP_SUFFIX)
+
+
+def _drop_backup_if_restored(target: Path, backup: Path) -> None:
+    """Remove `backup` only while it is the same file as the one at `target`: no version is lost."""
+    try:
+        if os.path.samefile(backup, target):
+            os.unlink(backup)
+    except OSError:
+        pass
+
+
+def _restore(target: Path, backup: Path) -> None:
+    """Put the moved-aside file back at `target` without replacing anything there.
+
+    Raises _Refusal, keeping the backup, when a file has reappeared at `target` or the link fails.
+    """
+    try:
+        os.link(backup, target)
+    except FileExistsError:
+        raise _Refusal(
+            SETUP_CONFIG_CHANGED,
+            f"{target} reappeared while setup was putting it back; it is left as it is, nothing was "
+            f"written, and the version setup moved aside is kept at {backup}",
+        ) from None
+    except OSError as exc:
+        raise _Refusal(
+            SETUP_WRITE_FAILED,
+            f"could not put {target} back ({_one_line(exc.strerror or str(exc))}); its version is "
+            f"kept at {backup}, and rerunning setup puts it back",
+        ) from None
+    _drop_backup_if_restored(target, backup)
+
+
+def _recover(target: Path) -> None:
+    """Undo a stopped run before reading: put a backup back at an absent path; drop a restored one."""
+    backup = _backup_path(target)
+    if not os.path.lexists(backup):
+        return
+    if not os.path.lexists(target):
+        _restore(target, backup)
+        return
+    _drop_backup_if_restored(target, backup)
+
+
+def _commit(target: Path, text: str, expected: Optional[bytes]) -> Optional[Path]:
+    """Write `text` at `target`, the version setup read being `expected` (None: absent).
+
+    Setup never removes or overwrites a version of the override file it did not read. It commits
+    only by (1) creating the file when absent, or (2) moving the existing file aside, confirming its
+    bytes equal what setup read, and creating the new file no-clobber. In every other case the file
+    a non-locking writer left is the one at the path when setup exits, and setup exits 1. While (2)
+    runs, the path is briefly absent.
+
+    The caller holds the setup lock, which serializes setup runs; the move aside and the no-clobber
+    links guard against a writer that takes no lock. Nothing renames or replaces onto `target`.
+    Raises _Refusal or OSError with nothing committed. Returns None once committed with the backup
+    removed, or the backup's path when committed but the backup no longer holds `expected` (a
+    writer edited it in place after the compare) or could not be removed: it is kept.
+    """
+    backup = _backup_path(target)
+    fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if expected is None:
+            # (1) Create-if-absent: os.link never replaces a file at its destination.
+            try:
+                os.link(temp, target)
+            except FileExistsError:
+                raise _Refusal(
+                    SETUP_CONFIG_CHANGED,
+                    f"{target} was created while setup was running; it is left as it is and nothing "
+                    "was written, rerun setup",
+                ) from None
+            return None
+        # (2) A backup already here may hold a version setup never read: never move a file over it.
+        if os.path.lexists(backup):
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{backup} is left from an earlier setup run and may hold a version of {target}; "
+                "nothing was written: check it, remove it and rerun setup",
+            )
+        try:
+            os.rename(target, backup)
+        except FileNotFoundError:
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{target} was removed while setup was running; nothing was written, rerun setup",
+            ) from None
+        # The path is absent from here until a link puts a file back.
+        try:
+            unchanged = backup.read_bytes() == expected
+            if unchanged:
+                shutil.copymode(backup, temp)
+        except OSError:
+            _restore(target, backup)
+            raise
+        if not unchanged:
+            _restore(target, backup)
+            kept = f"; an earlier version is kept at {backup}" if os.path.lexists(backup) else ""
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{target} changed while setup was running; it is left as it is and nothing was "
+                f"written, rerun setup{kept}",
+            )
+        try:
+            os.link(temp, target)
+        except FileExistsError:
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{target} reappeared while setup was writing it; it is left as it is, nothing was "
+                f"written, and the version setup read is kept at {backup}",
+            ) from None
+        except OSError:
+            _restore(target, backup)
+            raise
+        # Committed. Drop the backup only while it still holds the version setup read.
+        try:
+            if backup.read_bytes() != expected:
+                return backup
+            os.unlink(backup)
+        except OSError:
+            return backup
+        return None
+    finally:
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+
+
+def _take_lock(target: Path) -> int:
+    """Open the lock file beside `target` (created if absent, never deleted) and flock it exclusively.
+
+    Blocks until any other setup run lets go. The caller closes the returned descriptor to release
+    the lock. The descriptor is not inheritable, so a program setup runs never holds it.
+    """
+    descriptor = os.open(target.parent / (target.name + LOCK_SUFFIX), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def setup() -> int:
+    """Pin the ledger CLI: see the module text, Setup. Exit 0 when written, 1 on a named refusal."""
+    override = Path(OVERRIDE_PATH).expanduser()
+    # Follow a symlinked override so the link itself is kept and its target is rewritten.
+    target = Path(os.path.realpath(override))
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _refuse_setup(
+            SETUP_WRITE_FAILED, f"could not write {target} ({_one_line(exc.strerror or str(exc))}); nothing was written"
+        )
+    try:
+        lock = _take_lock(target)
+    except OSError as exc:
+        return _refuse_setup(
+            SETUP_LOCK_FAILED,
+            f"could not lock {target.name + LOCK_SUFFIX} beside {target} ({_one_line(exc.strerror or str(exc))}); nothing was written",
+        )
+    try:
+        return _setup_locked(override, target)
+    finally:
+        os.close(lock)
+
+
+def _setup_locked(override: Path, target: Path) -> int:
+    """Setup's read, checks and write, run with the lock held."""
+    try:
+        _recover(target)
+    except _Refusal as refusal:
+        return _refuse_setup(refusal.token, refusal.detail)
+    try:
+        before = _current_bytes(override)
+    except OSError as exc:
+        return _refuse_setup(SETUP_CONFIG_UNREADABLE, f"could not read {override} ({exc}); nothing was written")
+    config: dict[str, Any] = {}
+    if before is not None:
+        try:
+            data = json.loads(before.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            return _refuse_setup(
+                SETUP_CONFIG_UNREADABLE, f"{override} is not valid UTF-8 JSON ({exc}); nothing was written"
+            )
+        if not isinstance(data, dict):
+            return _refuse_setup(
+                SETUP_CONFIG_UNREADABLE, f"{override} is not a JSON object; nothing was written"
+            )
+        config = data
+    existing = config.get(CONFIG_KEY)
+    if existing is not None:
+        if not isinstance(existing, str):
+            return _refuse_setup(
+                SETUP_EXISTS,
+                f"{CONFIG_KEY} in {override} is already set to {json.dumps(existing)}; setup does not change it",
+            )
+        text = existing.strip()
+        if text and not _moved(text):
+            return _refuse_setup(
+                SETUP_EXISTS,
+                f"{CONFIG_KEY} in {override} is already set to {text}; setup does not change it",
+            )
+    found = shutil.which(LEDGER_COMMAND)
+    if found is None:
+        return _refuse_setup(SETUP_NOT_FOUND, f"no {LEDGER_COMMAND} CLI on PATH; nothing was written")
+    pinned = os.path.abspath(found)
+    failure = probe(pinned)
+    if failure is not None:
+        return _refuse_setup(
+            SETUP_INCOMPATIBLE, f"{pinned} fails the compatibility check ({failure}); nothing was written"
+        )
+    config[CONFIG_KEY] = pinned
+    try:
+        kept = _commit(target, json.dumps(config, indent=2) + "\n", before)
+    except _Refusal as refusal:
+        return _refuse_setup(refusal.token, refusal.detail)
+    except OSError as exc:
+        return _refuse_setup(
+            SETUP_WRITE_FAILED, f"could not write {target} ({_one_line(exc.strerror or str(exc))}); nothing was written"
+        )
+    if kept is not None:
+        return _refuse_setup(
+            SETUP_CONFIG_CHANGED,
+            f"{CONFIG_KEY} is set to {pinned} in {target}, but the version it replaced, kept at {kept}, "
+            "was edited after setup compared it or could not be removed: merge any edit in it by hand, "
+            "then remove it",
+        )
+    print(f"{CONFIG_KEY} set to {pinned} in {target}")
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=None)
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("setup", help="pin the ledger CLI's absolute path in the topic config override")
     args = parser.parse_args(argv)
+    if args.command == "setup":
+        if args.config is not None:
+            parser.error("setup takes no --config: it writes ~/.claude/skill-config/topic.json")
+        return setup()
     try:
         decision = decide(args.config)
     except Exception as exc:  # the contract: report, never raise

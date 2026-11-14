@@ -54,13 +54,29 @@ the same way as `topics_dir` (explicit `--config`, then
 `~/.claude/skill-config/topic.json`, then the shipped file). Whether the route is
 on is one rule, shared by every skill (`decide` in `../_lib/ledger_cli.py`):
 
-- a `ledger_cli` value names the CLI and wins (rule `explicit setting`);
+- a `ledger_cli` value names the CLI and wins (rule `explicit setting`); while
+  one stands no skill looks `ledger` up on `PATH`, and a path that is no longer an
+  executable file is refused in one line starting `ledger_cli_moved:` (rerun the
+  setup step below), never replaced by whatever is on `PATH`;
 - `none`, in any case, turns the route off (rule `off by setting`);
 - with the key unset, null or empty, a `ledger` on `PATH` turns the route on when
   `LEDGER_DB` names an existing database file and `ledger append-many --help`
-  names `--expect-revision` (rule `ledger on PATH with LEDGER_DB`);
+  names `--expect-revision` (rule `ledger on PATH with LEDGER_DB`); an invoked
+  skill keeps this lookup when nothing is set, and the setup step ends it;
 - anything else leaves it off (rule `not configured`), and everything else in
   this file applies as written.
+
+**Setup.** `python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py setup` finds `ledger`
+once on `PATH`, checks it passes the compatibility check, and writes its absolute
+path as `ledger_cli` in `~/.claude/skill-config/topic.json`, keeping the other keys.
+It refuses, with one stderr line starting with its name and nothing written, when
+there is no `ledger` (`ledger_cli_setup_not_found`), it is incompatible
+(`ledger_cli_setup_incompatible`), the file cannot be read
+(`ledger_cli_setup_config_unreadable`) or changed meanwhile
+(`ledger_cli_setup_config_changed`), cannot be written
+(`ledger_cli_setup_write_failed`), or `ledger_cli` is already set
+(`ledger_cli_setup_exists`). A value naming an absolute path that no longer exists
+is the one setting it replaces.
 
 A value that is not a string is an error. When the route is on,
 a thread is a ledger item of type `topic` with the id `topic-<slug>`, this skill
