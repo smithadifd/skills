@@ -1,0 +1,1 @@
+LINT FAIL [agent-hooks]: agents/helper.md has no frontmatter that parses as a mapping (no opening ---)

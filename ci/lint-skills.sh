@@ -5,6 +5,9 @@
 #   frontmatter       every skill has a closed, parseable frontmatter mapping with
 #                     name, kind, version and description
 #   skill-hooks       no skill's frontmatter has a top-level hooks key
+#   agent-hooks       no agent's frontmatter has a top-level hooks key (Claude Code
+#                     honours one in a user agent), and each agent file's
+#                     frontmatter parses
 #   frontmatter-parser ci/frontmatter.py ran (PyYAML importable, exit 0 or 1)
 #   description-size description plus when_to_use stay under 1,536 characters
 #   triggers          the description names a trigger phrase and a NOT-for case
@@ -88,7 +91,7 @@ skill_files=(skills/*/SKILL.md)
 unclosed_files=
 if [ "${#skill_files[@]}" -gt 0 ]; then
   parser_status=0
-  parser_out=$(python3 -E -P "$script_dir/frontmatter.py" "${skill_files[@]}" 2>&1) || parser_status=$?
+  parser_out=$(python3 -E "$script_dir/frontmatter.py" "${skill_files[@]}" 2>&1) || parser_status=$?
   case "$parser_status" in
     0) ;;
     1)
@@ -112,6 +115,34 @@ if [ "${#skill_files[@]}" -gt 0 ]; then
       ;;
     *)
       lint_fail frontmatter-parser "ci/frontmatter.py exited $parser_status: $(printf '%s' "$parser_out" | tr '\n' ' ')"
+      ;;
+  esac
+fi
+
+# The same parser over every agent file: Claude Code honours a hooks key in a
+# user agent's frontmatter, so an agent that declares one is a hook. A file the
+# parser cannot read as frontmatter fails closed under the same rule.
+agent_files=(agents/*.md)
+if [ "${#agent_files[@]}" -gt 0 ]; then
+  agent_status=0
+  agent_out=$(python3 -E "$script_dir/frontmatter.py" "${agent_files[@]}" 2>&1) || agent_status=$?
+  case "$agent_status" in
+    0) ;;
+    1)
+      while IFS= read -r agent_line; do
+        [ -n "$agent_line" ] || continue
+        case "$agent_line" in
+          *': declares hooks')
+            lint_fail agent-hooks "${agent_line%': declares hooks'} declares hooks in its frontmatter" ;;
+          *': no opening ---' | *': no closing ---' | *': does not parse' | *': not a mapping')
+            lint_fail agent-hooks "${agent_line%: *} has no frontmatter that parses as a mapping (${agent_line##*: })" ;;
+          *)
+            lint_fail frontmatter-parser "unrecognised parser output: $agent_line" ;;
+        esac
+      done <<< "$agent_out"
+      ;;
+    *)
+      lint_fail frontmatter-parser "ci/frontmatter.py exited $agent_status over agents: $(printf '%s' "$agent_out" | tr '\n' ' ')"
       ;;
   esac
 fi

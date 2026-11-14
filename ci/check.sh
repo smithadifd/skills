@@ -393,52 +393,125 @@ check_ledger_e2e() {
   ledger_e2e_python=$python
 
   # The sdlc plugin from this working tree. It declares no hooks; its skills
-  # install into the throwaway home the way a plugin install lays them.
-  HOME="$home" ./install.sh --all > /dev/null || ledger_e2e_fail sdlc-install 'install.sh --all failed'
+  # and agents install into the throwaway home the way a plugin install lays
+  # them. Both installs run with an empty environment but for HOME, a PATH of
+  # the two system binary directories and three decoys that name scratch paths
+  # outside HOME: a write through any of them, or into this repository, fails
+  # the step below.
+  local decoy_ccd="$scratch/decoy-ccd" decoy_xdg="$scratch/decoy-xdg" decoy_tmp="$scratch/decoy-tmp"
+  local status_before status_after decoy
+  status_before=$(git status --porcelain 2>&1) ||
+    ledger_e2e_fail install 'git status of this repository failed before the install'
+  local install_env=(env -i HOME="$home" PATH=/usr/bin:/bin CLAUDE_CONFIG_DIR="$decoy_ccd" XDG_CONFIG_HOME="$decoy_xdg" TMPDIR="$decoy_tmp")
+  "${install_env[@]}" ./install.sh --all > /dev/null || ledger_e2e_fail sdlc-install 'install.sh --all failed'
+  "${install_env[@]}" ./install.sh --all-agents > /dev/null || ledger_e2e_fail sdlc-install 'install.sh --all-agents failed'
   [ -f "$home/.claude/skills/ticket/ticket.py" ] || ledger_e2e_fail sdlc-install 'the ticket skill was not installed'
   [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || ledger_e2e_fail sdlc-install 'the shared _lib was not installed'
-  # The throwaway install itself must hold no hooks. install.sh writes only
-  # ~/.claude/skills/<name>/, so ~/.claude/hooks must not exist at all (a
-  # dangling symlink counts; nothing is walked), no settings*.json under
-  # ~/.claude may carry a "hooks" key, and no installed skill's frontmatter may
-  # declare "hooks". The repository's own plugin root is not inspected here: the
-  # plugin no-hooks test owns it.
-  local hooks_path="$home/.claude/hooks"
-  if [ -e "$hooks_path" ] || [ -L "$hooks_path" ]; then
-    ledger_e2e_fail install "install.sh --all created $hooks_path: $(ls -la -- "$hooks_path" 2>&1 | tr '\n' ' ')"
-  fi
-  local installed_settings
-  installed_settings=$("$python" -I - "$home/.claude" <<'PY'
-import json, os, re, sys
-found = []
-for base, _dirs, files in os.walk(sys.argv[1]):
-    for name in files:
-        if not re.fullmatch(r"settings.*\.json", name):
-            continue
-        path = os.path.join(base, name)
-        try:
-            data = json.load(open(path, encoding="utf-8"))
-        except (OSError, ValueError):
-            found.append(path + " (unreadable)")
-            continue
-        if isinstance(data, dict) and "hooks" in data:
-            found.append(path + " (hooks key)")
-print("\n".join(found))
+  for decoy in "$decoy_ccd" "$decoy_xdg" "$decoy_tmp"; do
+    if [ -e "$decoy" ] || [ -L "$decoy" ]; then
+      ledger_e2e_fail install "the install wrote outside HOME: ${decoy#"$scratch"/}"
+    fi
+  done
+  status_after=$(git status --porcelain 2>&1) ||
+    ledger_e2e_fail install 'git status of this repository failed after the install'
+  [ "$status_after" = "$status_before" ] ||
+    ledger_e2e_fail install 'the install changed this repository (git status differs from before the install)'
+
+  # The footprint allowlist owns everything the two installs lay down: every
+  # path under the throwaway home, directories included, is either listed here
+  # or fails the step by its relative path. Allowed, and nothing else:
+  #   .claude, .claude/skills, .claude/agents (directories);
+  #   .claude/skills/NAME (a directory), the NAMEs being exactly this
+  #     repository's skills/*/ directory names, and any regular file or
+  #     directory below it;
+  #   .claude/agents/A.md (a regular file), the names being exactly this
+  #     repository's agents/*.md, with nothing deeper.
+  # An entry that is not a regular file or a directory (a symlink, fifo,
+  # socket, device) fails by path wherever it sits and is never followed. This
+  # covers ~/.claude/hooks, ~/.claude/plugins, ~/.claude.json and any settings
+  # file without naming them. Hook declarations inside the allowed files are
+  # the frontmatter parser's, below; the plugin root is the plugin no-hooks
+  # test's.
+  local footprint footprint_status=0
+  footprint=$("$python" -I - "$home" "$repo_dir" <<'PY' 2>&1
+import os, stat, sys
+
+home, repo = sys.argv[1], sys.argv[2]
+
+
+def names(directory, keep):
+    return {n for n in os.listdir(directory) if keep(os.path.join(directory, n))}
+
+
+def raise_error(error):
+    raise error
+
+
+try:
+    skills = names(os.path.join(repo, "skills"), os.path.isdir)
+    agents = {n for n in names(os.path.join(repo, "agents"), os.path.isfile) if n.endswith(".md")}
+    bad = []
+    seen_skills, seen_agents = set(), set()
+    if not stat.S_ISDIR(os.lstat(home).st_mode):
+        bad.append(". (the throwaway home is not a directory)")
+    for base, dirs, files in os.walk(home, followlinks=False, onerror=raise_error):
+        for name in sorted(dirs + files):
+            path = os.path.join(base, name)
+            rel = os.path.relpath(path, home)
+            parts = rel.split(os.sep)
+            kind = stat.S_IFMT(os.lstat(path).st_mode)
+            is_dir = kind == stat.S_IFDIR
+            is_file = kind == stat.S_IFREG
+            if not (is_dir or is_file):
+                bad.append(rel + " (not a regular file or directory)")
+                continue
+            ok = False
+            if parts == [".claude"] or parts in ([".claude", "skills"], [".claude", "agents"]):
+                ok = is_dir
+            elif len(parts) == 3 and parts[:2] == [".claude", "skills"]:
+                ok = is_dir and parts[2] in skills
+                if ok:
+                    seen_skills.add(parts[2])
+            elif len(parts) > 3 and parts[:2] == [".claude", "skills"]:
+                ok = parts[2] in skills
+            elif len(parts) == 3 and parts[:2] == [".claude", "agents"]:
+                ok = is_file and parts[2] in agents
+                if ok:
+                    seen_agents.add(parts[2])
+            if not ok:
+                bad.append(rel)
+    bad += [".claude/skills/%s (missing)" % n for n in sorted(skills - seen_skills)]
+    bad += [".claude/agents/%s (missing)" % n for n in sorted(agents - seen_agents)]
+except OSError as error:
+    print("walk error: %s" % type(error).__name__)
+    sys.exit(2)
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
 PY
-  ) || ledger_e2e_fail install 'the installed home could not be scanned for settings files'
-  [ -z "$installed_settings" ] ||
-    ledger_e2e_fail install "install.sh --all wrote a hooks key or an unreadable settings file: $installed_settings"
-  # The installed SKILL.md files go through the same parser the lint uses
-  # (ci/frontmatter.py); -E -P keep PyYAML in the user site reachable.
-  local installed_docs installed_frontmatter frontmatter_status=0
+  ) || footprint_status=$?
+  [ "$footprint_status" -eq 0 ] ||
+    ledger_e2e_fail install "install left a path outside the footprint allowlist (exit $footprint_status): ${footprint//$'\n'/; }"
+
+  # Every installed SKILL.md (any case, any depth) and every installed agent
+  # file goes through the one parser the lint uses (ci/frontmatter.py), which
+  # refuses a hooks key. `-E` keeps PyYAML in the user site reachable.
+  local installed_files=() installed_file frontmatter_out frontmatter_status=0
+  while IFS= read -r -d '' installed_file; do
+    installed_files+=("$installed_file")
+  done < <(find "$home/.claude/skills" -type f -iname 'SKILL.md' -print0)
+  ((${#installed_files[@]} > 0)) || ledger_e2e_fail install 'no installed SKILL.md files were found to check'
   shopt -s nullglob
-  installed_docs=("$home"/.claude/skills/*/SKILL.md)
+  local installed_agent_files=("$home"/.claude/agents/*)
   shopt -u nullglob
-  ((${#installed_docs[@]} > 0)) || ledger_e2e_fail install 'no installed SKILL.md files were found to check'
-  installed_frontmatter=$("$python" -E -P "$repo_dir/ci/frontmatter.py" "${installed_docs[@]}" 2>&1) ||
+  ((${#installed_agent_files[@]} > 0)) || ledger_e2e_fail install 'no installed agent files were found to check'
+  frontmatter_out=$("$python" -E "$repo_dir/ci/frontmatter.py" "${installed_files[@]}" "${installed_agent_files[@]}" 2>&1) ||
     frontmatter_status=$?
-  [ "$frontmatter_status" -eq 0 ] ||
-    ledger_e2e_fail install "installed skill frontmatter check failed (exit $frontmatter_status): ${installed_frontmatter//$'\n'/; }"
+  if [ "$frontmatter_status" -ne 0 ]; then
+    # Name the files by their path under the throwaway home, as the walk does.
+    frontmatter_out=${frontmatter_out//"$home/"/}
+    ledger_e2e_fail install "installed frontmatter check failed (exit $frontmatter_status): ${frontmatter_out//$'\n'/; }"
+  fi
 
   # The pinned ledger: the tag's own tree, checked against its commit.
   GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 --branch "$LEDGER_E2E_TAG" "$LEDGER_E2E_URL" "$scratch/ledger" 2> /dev/null ||

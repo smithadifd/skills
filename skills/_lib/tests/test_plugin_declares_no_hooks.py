@@ -29,11 +29,18 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 THIS_FILE = Path(__file__).resolve()
 # These two files drive the LEDGER plugin's SessionStart hook (not this plugin's removed one).
-# Only the lines that do so are exempt: each path maps to the one regex a stale
-# line must also match, so any other stale line in these files is still a hit.
+# Only the lines that do so are exempt: each path maps to the exact lines that may
+# carry the stale words, compared by string equality after stripping surrounding
+# whitespace. No pattern is involved, so a stale phrase added to an exempt line,
+# or any other stale line in these files, is still a hit.
 LEDGER_HOOK_LINES = {
-    "ci/check.sh": re.compile(r"ledger_e2e_(run_hook|fail) session-start\b"),
-    "ci/fixtures/ledger-e2e-session-start.json": re.compile(r'^\s*"hook_event_name": "SessionStart",?$'),
+    "ci/check.sh": {
+        "out=$(ledger_e2e_run_hook session-start SessionStart '' \"$f_session\")",
+        "*) ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief' ;;",
+    },
+    "ci/fixtures/ledger-e2e-session-start.json": {
+        '"hook_event_name": "SessionStart",',
+    },
 }
 
 MANIFESTS = (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
@@ -79,8 +86,9 @@ def hook_problems(root: Path) -> list[str]:
 def stale_text_hits(root: Path, exempt_lines: dict | None = None) -> list[str]:
     """Lines outside the changelog that name the removed hook, as `path:line`.
 
-    `exempt_lines` maps a root-relative path to a regex: a stale line in that
-    file is skipped only when it also matches the regex. This file is exempt whole.
+    `exempt_lines` maps a root-relative path to a set of exact lines: a stale line
+    in that file is skipped only when it equals one of them after stripping
+    surrounding whitespace. This file is exempt whole.
     """
     exempt_lines = exempt_lines or {}
     hits = []
@@ -96,7 +104,7 @@ def stale_text_hits(root: Path, exempt_lines: dict | None = None) -> list[str]:
             continue
         exempt = exempt_lines.get(rel.as_posix())
         for number, line in enumerate(text.splitlines(), 1):
-            if STALE_TEXT.search(line) and not (exempt and exempt.search(line)):
+            if STALE_TEXT.search(line) and not (exempt and line.strip() in exempt):
                 hits.append(f"{rel.as_posix()}:{number}")
     return hits
 
@@ -260,12 +268,19 @@ def test_the_ledger_hook_lines_themselves_are_exempt(tmp_path):
         tmp_path,
         "ci/check.sh",
         [
-            "out=$(ledger_e2e_run_hook session-start SessionStart '' \"$f_session\")",
-            "ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief'",
+            "  out=$(ledger_e2e_run_hook session-start SessionStart '' \"$f_session\")",
+            "    *) ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief' ;;",
         ],
     )
     assert stale_text_hits(root, LEDGER_HOOK_LINES) == []
     assert stale_text_hits(root) == ["ci/check.sh:1", "ci/check.sh:2"]
+
+
+def test_the_exempt_lines_are_the_ones_the_real_check_script_carries():
+    # Each exempt line must exist verbatim, so a rename cannot leave a stale exemption behind.
+    for rel, lines in LEDGER_HOOK_LINES.items():
+        present = {line.strip() for line in (REPO_ROOT / rel).read_text(encoding="utf-8").splitlines()}
+        assert lines <= present, (rel, lines - present)
 
 
 def test_a_stale_line_planted_elsewhere_in_an_exempt_script_is_a_hit(tmp_path):
@@ -273,11 +288,32 @@ def test_a_stale_line_planted_elsewhere_in_an_exempt_script_is_a_hit(tmp_path):
         tmp_path,
         "ci/check.sh",
         [
-            "ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief'",
+            "    *) ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief' ;;",
             "# The plugin's session-start hook prints the brief.",
         ],
     )
     assert stale_text_hits(root, LEDGER_HOOK_LINES) == ["ci/check.sh:2"]
+
+
+def test_a_stale_phrase_appended_to_an_exempt_line_is_a_hit(tmp_path):
+    root = _exempt_file_root(
+        tmp_path,
+        "ci/check.sh",
+        [
+            "out=$(ledger_e2e_run_hook session-start SessionStart '' \"$f_session\") # the plugin's session-start hook prints the brief",
+            "    *) ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief' ;; # SessionStart",
+        ],
+    )
+    assert stale_text_hits(root, LEDGER_HOOK_LINES) == ["ci/check.sh:1", "ci/check.sh:2"]
+
+
+def test_an_exempt_line_is_matched_whole_not_as_a_substring(tmp_path):
+    root = _exempt_file_root(
+        tmp_path,
+        "ci/fixtures/ledger-e2e-session-start.json",
+        ['  "x": {"hook_event_name": "SessionStart", "y": 1}'],
+    )
+    assert stale_text_hits(root, LEDGER_HOOK_LINES) == ["ci/fixtures/ledger-e2e-session-start.json:1"]
 
 
 def test_a_stale_line_planted_elsewhere_in_the_exempt_fixture_is_a_hit(tmp_path):
@@ -294,11 +330,11 @@ def test_a_stale_line_planted_elsewhere_in_the_exempt_fixture_is_a_hit(tmp_path)
     assert stale_text_hits(root, LEDGER_HOOK_LINES) == ["ci/fixtures/ledger-e2e-session-start.json:3"]
 
 
-def test_an_exempt_regex_applies_only_to_its_own_file(tmp_path):
+def test_an_exempt_line_applies_only_to_its_own_file(tmp_path):
     root = _exempt_file_root(
         tmp_path,
         "ci/other.sh",
-        ["ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief'"],
+        ["    *) ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief' ;;"],
     )
     assert stale_text_hits(root, LEDGER_HOOK_LINES) == ["ci/other.sh:1"]
 

@@ -6,17 +6,20 @@ as a mapping; no top-level key is "hooks". Each near miss refuses with its named
 reason, one `<path>: <reason>` line, exit 1. A missing PyYAML exits 2 with one line.
 """
 
+import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-PARSER = Path(__file__).resolve().parents[3] / "ci" / "frontmatter.py"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PARSER = REPO_ROOT / "ci" / "frontmatter.py"
 GOOD = "---\nname: demo\ndescription: >\n  Use when asked. NOT for real work.\n---\n\nBody.\n"
 
 
-def run(*paths, flags=("-E", "-P")):
+def run(*paths, flags=("-E",)):
     done = subprocess.run(
         [sys.executable, *flags, str(PARSER), *map(str, paths)], capture_output=True, text=True, check=False
     )
@@ -140,3 +143,25 @@ def test_no_files_is_a_usage_error_not_a_pass():
 def test_a_missing_pyyaml_exits_two_with_one_line(tmp_path):
     # -S drops site-packages, so PyYAML cannot be imported.
     assert run(write(tmp_path, GOOD), flags=("-I", "-S")) == (2, ["PyYAML cannot be imported"])
+
+
+def test_the_parser_stays_readable_by_python_3_9():
+    # The lint runs on any python3 a contributor has, so the parser may use no newer syntax.
+    ast.parse(PARSER.read_text(encoding="utf-8"), filename=str(PARSER), feature_version=(3, 9))
+
+
+@pytest.mark.parametrize(
+    ("script", "calls"), [("ci/lint-skills.sh", 2), ("ci/check.sh", 1)], ids=["lint", "check"]
+)
+def test_the_callers_run_the_parser_with_dash_e_only(script, calls):
+    # -P (a script's own directory kept off sys.path) needs Python 3.11; -E alone is enough here,
+    # because the one directory that lands on sys.path is ci/, which holds no yaml module.
+    lines = [
+        line
+        for line in (REPO_ROOT / script).read_text(encoding="utf-8").splitlines()
+        if re.search(r"frontmatter\.py\"?\s", line) and re.search(r"\s-E\s", line)
+    ]
+    assert len(lines) == calls, lines
+    for line in lines:
+        flags = re.findall(r"\s(-[A-Za-z]+)(?=\s)", line.split("frontmatter.py")[0])
+        assert flags == ["-E"], line
