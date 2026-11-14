@@ -4,11 +4,14 @@ Accepted form: `skills/` and `agents/` are real directories, and every entry bel
 (the roots included) is a regular file or a directory by lstat type. Each near miss
 (a symlinked root, entry or nested file, a FIFO, a missing root) is refused by relative
 path. Dot-names and a directory named like an agent are not refused and are not names.
+A skill name follows install.sh's is_skill_name: `_lib` as a directory, or a directory
+holding a regular SKILL.md; `__pycache__` and a directory without a SKILL.md are not names.
 """
 
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -101,6 +104,141 @@ def test_dot_names_and_a_directory_named_like_an_agent_pass_and_are_not_names(tr
     assert shape.names(str(tree)) == ({"demo"}, {"a.md"})
 
 
+def test_pycache_and_a_directory_without_skill_md_are_not_skill_names(tree):
+    (tree / "skills" / "__pycache__").mkdir()
+    (tree / "skills" / "__pycache__" / "m.pyc").write_text("x")
+    (tree / "skills" / "notes").mkdir()
+    (tree / "skills" / "notes" / "README.md").write_text("x")
+    assert shape.violations(str(tree)) == []
+    assert shape.names(str(tree)) == ({"demo"}, {"a.md"})
+
+
+def test_pycache_is_not_a_skill_even_when_it_holds_a_skill_md(tree):
+    (tree / "skills" / "__pycache__").mkdir()
+    (tree / "skills" / "__pycache__" / "SKILL.md").write_text("x")
+    assert shape.names(str(tree)) == ({"demo"}, {"a.md"})
+
+
+def test_a_dot_directory_holding_a_skill_md_is_not_a_name(tree):
+    (tree / "skills" / ".hidden").mkdir()
+    (tree / "skills" / ".hidden" / "SKILL.md").write_text("x")
+    assert shape.names(str(tree)) == ({"demo"}, {"a.md"})
+
+
+def test_a_directory_with_a_skill_md_is_a_name(tree):
+    (tree / "skills" / "second").mkdir()
+    (tree / "skills" / "second" / "SKILL.md").write_text("x")
+    assert shape.names(str(tree)) == ({"demo", "second"}, {"a.md"})
+
+
+def test_lib_is_a_name_as_a_directory_without_a_skill_md(tree):
+    (tree / "skills" / "_lib").mkdir()
+    (tree / "skills" / "_lib" / "helper.py").write_text("x")
+    assert shape.names(str(tree)) == ({"demo", "_lib"}, {"a.md"})
+
+
+def test_lib_is_not_a_name_as_a_regular_file(tree):
+    (tree / "skills" / "_lib").write_text("x")
+    assert shape.violations(str(tree)) == []
+    assert shape.names(str(tree)) == ({"demo"}, {"a.md"})
+
+
+def test_a_skill_md_that_is_a_directory_does_not_make_a_skill(tree):
+    (tree / "skills" / "odd").mkdir()
+    (tree / "skills" / "odd" / "SKILL.md").mkdir()
+    assert shape.names(str(tree)) == ({"demo"}, {"a.md"})
+
+
+def test_a_regular_file_under_skills_is_not_a_name_even_if_named_like_a_skill(tree):
+    (tree / "skills" / "loose").write_text("x")
+    assert shape.names(str(tree)) == ({"demo"}, {"a.md"})
+
+
+def test_a_symlinked_skill_md_is_refused_before_any_name_is_read(tree, tmp_path):
+    (tree / "skills" / "linked").mkdir()
+    os.symlink(tmp_path / "outside" / "f.md", tree / "skills" / "linked" / "SKILL.md")
+    with pytest.raises(ValueError, match="skills.linked.SKILL.md"):
+        shape.names(str(tree))
+
+
+def test_a_listed_skill_directory_removed_before_its_check_raises(tree, monkeypatch):
+    victim = tree / "skills" / "victim"
+    victim.mkdir()
+    (victim / "SKILL.md").write_text("x")
+    real_listdir = os.listdir
+
+    def listdir_then_remove(path):
+        listed = real_listdir(path)
+        if Path(path) == tree / "skills" and victim.exists():
+            shutil.rmtree(victim)
+        return listed
+
+    monkeypatch.setattr(os, "listdir", listdir_then_remove)
+    with pytest.raises(FileNotFoundError):
+        shape.names(str(tree))
+
+
+def test_a_skill_directory_removed_while_its_skill_md_is_checked_raises(tree, monkeypatch):
+    victim = tree / "skills" / "victim"
+    victim.mkdir()
+    (victim / "SKILL.md").write_text("x")
+    real_lstat = os.lstat
+    real_listdir = os.listdir
+    listed = []
+
+    def listdir_noted(path):
+        listed.append(path)
+        return real_listdir(path)
+
+    def lstat_removing_before_skill_md(path, *args, **kwargs):
+        # Only after the listing: violations() lstats the same file earlier and must see it.
+        if listed and Path(path) == victim / "SKILL.md" and victim.exists():
+            shutil.rmtree(victim)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "listdir", listdir_noted)
+    monkeypatch.setattr(os, "lstat", lstat_removing_before_skill_md)
+    with pytest.raises(FileNotFoundError):
+        shape.names(str(tree))
+
+
+def test_a_skill_directory_replaced_while_its_skill_md_is_missing_raises(tree, monkeypatch):
+    # SKILL.md is absent in a directory that still exists, but its identity changed between
+    # the first lstat and the one taken after the miss: not a plain non-skill, so it raises.
+    (tree / "skills" / "notes").mkdir()
+    real_lstat = os.lstat
+    missed = []
+
+    def lstat_changing_identity(path, *args, **kwargs):
+        if Path(path) == tree / "skills" / "notes" / "SKILL.md":
+            missed.append(path)
+        result = real_lstat(path, *args, **kwargs)
+        if missed and Path(path) == tree / "skills" / "notes":
+            fields = list(result)
+            fields[1] += 1
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_changing_identity)
+    with pytest.raises(OSError, match="changed during the scan: notes"):
+        shape.names(str(tree))
+    assert len(missed) == 1
+
+
+def test_the_real_repo_names_match_install_sh_is_skill_name():
+    # The drift catch: ask install.sh's own rule about every entry directly under skills/ and
+    # require the same answer from names(). Run install.sh's function, not a copy of it.
+    skills_dir = REPO_ROOT / "skills"
+    entries = sorted(os.listdir(skills_dir))
+    script = (
+        'skills_dir="$1"; shift; '
+        + re.search(r"^is_skill_name\(\) \{.*?^\}", (REPO_ROOT / "install.sh").read_text(encoding="utf-8"), re.S | re.M).group(0)
+        + '; for n in "$@"; do if is_skill_name "$n"; then printf "%s\\n" "$n"; fi; done'
+    )
+    done = subprocess.run(["bash", "-c", script, "bash", str(skills_dir), *entries], capture_output=True, text=True, check=True)
+    assert set(done.stdout.split()) == shape.names(str(REPO_ROOT))[0]
+
+
 def test_a_venv_symlink_outside_the_two_roots_passes(tree, tmp_path):
     (tree / ".venv" / "bin").mkdir(parents=True)
     os.symlink(sys.executable, tree / ".venv" / "bin" / "python")
@@ -126,7 +264,8 @@ def test_the_real_repo_tree_passes():
 
 
 def test_check_sh_invokes_source_shape_exactly_twice():
-    # One call refuses a bad tree before the installs; one loads names() for the footprint allowlist.
+    # One call refuses a bad tree before the installs; one reads names() for the footprint allowlist,
+    # also before the installs. The footprint check itself never loads the module.
     lines = [
         line
         for line in (REPO_ROOT / "ci" / "check.sh").read_text(encoding="utf-8").splitlines()

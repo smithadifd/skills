@@ -492,8 +492,8 @@ check_ledger_e2e() {
   # that follow symlinks, so a symlinked root, entry or nested file would copy
   # outside data into HOME while every later assertion stayed green: before any
   # install, nothing under either root (the roots included) may be anything
-  # but a regular file or a directory. The one module also supplies the name
-  # sets for the footprint allowlist below.
+  # but a regular file or a directory. The same module supplies the name sets
+  # for the footprint allowlist, read once just before the first install.
   local shape_out shape_status=0
   shape_out=$("$python" -I -B "$repo_dir/ci/source_shape.py" "$src" 2>&1) || shape_status=$?
   [ "$shape_status" -eq 0 ] ||
@@ -516,6 +516,25 @@ check_ledger_e2e() {
   local decoy record_diff record_status=0
   ledger_e2e_record "$src" "$scratch/record-before.json" ||
     ledger_e2e_fail install 'recording the source copy failed before the install'
+  # The footprint allowlist's skill and agent name sets are what the source copy
+  # holds here, before any branch install code runs: source_shape.names() (which
+  # runs violations() first and raises on any finding) reads them once, and they
+  # reach the footprint check below only through this shell variable, which no
+  # install process can write. Nothing re-reads the copy for them afterwards, so
+  # an install (or a process it leaves behind) that adds or swaps an entry in the
+  # copy at any later point adds no name to the allowlist: the name it installs
+  # fails the footprint check. A raise here fails the step before any install.
+  local allow_names
+  allow_names=$("$python" -I -B - "$repo_dir/ci/source_shape.py" "$src" <<'PY'
+import importlib.util, json, sys
+
+spec = importlib.util.spec_from_file_location("source_shape", sys.argv[1])
+shape = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(shape)
+skills, agents = shape.names(sys.argv[2])
+print(json.dumps({"skills": sorted(skills), "agents": sorted(agents)}))
+PY
+  ) || ledger_e2e_fail install 'reading the skill and agent names of the source copy failed before the install'
   local install_env=(env -i HOME="$home" PATH=/usr/bin:/bin CLAUDE_CONFIG_DIR="$decoy_ccd" XDG_CONFIG_HOME="$decoy_xdg" TMPDIR="$decoy_tmp")
   (cd "$src" && "${install_env[@]}" ./install.sh --all > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all failed'
   (cd "$src" && "${install_env[@]}" ./install.sh --all-agents > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all-agents failed'
@@ -546,11 +565,14 @@ PY
   # path under the throwaway home, directories included, is either listed here
   # or fails the step by its relative path. Allowed, and nothing else:
   #   .claude, .claude/skills, .claude/agents (directories);
-  #   .claude/skills/NAME (a directory), the NAMEs being exactly this
-  #     repository's skills/*/ directory names, and any regular file or
-  #     directory below it;
-  #   .claude/agents/A.md (a regular file), the names being exactly this
-  #     repository's agents/*.md, with nothing deeper.
+  #   .claude/skills/NAME (a directory), the NAMEs being exactly the skill
+  #     names read from the source copy before the first install (above), and
+  #     any regular file or directory below it;
+  #   .claude/agents/A.md (a regular file), the names being exactly the agent
+  #     names read at the same point, with nothing deeper.
+  # The two name sets arrive as one JSON argument, never from the source copy:
+  # a missing, unparsable or malformed argument, or an empty set, fails the
+  # step as an allowlist error.
   # An entry that is not a regular file or a directory (a symlink, fifo,
   # socket, device) fails by path wherever it sits and is never followed. This
   # covers ~/.claude/hooks, ~/.claude/plugins, ~/.claude.json and any settings
@@ -558,21 +580,41 @@ PY
   # the frontmatter parser's, below; the plugin root is the plugin no-hooks
   # test's.
   local footprint footprint_status=0
-  footprint=$("$python" -I -B - "$home" "$src" "$repo_dir/ci/source_shape.py" <<'PY' 2>&1
-import importlib.util, os, stat, sys
-
-home, repo, shape_path = sys.argv[1], sys.argv[2], sys.argv[3]
-spec = importlib.util.spec_from_file_location("source_shape", shape_path)
-shape = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(shape)
+  footprint=$("$python" -I -B - "$home" "$allow_names" <<'PY' 2>&1
+import json, os, stat, sys
 
 
 def raise_error(error):
     raise error
 
 
+def passed_sets(argv):
+    # Exactly the home and one JSON object {"skills": [...], "agents": [...]}, each a
+    # non-empty list of non-empty strings; anything else is None.
+    if len(argv) != 3:
+        return None
+    try:
+        passed = json.loads(argv[2])
+    except ValueError:
+        return None
+    if not isinstance(passed, dict) or sorted(passed) != ["agents", "skills"]:
+        return None
+    sets = []
+    for key in ("skills", "agents"):
+        value = passed[key]
+        if not isinstance(value, list) or not value or not all(isinstance(n, str) and n for n in value):
+            return None
+        sets.append(set(value))
+    return sets
+
+
+allowed = passed_sets(sys.argv)
+if allowed is None:
+    print("allowlist error: the pre-install skill and agent name sets are missing or unreadable")
+    sys.exit(2)
+home = sys.argv[1]
+skills, agents = allowed
 try:
-    skills, agents = shape.names(repo)
     bad = []
     seen_skills, seen_agents = set(), set()
     if not stat.S_ISDIR(os.lstat(home).st_mode):
