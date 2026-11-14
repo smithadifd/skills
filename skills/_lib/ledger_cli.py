@@ -94,36 +94,42 @@ exits 1. While (2) runs, the path is briefly absent.
 In detail: the new text goes to a temp file in the same folder. (1) With no
 file at the path, setup links the temp file there (`os.link`, which fails rather
 than replace a file that appeared meanwhile; that refuses `config_changed`).
-(2) Otherwise setup renames the file to `topic.json.setup-backup` beside it,
-which captures exactly the version at the path at that instant, and compares
-the backup's bytes with what it read. Equal: it links the temp file to the
-path, again never replacing a file. Different: it links the backup back to the
-path and refuses `config_changed`. If at either link a file has reappeared at
-the path, setup leaves that file, keeps the backup and refuses `config_changed`
-naming it. No step renames or replaces onto the path. After a successful
-commit setup never removes the backup: it stays beside the override as the
-record of the version it displaced, and the success line names it. Setup
-removes a backup only after a successful restore, and then only while it is
-the same file as the one at the path.
+(2) Otherwise setup renames the file to `topic.json.setup-backup` beside it
+(the in-flight name), which captures exactly the version at the path at that
+instant, and compares the backup's bytes with what it read. Equal: it links the
+temp file to the path, again never replacing a file. Different: it links the
+backup back to the path and refuses `config_changed`. If at either link a file
+has reappeared at the path, setup leaves that file, keeps the backup and
+refuses `config_changed` naming it. No step renames or replaces onto the path
+except the one below. After a successful commit setup renames the in-flight
+file to `topic.json.setup-previous` (the completed-version name), replacing
+any older file of that name, and the success line names it. The rename moves
+the file itself, so a racing in-place edit stays in it. Setup never unlinks
+either file after a commit. It removes the in-flight file only after a
+successful restore, and then only while it is the same file as the one at the
+path.
 
-The backup has that fixed name so a later run finds it. A run that stopped
-while the path was absent left the file's version in the backup: the next run,
-before it reads anything, links the backup back to the path. A backup that is
-the same file as the one at the path (a run that stopped after its restore) is
-dropped. Any other backup found beside a present file is a version setup cannot
-place, so a run that would move the file aside refuses `config_changed` naming
-it rather than move a file over it: check it, remove it and rerun.
+Only an interrupted commit is ever recovered. The in-flight name is fixed so a
+later run finds it: a run that stopped while the path was absent left the
+file's version there, and the next run, before it reads anything, links it back
+to the path. An in-flight file that is the same file as the one at the path (a
+run that stopped after its restore) is dropped. Any other in-flight file found
+beside a present file is a version setup cannot place, so a run that would move
+the file aside refuses `config_changed` naming it rather than move a file over
+it: check it, remove it and rerun. The completed-version file is a record that
+setup never reads: deleting or editing the override later never brings its keys
+back. If the rename to it fails after a successful commit, setup still exits 0
+and its line says the version it replaced was left at the in-flight path; that
+file is then handled as above, and neither file is ever unlinked.
 
 Residual: a writer that edits in place, on a descriptor it opened before the
-move, and writes after setup's compare, lands its edit in the backup file. When
-that write lands before setup's last read of the backup, setup names the
-backup and exits 1 (`config_changed`), though `ledger_cli` is already written
-at the path; a write that lands after that last read is in the backup too,
-which setup keeps, and setup exits 0 naming it. Merge any such edit by hand.
-A kept backup beside a present file is never restored (recovery restores only
-while the path is absent). The next run that would move the file aside refuses
-`config_changed` naming the backup rather than replace it: check it, remove it
-and rerun. Editors that save by writing a new file and
+move, and writes after setup's compare, lands its edit in the displaced file.
+When that write lands before setup's last read of it, setup names the
+completed-version file and exits 1 (`config_changed`), though `ledger_cli` is
+already written at the path; a write that lands after that last read is in the
+file too, which setup keeps, and setup exits 0 naming it. Merge any such edit
+by hand. The next successful commit replaces the completed-version file, so
+keep what you need from it. Editors that save by writing a new file and
 renaming it over the path are covered. After a restore, the check that the
 backup is the file at the path and its removal are two steps: a save by rename
 that lands between them replaces the restored version at the path, as that
@@ -142,7 +148,7 @@ check runs.
 Setup runs the first `ledger` on `PATH` once, for the compatibility check, so
 run it from a shell whose `PATH` you trust. A rerun after a stop at any step is
 safe: the file is either as it was, holds the pinned path, or is absent with its
-version in the backup, which the rerun restores before it reads; a rerun after
+version in the in-flight backup, which the rerun restores before it reads; a rerun after
 success refuses `ledger_cli_setup_exists`. This plugin declares no hooks: the
 ledger's brief at session start comes from the ledger's own `ledger-hooks`
 plugin, which takes no `ledger_cli` setting and which this file does not govern.
@@ -207,8 +213,11 @@ SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
 SETUP_LOCK_FAILED = "ledger_cli_setup_lock_failed"
 # The lock file sits beside the override and is named by appending this to its name.
 LOCK_SUFFIX = ".lock"
-# The fixed name, beside the override, that setup moves the file it displaces to.
+# The in-flight name, beside the override, that setup moves the file it displaces to. Crash recovery
+# reads only this name.
 BACKUP_SUFFIX = ".setup-backup"
+# The completed-version name: a successful commit renames the in-flight file to it. Never read.
+PREVIOUS_SUFFIX = ".setup-previous"
 
 
 class ConfigError(ValueError):
@@ -520,8 +529,13 @@ class _Refusal(Exception):
 
 
 def _backup_path(target: Path) -> Path:
-    """The one fixed place beside `target` that setup moves the displaced file to."""
+    """The one fixed in-flight place beside `target` that setup moves the displaced file to."""
     return target.parent / (target.name + BACKUP_SUFFIX)
+
+
+def _previous_path(target: Path) -> Path:
+    """Where a completed commit keeps the displaced version; crash recovery never reads it."""
+    return target.parent / (target.name + PREVIOUS_SUFFIX)
 
 
 def _drop_backup_if_restored(target: Path, backup: Path) -> None:
@@ -566,7 +580,7 @@ def _recover(target: Path) -> None:
     _drop_backup_if_restored(target, backup)
 
 
-def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optional[Path], bool]:
+def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optional[Path], bool, bool]:
     """Write `text` at `target`, the version setup read being `expected` (None: absent).
 
     Setup never removes or overwrites a version of the override file it did not read. It commits
@@ -577,11 +591,15 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optiona
 
     The caller holds the setup lock, which serializes setup runs; the move aside and the no-clobber
     links guard against a writer that takes no lock. Nothing renames or replaces onto `target`.
-    Raises _Refusal or OSError with nothing committed. The backup is never removed after a commit.
-    Returns (backup, edited): backup is None when the file was created (nothing displaced), else
-    the kept backup's path; edited is True when a re-read of the backup shows it no longer holds
-    `expected` (a writer edited it in place after the compare) or could not be read. A write that
-    lands after that re-read is in the kept backup too.
+    Raises _Refusal or OSError with nothing committed. After a commit the in-flight backup is
+    renamed to the completed-version name (`topic.json.setup-previous`, replacing an older one) so
+    crash recovery, which reads only the in-flight name, never restores it; neither file is ever
+    unlinked. The rename moves the file itself, so an in-place writer's later write stays in it.
+    Returns (kept, edited, left): kept is None when the file was created (nothing displaced), else
+    the path of the displaced version (the completed-version file, or the in-flight file when the
+    rename failed, in which case `left` is True); edited is True when a re-read of that file shows
+    it no longer holds `expected` (a writer edited it in place after the compare) or could not be
+    read. A write that lands after that re-read is in the kept file too.
     """
     backup = _backup_path(target)
     fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
@@ -600,7 +618,7 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optiona
                     f"{target} was created while setup was running; it is left as it is and nothing "
                     "was written, rerun setup",
                 ) from None
-            return None, False
+            return None, False, False
         # (2) A backup already here may hold a version setup never read: never move a file over it.
         if os.path.lexists(backup):
             raise _Refusal(
@@ -642,12 +660,19 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optiona
         except OSError:
             _restore(target, backup)
             raise
-        # Committed. The backup stays as the record of the displaced version; note whether an
-        # in-place writer has already edited it.
+        # Committed. The displaced version stays as a record under the completed-version name, which
+        # crash recovery never reads; os.rename moves the file itself, so an in-place writer's
+        # later write stays in it. If the rename fails the file stays at the in-flight name.
+        kept, left = _previous_path(target), False
         try:
-            return backup, backup.read_bytes() != expected
+            os.rename(backup, kept)
         except OSError:
-            return backup, True
+            kept, left = backup, True
+        # Note whether an in-place writer has already edited it.
+        try:
+            return kept, kept.read_bytes() != expected, left
+        except OSError:
+            return kept, True, left
     finally:
         try:
             os.unlink(temp)
@@ -741,7 +766,7 @@ def _setup_locked(override: Path, target: Path) -> int:
         )
     config[CONFIG_KEY] = pinned
     try:
-        kept, edited = _commit(target, json.dumps(config, indent=2) + "\n", before)
+        kept, edited, left = _commit(target, json.dumps(config, indent=2) + "\n", before)
     except _Refusal as refusal:
         return _refuse_setup(refusal.token, refusal.detail)
     except OSError as exc:
@@ -755,7 +780,12 @@ def _setup_locked(override: Path, target: Path) -> int:
             "was edited after setup compared it or could not be read: merge any edit in it by hand, "
             "then remove it",
         )
-    if kept is not None:
+    if left:
+        print(
+            f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced was left at {kept} "
+            f"(it could not be renamed to {_previous_path(target)}): remove it before the next setup run"
+        )
+    elif kept is not None:
         print(f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced is kept at {kept}")
     else:
         print(f"{CONFIG_KEY} set to {pinned} in {target}")
