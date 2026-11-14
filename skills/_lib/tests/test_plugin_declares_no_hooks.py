@@ -5,9 +5,9 @@ and question-picker answers. This plugin used to carry a `SessionStart` hook tha
 printed the same brief, so a person who installed both saw it twice. The hook is
 gone, and these checks keep it gone:
 
-- no `hooks` path of any kind at the plugin root (a directory holding files, a
-  symlink, even a dangling one, or any other entry), and no file under `hooks/`
-  (no `hooks.json`, no `session-start.py`);
+- no `hooks` path of any kind at the plugin root: denied by existence, so a
+  regular file, a directory (empty or not), a symlink (even a dangling one) and
+  a gitlink (which checks out as an empty directory) are each one problem;
 - no `hooks` key in the plugin manifest or in a marketplace plugin entry, the
   other place Claude Code reads hook declarations from;
 - no text outside the changelog that says this plugin carries a session-start
@@ -21,6 +21,7 @@ with the same functions.
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -46,17 +47,10 @@ STALE_TEXT = re.compile(
 def hook_problems(root: Path) -> list[str]:
     """Every way `root` declares a plugin hook, each as one named problem line."""
     problems = []
-    hooks_dir = root / "hooks"
-    # lexists, not exists: a dangling symlink is still a hooks path.
-    if os.path.lexists(hooks_dir):
-        if hooks_dir.is_symlink():
-            problems.append("hooks is a symlink (a plugin hook path)")
-        elif not hooks_dir.is_dir():
-            problems.append("hooks is not a directory (a plugin hook path)")
-        else:
-            for path in sorted(hooks_dir.rglob("*")):
-                if path.is_symlink() or path.is_file():
-                    problems.append(f"hooks/{path.relative_to(hooks_dir).as_posix()} is a plugin hook file")
+    # Deny by existence, whatever the type: lexists so a dangling symlink counts, and no
+    # walk over descendants so an empty directory (a checked-out gitlink) counts too.
+    if os.path.lexists(root / "hooks"):
+        problems.append("hooks exists at the plugin root (a plugin hook path)")
     for rel in MANIFESTS:
         path = root / rel
         if not path.is_file():
@@ -139,41 +133,72 @@ def test_a_session_start_entry_in_hooks_json_is_a_problem(tmp_path):
     (root / "hooks").mkdir()
     entry = {"hooks": [{"type": "command", "command": "true"}]}
     (root / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [entry]}}), encoding="utf-8")
-    assert hook_problems(root) == ["hooks/hooks.json is a plugin hook file"]
+    assert hook_problems(root) == ["hooks exists at the plugin root (a plugin hook path)"]
 
 
 def test_a_dangling_hooks_symlink_is_a_problem(tmp_path):
     root = _plugin_root(tmp_path)
     (root / "hooks").symlink_to(tmp_path / "nowhere")
     assert not (root / "hooks").exists()
-    assert hook_problems(root) == ["hooks is a symlink (a plugin hook path)"]
+    assert hook_problems(root) == ["hooks exists at the plugin root (a plugin hook path)"]
 
 
 def test_a_hooks_symlink_to_a_directory_is_a_problem(tmp_path):
     root = _plugin_root(tmp_path)
     (tmp_path / "elsewhere").mkdir()
     (root / "hooks").symlink_to(tmp_path / "elsewhere")
-    assert hook_problems(root) == ["hooks is a symlink (a plugin hook path)"]
+    assert hook_problems(root) == ["hooks exists at the plugin root (a plugin hook path)"]
 
 
 def test_a_hooks_path_that_is_a_plain_file_is_a_problem(tmp_path):
     root = _plugin_root(tmp_path)
     (root / "hooks").write_text("not a directory\n", encoding="utf-8")
-    assert hook_problems(root) == ["hooks is not a directory (a plugin hook path)"]
+    assert hook_problems(root) == ["hooks exists at the plugin root (a plugin hook path)"]
+
+
+def test_an_empty_hooks_directory_is_a_problem(tmp_path):
+    root = _plugin_root(tmp_path)
+    (root / "hooks").mkdir()
+    assert list((root / "hooks").iterdir()) == []
+    assert hook_problems(root) == ["hooks exists at the plugin root (a plugin hook path)"]
+
+
+def _git(repo: Path, *args: str) -> None:
+    # Identity on the command line, never written to any config; the repo is one the test made.
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_a_committed_gitlink_named_hooks_is_a_problem(tmp_path):
+    source = _plugin_root(tmp_path / "src")
+    _git(source, "init", "-q")
+    _git(source, "add", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json")
+    _git(source, "commit", "-q", "-m", "base")
+    _git(source, "update-index", "--add", "--cacheinfo", "160000," + "ab" * 20 + ",hooks")
+    _git(source, "commit", "-q", "-m", "gitlink")
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "-q", str(source), str(checkout)], check=True, capture_output=True)
+    # A real clone holds the gitlink as an empty directory: no file, no symlink under it.
+    assert (checkout / "hooks").is_dir()
+    assert list((checkout / "hooks").iterdir()) == []
+    assert hook_problems(checkout) == ["hooks exists at the plugin root (a plugin hook path)"]
 
 
 def test_a_dangling_symlink_inside_hooks_is_a_problem(tmp_path):
     root = _plugin_root(tmp_path)
     (root / "hooks").mkdir()
     (root / "hooks" / "hooks.json").symlink_to(tmp_path / "nowhere")
-    assert hook_problems(root) == ["hooks/hooks.json is a plugin hook file"]
+    assert hook_problems(root) == ["hooks exists at the plugin root (a plugin hook path)"]
 
 
 def test_a_session_start_script_is_a_problem(tmp_path):
     root = _plugin_root(tmp_path)
     (root / "hooks").mkdir()
     (root / "hooks" / "session-start.py").write_text("print('brief')\n", encoding="utf-8")
-    assert hook_problems(root) == ["hooks/session-start.py is a plugin hook file"]
+    assert hook_problems(root) == ["hooks exists at the plugin root (a plugin hook path)"]
 
 
 def test_hooks_declared_in_the_plugin_manifest_are_a_problem(tmp_path):
