@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Read the frontmatter of SKILL.md files and name every problem.
 
-Usage: python3 -E -P ci/frontmatter.py FILE...
+Usage: python3 -E ci/frontmatter.py FILE...
 
-(-E -P keep PyYAML in the user site reachable and keep the current directory
-off the import path.)
+(-E ignores the PYTHON* environment variables, so PYTHONPATH cannot add an
+import path, and leaves PyYAML in the user site reachable. Without -P, this
+script's own directory, ci/, is first on sys.path. That is safe because ci/
+holds no module named yaml, so `import yaml` cannot find anything there. The
+current directory is not on the path when a script is run.)
 
 Grammar, per file:
   - the text is split into lines at each newline character;
