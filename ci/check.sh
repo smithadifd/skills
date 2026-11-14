@@ -314,6 +314,368 @@ check_lint_fixtures() {
   "$repo_dir/ci/test-lint.sh"
 }
 
+# The stand-alone check: the ledger repository at one pinned tag plus this
+# repository's skills, alone, with no other tooling. It installs the sdlc skills
+# into a throwaway home, clones the ledger at its pinned tag (the one use of the
+# network), and drives the hooks the tag's own plugin registers with recorded
+# hook inputs against a temporary database. No model is called. Every step
+# that fails is named in the message, and none is skipped.
+# The ledger repository's clone URL is the opaque input LEDGER_E2E_URL, which CI
+# sets and a local run must set. The check never parses or prints it; the commit
+# pin below is the integrity check, so any URL that yields that commit works.
+LEDGER_E2E_TAG=v0.2.0
+# The commit the tag points at: the clone is checked against it.
+LEDGER_E2E_SHA=ba1e6758c276ea1ab8ba8b8fd05dd40a142d9f18
+
+ledger_e2e_fail() {
+  fail "ledger-e2e step $1: $2"
+}
+
+# The command lines hooks.json registers for one event (and tool), one per line.
+ledger_e2e_hook_commands() {
+  "$1" -I - "$2" "$3" "$4" <<'PY'
+import json, re, sys
+path, event, tool = sys.argv[1:4]
+config = json.load(open(path, encoding="utf-8"))
+for entry in config["hooks"].get(event, []):
+    matcher = entry.get("matcher", "")
+    if tool and matcher not in ("", "*") and not re.fullmatch(matcher, tool):
+        continue
+    for hook in entry["hooks"]:
+        print(hook["command"])
+PY
+}
+
+# Run every command hooks.json names for one event with a recorded input on
+# stdin, as Claude Code does. Prints their stdout; a non-zero exit fails the step.
+ledger_e2e_run_hook() {
+  local step=$1 event=$2 tool=$3 input=$4 command out commands
+  commands=$(ledger_e2e_hook_commands "$ledger_e2e_python" "$ledger_e2e_hooks" "$event" "$tool") ||
+    ledger_e2e_fail "$step" 'hooks.json could not be read'
+  while IFS= read -r command; do
+    [ -n "$command" ] || continue
+    out=$("${ledger_e2e_env[@]}" CLAUDE_PLUGIN_ROOT="$ledger_e2e_plugin" /bin/sh -c "$command" < "$input") ||
+      ledger_e2e_fail "$step" "the registered $event hook exited non-zero"
+    printf '%s' "$out"
+  done <<< "$commands"
+}
+
+# One ledger call under the throwaway environment, by explicit path.
+ledger_e2e_ledger() {
+  "${ledger_e2e_env[@]}" LEDGER_HARNESS=ci "$ledger_e2e_bin/ledger" "$@"
+}
+
+# Read a JSON envelope on stdin and print the value of a Python expression on `d`, or the refusal code.
+ledger_e2e_json() {
+  "$ledger_e2e_python" -I -c 'import json, sys; e = json.load(sys.stdin); d = e["data"]; print(eval(sys.argv[1]) if e["ok"] else "refused: " + str(e["error"]["code"]))' "$1"
+}
+
+# Write a JSON record of every entry under a directory (the root as ".",
+# ignored paths and directories included, symlinks never followed) to a file:
+# file type, permission bits, uid, gid and modification time in nanoseconds; for
+# a regular file also its size, link count and the sha256 of its contents; for
+# a symlink its target. Only regular files are opened. A walk or stat error
+# fails the call.
+ledger_e2e_record() {
+  "$ledger_e2e_python" -I -B - "$1" "$2" <<'PY'
+import hashlib, json, os, stat, sys
+
+
+def raise_error(error):
+    raise error
+
+
+root, out = sys.argv[1], sys.argv[2]
+entries = [(".", root)]
+for base, dirs, files in os.walk(root, followlinks=False, onerror=raise_error):
+    for name in dirs + files:
+        path = os.path.join(base, name)
+        entries.append((os.path.relpath(path, root), path))
+record = {}
+for rel, path in entries:
+    st = os.lstat(path)
+    row = [stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, st.st_mtime_ns]
+    if stat.S_ISREG(st.st_mode):
+        with open(path, "rb") as handle:
+            row += [st.st_size, st.st_nlink, hashlib.sha256(handle.read()).hexdigest()]
+    elif stat.S_ISLNK(st.st_mode):
+        row.append(os.readlink(path))
+    record[rel] = row
+with open(out, "w") as handle:
+    json.dump(record, handle, sort_keys=True)
+PY
+}
+
+check_ledger_e2e() {
+  local scratch home python out asked name
+  # Fail closed: no URL, no run. The message names the variable, never a value.
+  [ -n "${LEDGER_E2E_URL:-}" ] ||
+    ledger_e2e_fail setup "LEDGER_E2E_URL is unset; set it to the ledger repository's clone URL"
+  scratch=$(mktemp -d)
+  home="$scratch/home"
+  mkdir -p -- "$home" "$scratch/bin" "$scratch/data"
+
+  # The interpreter that runs the pinned ledger, by absolute path.
+  python=$(command -v python3) || ledger_e2e_fail python 'no python3 on PATH'
+  "$python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' ||
+    ledger_e2e_fail python "the pinned ledger needs Python 3.11 or newer; $python is older"
+  ledger_e2e_python=$python
+
+  # Both installs and every later step run against a writable throwaway copy
+  # of this source tree (ignored paths included, .git left out), beside the
+  # throwaway home; no permission is changed on it. A record of every entry
+  # of the copy (see ledger_e2e_record) taken immediately before the first
+  # install must equal the one taken immediately after the second, with
+  # nothing exempted: a difference in any recorded field fails step install by
+  # relative path, never by contents. Not observed, by design: access and
+  # change times, inode numbers, extended attributes, ACLs and file flags;
+  # writes to .git, or to any path outside HOME, the copy and the three
+  # decoys; a change made and fully reverted during the installs, modification
+  # time included.
+  local src="$scratch/src"
+  ledger_e2e_src=$src
+  trap 'rm -r -- "$ledger_e2e_src" 2> /dev/null' EXIT
+  "$python" -I -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True, ignore=shutil.ignore_patterns(".git"))' "$repo_dir" "$src" ||
+    ledger_e2e_fail install 'copying the source tree failed'
+  # install.sh reads skills/ and agents/ through globs and [ -d ] / [ -f ] tests
+  # that follow symlinks, so a symlinked root, entry or nested file would copy
+  # outside data into HOME while every later assertion stayed green: before any
+  # install, nothing under either root (the roots included) may be anything
+  # but a regular file or a directory. The one module also supplies the name
+  # sets for the footprint allowlist below.
+  local shape_out shape_status=0
+  shape_out=$("$python" -I -B "$repo_dir/ci/source_shape.py" "$src" 2>&1) || shape_status=$?
+  [ "$shape_status" -eq 0 ] ||
+    ledger_e2e_fail install "skills/ or agents/ holds an entry that is not a regular file or a directory (exit $shape_status): ${shape_out//$'\n'/; }"
+  local fixtures="$src/ci/fixtures"
+  local f_session="$fixtures/ledger-e2e-session-start.json"
+  local f_prompt="$fixtures/ledger-e2e-prompt.json"
+  local f_picker="$fixtures/ledger-e2e-picker.json"
+  for name in "$f_session" "$f_prompt" "$f_picker"; do
+    [ -f "$name" ] || ledger_e2e_fail fixtures "missing recorded hook input: ${name##*/}"
+  done
+
+  # The sdlc plugin from this working tree. It declares no hooks; its skills
+  # and agents install into the throwaway home the way a plugin install lays
+  # them. Both installs run with an empty environment but for HOME, a PATH of
+  # the two system binary directories and three decoys that name scratch paths
+  # outside HOME: a write through any of them, or into this repository, fails
+  # the step below.
+  local decoy_ccd="$scratch/decoy-ccd" decoy_xdg="$scratch/decoy-xdg" decoy_tmp="$scratch/decoy-tmp"
+  local decoy record_diff record_status=0
+  ledger_e2e_record "$src" "$scratch/record-before.json" ||
+    ledger_e2e_fail install 'recording the source copy failed before the install'
+  local install_env=(env -i HOME="$home" PATH=/usr/bin:/bin CLAUDE_CONFIG_DIR="$decoy_ccd" XDG_CONFIG_HOME="$decoy_xdg" TMPDIR="$decoy_tmp")
+  (cd "$src" && "${install_env[@]}" ./install.sh --all > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all failed'
+  (cd "$src" && "${install_env[@]}" ./install.sh --all-agents > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all-agents failed'
+  ledger_e2e_record "$src" "$scratch/record-after.json" ||
+    ledger_e2e_fail install 'recording the source copy failed after the install'
+  [ -f "$home/.claude/skills/ticket/ticket.py" ] || ledger_e2e_fail sdlc-install 'the ticket skill was not installed'
+  [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || ledger_e2e_fail sdlc-install 'the shared _lib was not installed'
+  for decoy in "$decoy_ccd" "$decoy_xdg" "$decoy_tmp"; do
+    if [ -e "$decoy" ] || [ -L "$decoy" ]; then
+      ledger_e2e_fail install "the install wrote outside HOME: ${decoy#"$scratch"/}"
+    fi
+  done
+  record_diff=$("$python" -I -B - "$scratch/record-before.json" "$scratch/record-after.json" <<'PY' 2>&1
+import json, sys
+
+before = json.load(open(sys.argv[1]))
+after = json.load(open(sys.argv[2]))
+changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+if changed:
+    print("\n".join(changed))
+    sys.exit(1)
+PY
+  ) || record_status=$?
+  [ "$record_status" -eq 0 ] ||
+    ledger_e2e_fail install "the install changed the source tree (exit $record_status): ${record_diff//$'\n'/; }"
+
+  # The footprint allowlist owns everything the two installs lay down: every
+  # path under the throwaway home, directories included, is either listed here
+  # or fails the step by its relative path. Allowed, and nothing else:
+  #   .claude, .claude/skills, .claude/agents (directories);
+  #   .claude/skills/NAME (a directory), the NAMEs being exactly this
+  #     repository's skills/*/ directory names, and any regular file or
+  #     directory below it;
+  #   .claude/agents/A.md (a regular file), the names being exactly this
+  #     repository's agents/*.md, with nothing deeper.
+  # An entry that is not a regular file or a directory (a symlink, fifo,
+  # socket, device) fails by path wherever it sits and is never followed. This
+  # covers ~/.claude/hooks, ~/.claude/plugins, ~/.claude.json and any settings
+  # file without naming them. Hook declarations inside the allowed files are
+  # the frontmatter parser's, below; the plugin root is the plugin no-hooks
+  # test's.
+  local footprint footprint_status=0
+  footprint=$("$python" -I -B - "$home" "$src" "$repo_dir/ci/source_shape.py" <<'PY' 2>&1
+import importlib.util, os, stat, sys
+
+home, repo, shape_path = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("source_shape", shape_path)
+shape = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(shape)
+
+
+def raise_error(error):
+    raise error
+
+
+try:
+    skills, agents = shape.names(repo)
+    bad = []
+    seen_skills, seen_agents = set(), set()
+    if not stat.S_ISDIR(os.lstat(home).st_mode):
+        bad.append(". (the throwaway home is not a directory)")
+    for base, dirs, files in os.walk(home, followlinks=False, onerror=raise_error):
+        for name in sorted(dirs + files):
+            path = os.path.join(base, name)
+            rel = os.path.relpath(path, home)
+            parts = rel.split(os.sep)
+            kind = stat.S_IFMT(os.lstat(path).st_mode)
+            is_dir = kind == stat.S_IFDIR
+            is_file = kind == stat.S_IFREG
+            if not (is_dir or is_file):
+                bad.append(rel + " (not a regular file or directory)")
+                continue
+            ok = False
+            if parts == [".claude"] or parts in ([".claude", "skills"], [".claude", "agents"]):
+                ok = is_dir
+            elif len(parts) == 3 and parts[:2] == [".claude", "skills"]:
+                ok = is_dir and parts[2] in skills
+                if ok:
+                    seen_skills.add(parts[2])
+            elif len(parts) > 3 and parts[:2] == [".claude", "skills"]:
+                ok = parts[2] in skills
+            elif len(parts) == 3 and parts[:2] == [".claude", "agents"]:
+                ok = is_file and parts[2] in agents
+                if ok:
+                    seen_agents.add(parts[2])
+            if not ok:
+                bad.append(rel)
+    bad += [".claude/skills/%s (missing)" % n for n in sorted(skills - seen_skills)]
+    bad += [".claude/agents/%s (missing)" % n for n in sorted(agents - seen_agents)]
+except OSError as error:
+    print("walk error: %s" % type(error).__name__)
+    sys.exit(2)
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PY
+  ) || footprint_status=$?
+  [ "$footprint_status" -eq 0 ] ||
+    ledger_e2e_fail install "install left a path outside the footprint allowlist (exit $footprint_status): ${footprint//$'\n'/; }"
+
+  # Every installed SKILL.md (any case, any depth) and every installed agent
+  # file goes through the one parser the lint uses (ci/frontmatter.py), which
+  # refuses a hooks key. `-E` keeps PyYAML in the user site reachable.
+  local installed_files=() installed_file frontmatter_out frontmatter_status=0
+  while IFS= read -r -d '' installed_file; do
+    installed_files+=("$installed_file")
+  done < <(find "$home/.claude/skills" -type f -iname 'SKILL.md' -print0)
+  ((${#installed_files[@]} > 0)) || ledger_e2e_fail install 'no installed SKILL.md files were found to check'
+  shopt -s nullglob
+  local installed_agent_files=("$home"/.claude/agents/*)
+  shopt -u nullglob
+  ((${#installed_agent_files[@]} > 0)) || ledger_e2e_fail install 'no installed agent files were found to check'
+  frontmatter_out=$("$python" -E "$src/ci/frontmatter.py" "${installed_files[@]}" "${installed_agent_files[@]}" 2>&1) ||
+    frontmatter_status=$?
+  if [ "$frontmatter_status" -ne 0 ]; then
+    # Name the files by their path under the throwaway home, as the walk does.
+    frontmatter_out=${frontmatter_out//"$home/"/}
+    ledger_e2e_fail install "installed frontmatter check failed (exit $frontmatter_status): ${frontmatter_out//$'\n'/; }"
+  fi
+
+  # The pinned ledger: the tag's own tree, checked against its commit.
+  GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 --branch "$LEDGER_E2E_TAG" "$LEDGER_E2E_URL" "$scratch/ledger" 2> /dev/null ||
+    ledger_e2e_fail ledger-install "git clone of LEDGER_E2E_URL at $LEDGER_E2E_TAG failed"
+  [ "$(git -C "$scratch/ledger" rev-parse HEAD)" = "$LEDGER_E2E_SHA" ] ||
+    ledger_e2e_fail ledger-install "$LEDGER_E2E_TAG is not commit $LEDGER_E2E_SHA"
+  ledger_e2e_plugin="$scratch/ledger/plugins/ledger-hooks"
+  ledger_e2e_hooks="$ledger_e2e_plugin/hooks/hooks.json"
+  [ -f "$ledger_e2e_hooks" ] || ledger_e2e_fail hooks-file "the tag has no plugins/ledger-hooks/hooks/hooks.json"
+
+  # The only `ledger` on PATH is the pinned one: PATH holds the scratch bin
+  # folder and the system folders, and the CLI is called by explicit path.
+  ledger_e2e_bin="$scratch/bin"
+  # The paths reach the launcher as shell-quoted words, so a space in either is safe.
+  printf '#!/bin/bash\nPYTHONPATH=%q PYTHONDONTWRITEBYTECODE=1 exec %q -m ledger "$@"\n' "$scratch/ledger" "$python" > "$ledger_e2e_bin/ledger"
+  chmod +x "$ledger_e2e_bin/ledger"
+  ledger_e2e_env=(env -i HOME="$home" PATH="$ledger_e2e_bin:/usr/bin:/bin" LEDGER_DB="$scratch/data/ledger.db" LANG=C.UTF-8 TICKET_LEDGER_CLI="$ledger_e2e_bin/ledger")
+
+  # Step 1: session start prints the brief.
+  out=$(ledger_e2e_run_hook session-start SessionStart '' "$f_session")
+  case $out in
+    'LEDGER AGENT CONTRACT'*) ;;
+    *) ledger_e2e_fail session-start 'the SessionStart hook did not print the ledger brief' ;;
+  esac
+  printf 'PASS: ledger-e2e session start printed the brief\n'
+
+  # The database and the open ask the picker answer is for. The ask is event 2,
+  # the event the recorded picker input names.
+  ledger_e2e_ledger new --id it-e2e --type gate --title 'e2e fixture' > /dev/null ||
+    ledger_e2e_fail setup 'could not create the fixture item'
+  asked=$(ledger_e2e_ledger --json append --item it-e2e --kind decision.asked --payload \
+    '{"question":"Ship the release today?","options":[{"label":"ship","description":"Ship it today"},{"label":"hold","description":"Hold it until Friday"}],"scope":"this release"}' |
+    ledger_e2e_json 'd["event"]["id"]') || ledger_e2e_fail setup 'could not record the fixture ask'
+  [ "$asked" = 2 ] || ledger_e2e_fail setup "the fixture ask is event $asked, but the recorded picker input names event 2"
+
+  # Step 2: a submitted prompt is captured.
+  ledger_e2e_run_hook prompt-capture UserPromptSubmit '' "$f_prompt" > /dev/null
+  out=$(ledger_e2e_ledger --json events --kind utterance.captured | ledger_e2e_json '[e["payload"].get("text") for e in d["events"]]') ||
+    ledger_e2e_fail prompt-capture 'could not read the captured utterances'
+  [ "$out" = "['Ship the release notes today, and hold the migration until Friday.']" ] ||
+    ledger_e2e_fail prompt-capture "the prompt was not captured once as recorded; captures: $out"
+  printf 'PASS: ledger-e2e prompt captured\n'
+
+  # Step 3: a picker answer is captured; step 4 binds it. When the plugin
+  # registers no working picker hook, nothing was captured and pick has no
+  # answer to bind, so that step is the one that goes red.
+  ledger_e2e_run_hook pick PostToolUse AskUserQuestion "$f_picker" > /dev/null
+  out=$(ledger_e2e_ledger --json events --kind utterance.captured | ledger_e2e_json '[e["payload"]["picker"]["chosen_label"] for e in d["events"] if "picker" in e["payload"]]') ||
+    ledger_e2e_fail pick 'could not read the captured utterances'
+  [ "$out" = "['hold']" ] ||
+    ledger_e2e_fail pick "no picker answer was captured for pick to bind (the plugin's PostToolUse AskUserQuestion hook did not capture it); picker captures: $out"
+  printf 'PASS: ledger-e2e picker answer captured\n'
+  out=$(ledger_e2e_ledger --json pick it-e2e --ask "$asked" | ledger_e2e_json '(d["election"]["payload"]["chosen"], d["election"]["payload"]["quote_ref"] == d["utterance"]["id"])') ||
+    ledger_e2e_fail pick 'ledger pick did not bind the captured picker answer'
+  [ "$out" = "('hold', True)" ] || ledger_e2e_fail pick "pick elected the wrong answer or bound another quote: $out"
+  printf 'PASS: ledger-e2e pick bound the picker answer\n'
+
+  # Step 5: ticket opens a ledger item, through the installed ticket skill, and
+  # stops the pass so the item has a stop to resume.
+  printf '%s\n' '{"key":"E2E-1","title":"Stand-alone check ticket","status":"open","description":"Open a ledger item from a ticket.","acceptance_criteria":["The item exists on the ledger"],"url":"https://example.invalid/E2E-1"}' > "$scratch/ticket.json"
+  out=$("${ledger_e2e_env[@]}" LEDGER_HARNESS=ci "$python" -I -B - "$home/.claude/skills/ticket" "$scratch/ticket.json" "$scratch" 2>&1 <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ticket
+store = ticket.choose_store(sys.argv[3], "E2E-1", "Stand-alone check ticket")
+assert store.selection.startswith("ledger "), store.selection
+session = ticket.TicketPass.open("E2E-1", ticket.FileTicketSource(sys.argv[2]), store)
+session.more_info("someone_else", "Which release?", role="owner")
+PY
+  ) || ledger_e2e_fail ticket-open "the ticket skill did not open and stop a pass on the ledger: $out"
+  out=$(ledger_e2e_ledger --json query --item E2E-1 | ledger_e2e_json '(d["items"][0]["item_id"], d["items"][0]["type"])') ||
+    ledger_e2e_fail ticket-open 'the ledger has no item for the opened ticket'
+  [ "$out" = "('E2E-1', 'ticket')" ] || ledger_e2e_fail ticket-open "the opened ticket is not a ledger ticket item: $out"
+  printf 'PASS: ledger-e2e ticket opened a ledger item\n'
+
+  # Step 6: resume lists the stop.
+  out=$(ledger_e2e_ledger --json resume | ledger_e2e_json '[(i["item_id"], i["stop"]["point"]) for i in d["items"]]') ||
+    ledger_e2e_fail resume 'ledger resume failed'
+  [ "$out" = "[('E2E-1', 'waiting on owner: Which release?')]" ] ||
+    ledger_e2e_fail resume "resume does not list the ticket's stop: $out"
+  printf 'PASS: ledger-e2e resume listed the stop\n'
+
+  # Step 7: search finds the decision the pick recorded.
+  out=$(ledger_e2e_ledger --json search --type decision hold | ledger_e2e_json '[c["title"] for c in d["cards"]]') ||
+    ledger_e2e_fail search 'ledger search failed'
+  case $out in
+    *"elected: Ship the release today?"*) ;;
+    *) ledger_e2e_fail search "search did not find the elected decision; cards: $out" ;;
+  esac
+  printf 'PASS: ledger-e2e search found the decision\n'
+}
+
 case ${1-} in
   install-all) check_install_all ;;
   install-one) check_install_one ;;
@@ -329,6 +691,7 @@ case ${1-} in
   reviewer-axes) check_reviewer_axes ;;
   lint) check_lint ;;
   lint-fixtures) check_lint_fixtures ;;
+  ledger-e2e) check_ledger_e2e ;;
   '')
     check_install_all
     check_install_one
@@ -343,6 +706,7 @@ case ${1-} in
     check_reviewer_axes
     check_lint
     check_lint_fixtures
+    check_ledger_e2e
     ;;
   *)
     printf 'Unknown check: %s\n' "$1" >&2

@@ -1,0 +1,36 @@
+{
+  "session_id": "3f2b8c1e-5d4a-4e7b-9a10-2c6d8e4f1a2b",
+  "transcript_path": "/tmp/fixture/transcript.jsonl",
+  "cwd": "/tmp/fixture",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_use_id": "toolu_01FixtureAskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "header": "ask 2",
+        "multiSelect": false,
+        "options": [
+          {"description": "Ship it today", "label": "ship"},
+          {"description": "Hold it until Friday", "label": "hold"}
+        ],
+        "question": "[ask 2] Ship the release today? (scope: this release)"
+      }
+    ]
+  },
+  "tool_response": {
+    "questions": [
+      {
+        "header": "ask 2",
+        "multiSelect": false,
+        "options": [
+          {"description": "Ship it today", "label": "ship"},
+          {"description": "Hold it until Friday", "label": "hold"}
+        ],
+        "question": "[ask 2] Ship the release today? (scope: this release)"
+      }
+    ],
+    "answers": {"[ask 2] Ship the release today? (scope: this release)": "hold"}
+  }
+}

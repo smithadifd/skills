@@ -2,7 +2,13 @@
 # Lint the skills repository. Usage: ci/lint-skills.sh [root]
 #
 # Rules (each failure prints "LINT FAIL [rule]: ..."):
-#   frontmatter       every skill has name, kind, version and description
+#   frontmatter       every skill has a closed, parseable frontmatter mapping with
+#                     name, kind, version and description
+#   skill-hooks       no skill's frontmatter has a top-level hooks key
+#   agent-hooks       no agent's frontmatter has a top-level hooks key (Claude Code
+#                     honours one in a user agent), and each agent file's
+#                     frontmatter parses
+#   frontmatter-parser ci/frontmatter.py ran (PyYAML importable, exit 0 or 1)
 #   description-size description plus when_to_use stay under 1,536 characters
 #   triggers          the description names a trigger phrase and a NOT-for case
 #   skill-size        SKILL.md body warns above 16,384 bytes, fails above 32,768
@@ -17,6 +23,7 @@
 # the origin remote and let a line with the repository's own URL pass.
 set -uo pipefail
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 cd "$root" || { printf 'LINT ERROR: cannot enter %s\n' "$root" >&2; exit 2; }
 
@@ -62,11 +69,6 @@ field() {
   ' "$1"
 }
 
-# closed_frontmatter <file>: succeeds when line 1 and a later line are both ---.
-closed_frontmatter() {
-  awk 'NR == 1 { if ($0 != "---") exit 1; next } $0 == "---" { found = 1; exit 0 } END { exit found ? 0 : 1 }' "$1"
-}
-
 # body_bytes <file>: bytes after the closing frontmatter marker.
 body_bytes() {
   awk 'BEGIN { n = 0 } n >= 2 { print } $0 == "---" && n < 2 { n++ }' "$1" | wc -c | tr -d ' '
@@ -82,12 +84,77 @@ shopt -s nullglob
 skill_files=(skills/*/SKILL.md)
 [ "${#skill_files[@]}" -gt 0 ] || lint_fail frontmatter 'no skills/*/SKILL.md files found'
 
+# One parser verdict over every skill: ci/frontmatter.py (PyYAML), the same
+# parser ci/check.sh runs over the installed copies. Its output is one
+# "<path>: <reason>" line per problem; exit 1 is problems, anything else but 0
+# means the parser itself did not run.
+unclosed_files=
+if [ "${#skill_files[@]}" -gt 0 ]; then
+  parser_status=0
+  parser_out=$(python3 -E "$script_dir/frontmatter.py" "${skill_files[@]}" 2>&1) || parser_status=$?
+  case "$parser_status" in
+    0) ;;
+    1)
+      while IFS= read -r parser_line; do
+        [ -n "$parser_line" ] || continue
+        case "$parser_line" in
+          *': declares hooks')
+            lint_fail skill-hooks "${parser_line%': declares hooks'} declares hooks in its frontmatter" ;;
+          *': no opening ---')
+            unclosed_files+="${parser_line%': no opening ---'}"$'\n' ;;
+          *': no closing ---')
+            unclosed_files+="${parser_line%': no closing ---'}"$'\n' ;;
+          *': does not parse')
+            lint_fail frontmatter "${parser_line%': does not parse'} frontmatter does not parse as YAML" ;;
+          *': not a mapping')
+            lint_fail frontmatter "${parser_line%': not a mapping'} frontmatter is not a mapping" ;;
+          *)
+            lint_fail frontmatter-parser "unrecognised parser output: $parser_line" ;;
+        esac
+      done <<< "$parser_out"
+      ;;
+    *)
+      lint_fail frontmatter-parser "ci/frontmatter.py exited $parser_status: $(printf '%s' "$parser_out" | tr '\n' ' ')"
+      ;;
+  esac
+fi
+
+# The same parser over every agent file: Claude Code honours a hooks key in a
+# user agent's frontmatter, so an agent that declares one is a hook. A file the
+# parser cannot read as frontmatter fails closed under the same rule.
+agent_files=(agents/*.md)
+if [ "${#agent_files[@]}" -gt 0 ]; then
+  agent_status=0
+  agent_out=$(python3 -E "$script_dir/frontmatter.py" "${agent_files[@]}" 2>&1) || agent_status=$?
+  case "$agent_status" in
+    0) ;;
+    1)
+      while IFS= read -r agent_line; do
+        [ -n "$agent_line" ] || continue
+        case "$agent_line" in
+          *': declares hooks')
+            lint_fail agent-hooks "${agent_line%': declares hooks'} declares hooks in its frontmatter" ;;
+          *': no opening ---' | *': no closing ---' | *': does not parse' | *': not a mapping')
+            lint_fail agent-hooks "${agent_line%: *} has no frontmatter that parses as a mapping (${agent_line##*: })" ;;
+          *)
+            lint_fail frontmatter-parser "unrecognised parser output: $agent_line" ;;
+        esac
+      done <<< "$agent_out"
+      ;;
+    *)
+      lint_fail frontmatter-parser "ci/frontmatter.py exited $agent_status over agents: $(printf '%s' "$agent_out" | tr '\n' ' ')"
+      ;;
+  esac
+fi
+
 for file in "${skill_files[@]}"; do
   dir=${file%/SKILL.md}
   skill=${dir##*/}
 
-  closed_frontmatter "$file" ||
-    lint_fail frontmatter "$file has no closed frontmatter (a --- line first, and a --- line closing it)"
+  case $'\n'"$unclosed_files" in
+    *$'\n'"$file"$'\n'*)
+      lint_fail frontmatter "$file has no closed frontmatter (a --- line first, and a --- line closing it)" ;;
+  esac
 
   missing=
   for key in name kind version description; do
