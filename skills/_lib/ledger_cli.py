@@ -59,9 +59,10 @@ Setup. `python3 ledger_cli.py setup` is the one step that pins the ledger CLI:
 it resolves `ledger` once (`shutil.which`), runs the compatibility check on it,
 and writes its absolute path (made absolute, symlinks kept) as `ledger_cli` in
 `~/.claude/skill-config/topic.json`, keeping every other key. From then on rule
-1 decides for every skill and nothing reads `PATH`. Setup writes atomically (a
-temp file in the same directory, then `os.replace`) and refuses, exit 1 with one
-stderr line that starts with its token and nothing written, unless it can write:
+1 decides for every skill and nothing reads `PATH`. Setup refuses, exit 1 with
+one stderr line that starts with its token, unless it can write; every refusal
+writes nothing, except the one `ledger_cli_setup_config_changed` case after a
+commit that the residual below describes:
 
 - `ledger_cli_setup_lock_failed`: the lock file beside the override could not
   be opened or locked. Checked first, with no program run.
@@ -76,15 +77,57 @@ stderr line that starts with its token and nothing written, unless it can write:
 - `ledger_cli_setup_not_found`: no `ledger` on `PATH`.
 - `ledger_cli_setup_incompatible`: the one found fails the compatibility check;
   the line names what failed.
-- `ledger_cli_setup_config_changed`: the override file changed between setup
-  reading it and writing it, by a writer that does not take the lock (an editor,
-  say), so that writer's edit is never lost; rerun.
+- `ledger_cli_setup_config_changed`: when setup came to write, the override
+  file was not the version setup read, because a writer that does not take the
+  lock (an editor, say) saved it meanwhile, or a backup from an earlier run
+  stands beside it (below). The file that writer left stays at the path; the
+  line names the backup when setup kept one; rerun.
 - `ledger_cli_setup_write_failed`: the directory or file could not be written.
+
+How setup writes. Setup never removes or overwrites a version of the override
+file it did not read. It commits only by (1) creating the file when absent, or
+(2) moving the existing file aside, confirming its bytes equal what setup read,
+and creating the new file no-clobber. In every other case the file a
+non-locking writer left is the one at the path when setup exits, and setup
+exits 1. While (2) runs, the path is briefly absent.
+
+In detail: the new text goes to a temp file in the same folder. (1) With no
+file at the path, setup links the temp file there (`os.link`, which fails rather
+than replace a file that appeared meanwhile; that refuses `config_changed`).
+(2) Otherwise setup renames the file to `topic.json.setup-backup` beside it,
+which captures exactly the version at the path at that instant, and compares
+the backup's bytes with what it read. Equal: it links the temp file to the
+path, again never replacing a file. Different: it links the backup back to the
+path and refuses `config_changed`. If at either link a file has reappeared at
+the path, setup leaves that file, keeps the backup and refuses `config_changed`
+naming it. No step renames or replaces onto the path. Setup removes the backup
+only after a successful commit, and then only while it still holds the bytes
+setup read, or after a successful restore, and then only while it is the same
+file as the one at the path.
+
+The backup has that fixed name so a later run finds it. A run that stopped
+while the path was absent left the file's version in the backup: the next run,
+before it reads anything, links the backup back to the path. A backup that is
+the same file as the one at the path (a run that stopped after its restore) is
+dropped. Any other backup found beside a present file is a version setup cannot
+place, so a run that would move the file aside refuses `config_changed` naming
+it rather than move a file over it: check it, remove it and rerun.
+
+Residual: a writer that edits in place, on a descriptor it opened before the
+move, and writes after setup's compare, lands its edit in the backup file. When
+that write lands before setup's last read of the backup, setup keeps the
+backup, names it and exits 1 (`config_changed`), though `ledger_cli` is already
+written at the path; a write that lands after that last read goes to the
+removed backup and is lost. Editors that save by writing a new file and
+renaming it over the path are covered. After a restore, the check that the
+backup is the file at the path and its removal are two steps: a save by rename
+that lands between them replaces the restored version at the path, as that
+save would have without setup, and the backup's link to it goes with it.
 
 Concurrent setup runs serialize. Setup holds an exclusive `fcntl.flock` on
 `topic.json.lock`, a file beside the override (created if absent, never deleted,
 and the folder is created first when it is missing), from its first read of the
-override through the `os.replace`, and the second run waits for it. Once it holds
+override through its commit or restore, and the second run waits for it. Once it holds
 the lock it reads the file afresh and applies the same rules above, so it finds
 the first run's pin and refuses `ledger_cli_setup_exists`: two runs never both
 write, and neither pin is silently overwritten. The lock is released when setup
@@ -93,7 +136,8 @@ check runs.
 
 Setup runs the first `ledger` on `PATH` once, for the compatibility check, so
 run it from a shell whose `PATH` you trust. A rerun after a stop at any step is
-safe: the file is either as it was or holds the pinned path, and a rerun after
+safe: the file is either as it was, holds the pinned path, or is absent with its
+version in the backup, which the rerun restores before it reads; a rerun after
 success refuses `ledger_cli_setup_exists`. This plugin declares no hooks: the
 ledger's brief at session start comes from the ledger's own `ledger-hooks`
 plugin, which takes no `ledger_cli` setting and which this file does not govern.
@@ -158,6 +202,8 @@ SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
 SETUP_LOCK_FAILED = "ledger_cli_setup_lock_failed"
 # The lock file sits beside the override and is named by appending this to its name.
 LOCK_SUFFIX = ".lock"
+# The fixed name, beside the override, that setup moves the file it displaces to.
+BACKUP_SUFFIX = ".setup-backup"
 
 
 class ConfigError(ValueError):
@@ -459,34 +505,149 @@ def _current_bytes(path: Path) -> Optional[bytes]:
         return None
 
 
-class _ConfigChanged(Exception):
-    """The override file is not what setup read."""
+class _Refusal(Exception):
+    """Setup stops with one named refusal: its token and the rest of its line."""
+
+    def __init__(self, token: str, detail: str):
+        super().__init__(f"{token}: {detail}")
+        self.token = token
+        self.detail = detail
 
 
-def _write_atomic(target: Path, text: str, expected: Optional[bytes]) -> None:
-    """Replace `target` with `text` in one step, only if it still holds `expected` (None: absent).
+def _backup_path(target: Path) -> Path:
+    """The one fixed place beside `target` that setup moves the displaced file to."""
+    return target.parent / (target.name + BACKUP_SUFFIX)
 
-    The caller holds the setup lock, which serializes setup runs; the comparison guards
-    against a writer that takes no lock.
+
+def _drop_backup_if_restored(target: Path, backup: Path) -> None:
+    """Remove `backup` only while it is the same file as the one at `target`: no version is lost."""
+    try:
+        if os.path.samefile(backup, target):
+            os.unlink(backup)
+    except OSError:
+        pass
+
+
+def _restore(target: Path, backup: Path) -> None:
+    """Put the moved-aside file back at `target` without replacing anything there.
+
+    Raises _Refusal, keeping the backup, when a file has reappeared at `target` or the link fails.
     """
-    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(backup, target)
+    except FileExistsError:
+        raise _Refusal(
+            SETUP_CONFIG_CHANGED,
+            f"{target} reappeared while setup was putting it back; it is left as it is, nothing was "
+            f"written, and the version setup moved aside is kept at {backup}",
+        ) from None
+    except OSError as exc:
+        raise _Refusal(
+            SETUP_WRITE_FAILED,
+            f"could not put {target} back ({_one_line(exc.strerror or str(exc))}); its version is "
+            f"kept at {backup}, and rerunning setup puts it back",
+        ) from None
+    _drop_backup_if_restored(target, backup)
+
+
+def _recover(target: Path) -> None:
+    """Undo a stopped run before reading: put a backup back at an absent path; drop a restored one."""
+    backup = _backup_path(target)
+    if not os.path.lexists(backup):
+        return
+    if not os.path.lexists(target):
+        _restore(target, backup)
+        return
+    _drop_backup_if_restored(target, backup)
+
+
+def _commit(target: Path, text: str, expected: Optional[bytes]) -> Optional[Path]:
+    """Write `text` at `target`, the version setup read being `expected` (None: absent).
+
+    Setup never removes or overwrites a version of the override file it did not read. It commits
+    only by (1) creating the file when absent, or (2) moving the existing file aside, confirming its
+    bytes equal what setup read, and creating the new file no-clobber. In every other case the file
+    a non-locking writer left is the one at the path when setup exits, and setup exits 1. While (2)
+    runs, the path is briefly absent.
+
+    The caller holds the setup lock, which serializes setup runs; the move aside and the no-clobber
+    links guard against a writer that takes no lock. Nothing renames or replaces onto `target`.
+    Raises _Refusal or OSError with nothing committed. Returns None once committed with the backup
+    removed, or the backup's path when committed but the backup no longer holds `expected` (a
+    writer edited it in place after the compare) or could not be removed: it is kept.
+    """
+    backup = _backup_path(target)
     fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        if expected is not None:
-            shutil.copymode(target, temp)
-        if _current_bytes(target) != expected:
-            raise _ConfigChanged()
-        os.replace(temp, target)
-    except BaseException:
+        if expected is None:
+            # (1) Create-if-absent: os.link never replaces a file at its destination.
+            try:
+                os.link(temp, target)
+            except FileExistsError:
+                raise _Refusal(
+                    SETUP_CONFIG_CHANGED,
+                    f"{target} was created while setup was running; it is left as it is and nothing "
+                    "was written, rerun setup",
+                ) from None
+            return None
+        # (2) A backup already here may hold a version setup never read: never move a file over it.
+        if os.path.lexists(backup):
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{backup} is left from an earlier setup run and may hold a version of {target}; "
+                "nothing was written: check it, remove it and rerun setup",
+            )
+        try:
+            os.rename(target, backup)
+        except FileNotFoundError:
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{target} was removed while setup was running; nothing was written, rerun setup",
+            ) from None
+        # The path is absent from here until a link puts a file back.
+        try:
+            unchanged = backup.read_bytes() == expected
+            if unchanged:
+                shutil.copymode(backup, temp)
+        except OSError:
+            _restore(target, backup)
+            raise
+        if not unchanged:
+            _restore(target, backup)
+            kept = f"; an earlier version is kept at {backup}" if os.path.lexists(backup) else ""
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{target} changed while setup was running; it is left as it is and nothing was "
+                f"written, rerun setup{kept}",
+            )
+        try:
+            os.link(temp, target)
+        except FileExistsError:
+            raise _Refusal(
+                SETUP_CONFIG_CHANGED,
+                f"{target} reappeared while setup was writing it; it is left as it is, nothing was "
+                f"written, and the version setup read is kept at {backup}",
+            ) from None
+        except OSError:
+            _restore(target, backup)
+            raise
+        # Committed. Drop the backup only while it still holds the version setup read.
+        try:
+            if backup.read_bytes() != expected:
+                return backup
+            os.unlink(backup)
+        except OSError:
+            return backup
+        return None
+    finally:
         try:
             os.unlink(temp)
-        except OSError:
+        except FileNotFoundError:
             pass
-        raise
 
 
 def _take_lock(target: Path) -> int:
@@ -531,6 +692,10 @@ def setup() -> int:
 def _setup_locked(override: Path, target: Path) -> int:
     """Setup's read, checks and write, run with the lock held."""
     try:
+        _recover(target)
+    except _Refusal as refusal:
+        return _refuse_setup(refusal.token, refusal.detail)
+    try:
         before = _current_bytes(override)
     except OSError as exc:
         return _refuse_setup(SETUP_CONFIG_UNREADABLE, f"could not read {override} ({exc}); nothing was written")
@@ -571,14 +736,19 @@ def _setup_locked(override: Path, target: Path) -> int:
         )
     config[CONFIG_KEY] = pinned
     try:
-        _write_atomic(target, json.dumps(config, indent=2) + "\n", before)
-    except _ConfigChanged:
-        return _refuse_setup(
-            SETUP_CONFIG_CHANGED, f"{override} changed while setup was running; nothing was written, rerun setup"
-        )
+        kept = _commit(target, json.dumps(config, indent=2) + "\n", before)
+    except _Refusal as refusal:
+        return _refuse_setup(refusal.token, refusal.detail)
     except OSError as exc:
         return _refuse_setup(
             SETUP_WRITE_FAILED, f"could not write {target} ({_one_line(exc.strerror or str(exc))}); nothing was written"
+        )
+    if kept is not None:
+        return _refuse_setup(
+            SETUP_CONFIG_CHANGED,
+            f"{CONFIG_KEY} is set to {pinned} in {target}, but the version it replaced, kept at {kept}, "
+            "was edited after setup compared it or could not be removed: merge any edit in it by hand, "
+            "then remove it",
         )
     print(f"{CONFIG_KEY} set to {pinned} in {target}")
     return 0

@@ -500,6 +500,7 @@ SETUP_TOKENS = (
 
 
 LOCK_NAME = "topic.json.lock"
+BACKUP_NAME = "topic.json.setup-backup"
 
 
 def _plant(directory, marker):
@@ -890,16 +891,16 @@ def test_two_setup_runs_that_race_end_with_one_pin_and_the_other_refusing_exists
     monkeypatch.setattr(module.shutil, "which", lambda name, *args, **kwargs: found[threading.current_thread().name])
     paused = threading.Event()
     release = threading.Event()
-    real_replace = os.replace
+    real_link = os.link
 
-    def replace_after_a_pause_in_run_a(source, destination):
-        # Run "a" has read, compared and written its temp file; hold it just before the replace.
+    def link_after_a_pause_in_run_a(source, destination, *args, **kwargs):
+        # Run "a" has read the absent file and written its temp file; hold it just before its commit.
         if threading.current_thread().name == "setup-a":
             paused.set()
             release.wait(30)
-        return real_replace(source, destination)
+        return real_link(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(module.os, "replace", replace_after_a_pause_in_run_a)
+    monkeypatch.setattr(module.os, "link", link_after_a_pause_in_run_a)
     results = {}
 
     def run(name):
@@ -908,7 +909,7 @@ def test_two_setup_runs_that_race_end_with_one_pin_and_the_other_refusing_exists
     first = threading.Thread(target=run, args=("setup-a",), name="setup-a")
     second = threading.Thread(target=run, args=("setup-b",), name="setup-b")
     first.start()
-    assert paused.wait(30), "run a never reached its replace"
+    assert paused.wait(30), "run a never reached its commit"
     second.start()
     second.join(1)
     still_waiting = second.is_alive()
@@ -998,3 +999,332 @@ def test_setup_takes_no_config_flag_and_the_no_argument_form_is_unchanged(machin
     assert machine.run("nonsense").returncode == 2
     out = _out(machine.run("--config", str(tmp_path / "missing.json")))
     assert (out["ledger_cli"], out["rule"]) == (None, NOT_CONFIGURED)
+
+
+# --- Setup's commit: capture the displaced file, verify it, create no-clobber ----------
+
+
+def _same_path(one, two):
+    return os.path.realpath(os.fspath(one)) == os.path.realpath(os.fspath(two))
+
+
+def _backup(home):
+    return _override_file(home).parent / BACKUP_NAME
+
+
+def test_an_editor_save_in_the_commit_window_is_the_file_left_at_the_path(machine, monkeypatch, capsys):
+    """A non-locking editor saves (write a sibling, rename it over the path) at the first step of
+    setup's commit that touches the path, whichever primitive that is; its save must survive."""
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    editor = b'{"keep": 1, "saved_by": "editor"}'
+    real = {"rename": os.rename, "replace": os.replace, "link": os.link}
+    fired = []
+
+    def editor_save():
+        sibling = path.parent / ".editor-save.tmp"
+        sibling.write_bytes(editor)
+        real["replace"](sibling, path)
+
+    def wrap(name):
+        def call(source, destination, *args, **kwargs):
+            if not fired and (_same_path(source, path) or _same_path(destination, path)):
+                fired.append(name)
+                editor_save()
+            return real[name](source, destination, *args, **kwargs)
+
+        return call
+
+    for name in real:
+        monkeypatch.setattr(module.os, name, wrap(name))
+    result = module.setup()
+    for name, function in real.items():
+        monkeypatch.setattr(module.os, name, function)
+    captured = capsys.readouterr()
+    assert result == 1, f"setup exited {result}; the file now holds {path.read_bytes()!r}"
+    assert path.read_bytes() == editor, "the editor's save is the file at the path"
+    assert captured.out == "" and len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("ledger_cli_setup_config_changed: ")
+    assert fired == ["rename"], "the first step that touches the path is the move aside"
+    _no_temp_files(machine.home_dir)
+    # A rerun reads the editor's version and keeps its key.
+    assert module.setup() == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "keep": 1,
+        "saved_by": "editor",
+        "ledger_cli": str(machine.ledger),
+    }
+    _no_temp_files(machine.home_dir)
+
+
+def test_an_editor_that_creates_the_absent_file_just_before_the_link_keeps_its_file(
+    machine, monkeypatch, capsys
+):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _override_file(machine.home_dir)
+    editor = b'{"made": "by the editor"}'
+    real_link = os.link
+
+    def create_then_link(source, destination, *args, **kwargs):
+        if _same_path(destination, path) and not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(editor)
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", create_then_link)
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    captured = capsys.readouterr()
+    assert result == 1, f"setup exited {result}; the file now holds {path.read_bytes()!r}"
+    assert path.read_bytes() == editor
+    assert captured.err.startswith("ledger_cli_setup_config_changed: ") and len(captured.err.splitlines()) == 1
+    _no_temp_files(machine.home_dir)
+
+
+def test_a_file_that_reappears_before_the_commit_link_is_left_and_the_read_version_kept(
+    machine, monkeypatch, capsys
+):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    editor = b'{"keep": 1, "saved_by": "editor"}'
+    real_link = os.link
+
+    def save_then_link(source, destination, *args, **kwargs):
+        if _same_path(destination, path) and not path.exists():
+            path.write_bytes(editor)
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", save_then_link)
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    captured = capsys.readouterr()
+    assert result == 1, f"setup exited {result}; the file now holds {path.read_bytes()!r}"
+    assert path.read_bytes() == editor
+    backup = _backup(machine.home_dir)
+    assert backup.read_bytes() == b'{"keep": 1}', "the version setup read is kept"
+    assert captured.err.startswith("ledger_cli_setup_config_changed: ")
+    assert str(backup) in captured.err
+
+
+def test_crash_recovery_puts_the_backup_back_before_setup_reads(machine, monkeypatch):
+    # A run that stopped while the path was absent left the file's version in the backup.
+    backup = _backup(machine.home_dir)
+    backup.parent.mkdir(parents=True)
+    backup.write_text(json.dumps({"keep": 1, "x": [2]}), encoding="utf-8")
+    proc = machine.run("setup")
+    assert proc.returncode == 0, proc.stderr
+    written = json.loads(_override_file(machine.home_dir).read_text(encoding="utf-8"))
+    assert written == {"keep": 1, "x": [2], "ledger_cli": str(machine.ledger)}
+    _no_temp_files(machine.home_dir)
+
+
+def test_a_run_that_dies_between_the_move_aside_and_the_link_is_recovered_by_the_next(machine, monkeypatch):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    real_link = os.link
+
+    def die_before_the_commit(source, destination, *args, **kwargs):
+        if _same_path(destination, path):
+            raise SystemExit("killed")
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", die_before_the_commit)
+    with pytest.raises(SystemExit):
+        module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    assert not path.exists()
+    assert _backup(machine.home_dir).read_bytes() == b'{"keep": 1}'
+    proc = machine.run("setup")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(path.read_text(encoding="utf-8")) == {"keep": 1, "ledger_cli": str(machine.ledger)}
+    _no_temp_files(machine.home_dir)
+
+
+def test_a_backup_left_beside_a_present_file_is_never_moved_over(machine):
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    backup = _backup(machine.home_dir)
+    backup.write_bytes(b'{"older": "version"}')
+    line = _refusal(machine.run("setup"), "ledger_cli_setup_config_changed")
+    assert str(backup) in line
+    assert path.read_bytes() == b'{"keep": 1}'
+    assert backup.read_bytes() == b'{"older": "version"}'
+
+
+def test_a_backup_that_is_the_same_file_as_the_present_one_is_dropped(machine):
+    # A run that stopped after putting the backup back left two links to one file.
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    os.link(path, _backup(machine.home_dir))
+    proc = machine.run("setup")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(path.read_text(encoding="utf-8")) == {"keep": 1, "ledger_cli": str(machine.ledger)}
+    _no_temp_files(machine.home_dir)
+
+
+def test_an_in_place_edit_after_the_compare_lands_in_the_kept_backup(machine, monkeypatch, capsys):
+    """The residual: a writer holding a descriptor opened before the move writes after the compare."""
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    edited = b'{"keep": 1, "edited": "in place"}'
+    handle = open(path, "r+b")
+    real_link = os.link
+
+    def edit_in_place_then_link(source, destination, *args, **kwargs):
+        if _same_path(destination, path) and not path.exists():
+            handle.seek(0)
+            handle.write(edited)
+            handle.truncate()
+            handle.flush()
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", edit_in_place_then_link)
+    try:
+        result = module.setup()
+    finally:
+        monkeypatch.setattr(module.os, "link", real_link)
+        handle.close()
+    captured = capsys.readouterr()
+    backup = _backup(machine.home_dir)
+    assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert backup.read_bytes() == edited, "the in-place edit is kept"
+    assert captured.err.startswith("ledger_cli_setup_config_changed: ") and str(backup) in captured.err
+    assert json.loads(path.read_text(encoding="utf-8")) == {"keep": 1, "ledger_cli": str(machine.ledger)}
+
+
+def test_the_moved_pin_is_still_replaced_with_its_keys_and_mode_kept(machine, tmp_path):
+    dead = tmp_path / "gone" / "ledger"
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(dead), "keep": 1}))
+    path.chmod(0o600)
+    proc = machine.run("setup")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(path.read_text(encoding="utf-8")) == {"ledger_cli": str(machine.ledger), "keep": 1}
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    _no_temp_files(machine.home_dir)
+
+
+def _edit_during_probe(module, monkeypatch, path, content):
+    """A non-locking writer edits the file while setup runs its compatibility check."""
+    real_probe = module.probe
+
+    def probe_while_another_writer_edits(cli, timeout=module.PROBE_TIMEOUT_SECONDS):
+        path.write_bytes(content)
+        return real_probe(cli, timeout)
+
+    monkeypatch.setattr(module, "probe", probe_while_another_writer_edits)
+    return real_probe
+
+
+def test_a_file_that_reappears_before_the_restore_link_is_left_and_the_moved_version_kept(
+    machine, monkeypatch, capsys
+):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    first = b'{"keep": 1, "first": "editor"}'
+    second = b'{"keep": 1, "second": "editor"}'
+    _edit_during_probe(module, monkeypatch, path, first)
+    backup = _backup(machine.home_dir)
+    real_link = os.link
+
+    def save_then_restore(source, destination, *args, **kwargs):
+        if _same_path(source, backup) and not path.exists():
+            path.write_bytes(second)
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", save_then_restore)
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    captured = capsys.readouterr()
+    assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert path.read_bytes() == second, "the file at the path is the one the writer left"
+    assert backup.read_bytes() == first, "the version setup moved aside is kept"
+    assert captured.err.startswith("ledger_cli_setup_config_changed: ") and str(backup) in captured.err
+
+
+def test_a_restore_that_fails_keeps_the_backup_and_the_next_run_puts_it_back(machine, monkeypatch, capsys):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    edited = b'{"keep": 1, "edited": "meanwhile"}'
+    real_probe = _edit_during_probe(module, monkeypatch, path, edited)
+    backup = _backup(machine.home_dir)
+    real_link = os.link
+
+    def refuse_the_restore(source, destination, *args, **kwargs):
+        if _same_path(source, backup):
+            raise PermissionError(13, "Permission denied")
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", refuse_the_restore)
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    monkeypatch.setattr(module, "probe", real_probe)
+    captured = capsys.readouterr()
+    assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert captured.err.startswith("ledger_cli_setup_write_failed: ") and str(backup) in captured.err
+    assert not path.exists() and backup.read_bytes() == edited
+    assert module.setup() == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "keep": 1,
+        "edited": "meanwhile",
+        "ledger_cli": str(machine.ledger),
+    }
+    _no_temp_files(machine.home_dir)
+
+
+def test_a_save_between_the_restore_and_the_backup_removal_keeps_the_backup(machine, monkeypatch, capsys):
+    """After a restore, setup drops the backup only while it is still the file at the path."""
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    first = b'{"keep": 1, "first": "editor"}'
+    second = b'{"keep": 1, "second": "editor"}'
+    _edit_during_probe(module, monkeypatch, path, first)
+    backup = _backup(machine.home_dir)
+    real_link = os.link
+    real_replace = os.replace
+
+    def restore_then_editor_saves(source, destination, *args, **kwargs):
+        result = real_link(source, destination, *args, **kwargs)
+        if _same_path(source, backup):
+            sibling = path.parent / ".editor-save.tmp"
+            sibling.write_bytes(second)
+            real_replace(sibling, path)
+        return result
+
+    monkeypatch.setattr(module.os, "link", restore_then_editor_saves)
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    captured = capsys.readouterr()
+    assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert path.read_bytes() == second
+    assert backup.exists(), "the first writer's version, no longer at the path, is kept"
+    assert backup.read_bytes() == first
+    assert captured.err.startswith("ledger_cli_setup_config_changed: ") and str(backup) in captured.err
+
+
+def test_setup_never_renames_or_replaces_onto_the_override_path(machine, monkeypatch):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    seen = []
+    real = {"rename": os.rename, "replace": os.replace}
+
+    def watch(name):
+        def call(source, destination, *args, **kwargs):
+            seen.append((name, os.path.basename(os.fspath(source)), os.path.basename(os.fspath(destination))))
+            return real[name](source, destination, *args, **kwargs)
+
+        return call
+
+    for name in real:
+        monkeypatch.setattr(module.os, name, watch(name))
+    result = module.setup()
+    for name, function in real.items():
+        monkeypatch.setattr(module.os, name, function)
+    assert result == 0
+    assert seen == [("rename", "topic.json", BACKUP_NAME)]
