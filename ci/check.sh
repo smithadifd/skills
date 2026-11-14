@@ -437,6 +437,28 @@ check_ledger_e2e() {
   trap 'rm -r -- "$ledger_e2e_src" 2> /dev/null' EXIT
   "$python" -I -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True, ignore=shutil.ignore_patterns(".git"))' "$repo_dir" "$src" ||
     ledger_e2e_fail install 'copying the source tree failed'
+  # install.sh dereferences skills/NAME, so a symlink there would copy outside
+  # data into HOME while every later assertion stayed green: before any
+  # install, every entry directly under skills/ must be a real directory.
+  local skills_shape skills_shape_status=0
+  skills_shape=$("$python" -I -B - "$src" <<'PY' 2>&1
+import os, stat, sys
+
+root = os.path.join(sys.argv[1], "skills")
+try:
+    bad = sorted(
+        "skills/" + n for n in os.listdir(root) if not stat.S_ISDIR(os.lstat(os.path.join(root, n)).st_mode)
+    )
+except OSError as error:
+    print("skills walk error: %s" % type(error).__name__)
+    sys.exit(2)
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PY
+  ) || skills_shape_status=$?
+  [ "$skills_shape_status" -eq 0 ] ||
+    ledger_e2e_fail install "an entry under skills/ is not a real directory (exit $skills_shape_status): ${skills_shape//$'\n'/; }"
   local fixtures="$src/ci/fixtures"
   local f_session="$fixtures/ledger-e2e-session-start.json"
   local f_prompt="$fixtures/ledger-e2e-prompt.json"
@@ -512,7 +534,7 @@ def raise_error(error):
 
 
 try:
-    skills = names(os.path.join(repo, "skills"), os.path.isdir)
+    skills = names(os.path.join(repo, "skills"), lambda p: stat.S_ISDIR(os.lstat(p).st_mode))
     agents = {n for n in names(os.path.join(repo, "agents"), os.path.isfile) if n.endswith(".md")}
     bad = []
     seen_skills, seen_agents = set(), set()
@@ -589,7 +611,8 @@ PY
   # The only `ledger` on PATH is the pinned one: PATH holds the scratch bin
   # folder and the system folders, and the CLI is called by explicit path.
   ledger_e2e_bin="$scratch/bin"
-  printf '#!/bin/sh\nPYTHONPATH=%s PYTHONDONTWRITEBYTECODE=1 exec %s -m ledger "$@"\n' "$scratch/ledger" "$python" > "$ledger_e2e_bin/ledger"
+  # The paths reach the launcher as shell-quoted words, so a space in either is safe.
+  printf '#!/bin/sh\nPYTHONPATH=%q PYTHONDONTWRITEBYTECODE=1 exec %q -m ledger "$@"\n' "$scratch/ledger" "$python" > "$ledger_e2e_bin/ledger"
   chmod +x "$ledger_e2e_bin/ledger"
   ledger_e2e_env=(env -i HOME="$home" PATH="$ledger_e2e_bin:/usr/bin:/bin" LEDGER_DB="$scratch/data/ledger.db" LANG=C.UTF-8 TICKET_LEDGER_CLI="$ledger_e2e_bin/ledger")
 
