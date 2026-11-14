@@ -370,11 +370,15 @@ ledger_e2e_json() {
   "$ledger_e2e_python" -I -c 'import json, sys; e = json.load(sys.stdin); d = e["data"]; print(eval(sys.argv[1]) if e["ok"] else "refused: " + str(e["error"]["code"]))' "$1"
 }
 
-# Write a JSON map of every path under a directory (ignored paths included,
-# directories included, symlinks not followed) to its inode, to a file.
-ledger_e2e_listing() {
-  "$ledger_e2e_python" -I - "$1" "$2" <<'PY'
-import json, os, sys
+# Write a JSON record of every entry under a directory (the root as ".",
+# ignored paths and directories included, symlinks never followed) to a file:
+# file type, permission bits, uid, gid and modification time in nanoseconds; for
+# a regular file also its size, link count and the sha256 of its contents; for
+# a symlink its target. Only regular files are opened. A walk or stat error
+# fails the call.
+ledger_e2e_record() {
+  "$ledger_e2e_python" -I -B - "$1" "$2" <<'PY'
+import hashlib, json, os, stat, sys
 
 
 def raise_error(error):
@@ -382,13 +386,23 @@ def raise_error(error):
 
 
 root, out = sys.argv[1], sys.argv[2]
-listing = {}
+entries = [(".", root)]
 for base, dirs, files in os.walk(root, followlinks=False, onerror=raise_error):
     for name in dirs + files:
         path = os.path.join(base, name)
-        listing[os.path.relpath(path, root)] = os.lstat(path).st_ino
+        entries.append((os.path.relpath(path, root), path))
+record = {}
+for rel, path in entries:
+    st = os.lstat(path)
+    row = [stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, st.st_mtime_ns]
+    if stat.S_ISREG(st.st_mode):
+        with open(path, "rb") as handle:
+            row += [st.st_size, st.st_nlink, hashlib.sha256(handle.read()).hexdigest()]
+    elif stat.S_ISLNK(st.st_mode):
+        row.append(os.readlink(path))
+    record[rel] = row
 with open(out, "w") as handle:
-    json.dump(listing, handle)
+    json.dump(record, handle, sort_keys=True)
 PY
 }
 
@@ -407,25 +421,22 @@ check_ledger_e2e() {
     ledger_e2e_fail python "the pinned ledger needs Python 3.11 or newer; $python is older"
   ledger_e2e_python=$python
 
-  # Both installs and every later step run against a throwaway copy of this
-  # source tree (ignored paths included, .git left out), beside the throwaway
-  # home. The whole copy is made read-only, then directories under its skills/
-  # (and only those) get write permission back, because install.sh copies each
-  # skill with cp -R and the next skill's install must be able to replace the
-  # installed directory it carried. A listing of the copy (every path with its
-  # inode) taken before the installs must equal the one taken after; a
-  # difference fails step install by relative path, never by contents. The
-  # boundary: an installer that chmods a source file u+w and rewrites it in
-  # place keeps its inode and is not caught; the threat model is accidental
-  # writes.
+  # Both installs and every later step run against a writable throwaway copy
+  # of this source tree (ignored paths included, .git left out), beside the
+  # throwaway home; no permission is changed on it. A record of every entry
+  # of the copy (see ledger_e2e_record) taken immediately before the first
+  # install must equal the one taken immediately after the second, with
+  # nothing exempted: a difference in any recorded field fails step install by
+  # relative path, never by contents. Not observed, by design: access and
+  # change times, inode numbers, extended attributes, ACLs and file flags;
+  # writes to .git, or to any path outside HOME, the copy and the three
+  # decoys; a change made and fully reverted during the installs, modification
+  # time included.
   local src="$scratch/src"
   ledger_e2e_src=$src
-  trap 'chmod -R u+w "$ledger_e2e_src" 2> /dev/null; rm -r -- "$ledger_e2e_src" 2> /dev/null' EXIT
+  trap 'rm -r -- "$ledger_e2e_src" 2> /dev/null' EXIT
   "$python" -I -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True, ignore=shutil.ignore_patterns(".git"))' "$repo_dir" "$src" ||
     ledger_e2e_fail install 'copying the source tree failed'
-  chmod -R a-w "$src" || ledger_e2e_fail install 'making the source copy read-only failed'
-  find "$src/skills" -type d -exec chmod u+w {} + ||
-    ledger_e2e_fail install 'giving write permission back to the copy of skills/ directories failed'
   local fixtures="$src/ci/fixtures"
   local f_session="$fixtures/ledger-e2e-session-start.json"
   local f_prompt="$fixtures/ledger-e2e-prompt.json"
@@ -441,12 +452,14 @@ check_ledger_e2e() {
   # outside HOME: a write through any of them, or into this repository, fails
   # the step below.
   local decoy_ccd="$scratch/decoy-ccd" decoy_xdg="$scratch/decoy-xdg" decoy_tmp="$scratch/decoy-tmp"
-  local decoy listing_diff listing_status=0
-  ledger_e2e_listing "$src" "$scratch/listing-before.json" ||
-    ledger_e2e_fail install 'listing the source copy failed before the install'
+  local decoy record_diff record_status=0
+  ledger_e2e_record "$src" "$scratch/record-before.json" ||
+    ledger_e2e_fail install 'recording the source copy failed before the install'
   local install_env=(env -i HOME="$home" PATH=/usr/bin:/bin CLAUDE_CONFIG_DIR="$decoy_ccd" XDG_CONFIG_HOME="$decoy_xdg" TMPDIR="$decoy_tmp")
   (cd "$src" && "${install_env[@]}" ./install.sh --all > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all failed'
   (cd "$src" && "${install_env[@]}" ./install.sh --all-agents > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all-agents failed'
+  ledger_e2e_record "$src" "$scratch/record-after.json" ||
+    ledger_e2e_fail install 'recording the source copy failed after the install'
   [ -f "$home/.claude/skills/ticket/ticket.py" ] || ledger_e2e_fail sdlc-install 'the ticket skill was not installed'
   [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || ledger_e2e_fail sdlc-install 'the shared _lib was not installed'
   for decoy in "$decoy_ccd" "$decoy_xdg" "$decoy_tmp"; do
@@ -454,9 +467,7 @@ check_ledger_e2e() {
       ledger_e2e_fail install "the install wrote outside HOME: ${decoy#"$scratch"/}"
     fi
   done
-  ledger_e2e_listing "$src" "$scratch/listing-after.json" ||
-    ledger_e2e_fail install 'listing the source copy failed after the install'
-  listing_diff=$("$python" -I - "$scratch/listing-before.json" "$scratch/listing-after.json" <<'PY' 2>&1
+  record_diff=$("$python" -I -B - "$scratch/record-before.json" "$scratch/record-after.json" <<'PY' 2>&1
 import json, sys
 
 before = json.load(open(sys.argv[1]))
@@ -466,9 +477,9 @@ if changed:
     print("\n".join(changed))
     sys.exit(1)
 PY
-  ) || listing_status=$?
-  [ "$listing_status" -eq 0 ] ||
-    ledger_e2e_fail install "the install changed the source tree (exit $listing_status): ${listing_diff//$'\n'/; }"
+  ) || record_status=$?
+  [ "$record_status" -eq 0 ] ||
+    ledger_e2e_fail install "the install changed the source tree (exit $record_status): ${record_diff//$'\n'/; }"
 
   # The footprint allowlist owns everything the two installs lay down: every
   # path under the throwaway home, directories included, is either listed here
