@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### `install.sh --all` skips directories that are not skills
+
+`install.sh --all` and `install.sh --uninstall --all` used to treat every directory under `skills/` as a skill. A leftover `skills/__pycache__` from a test run made `--all` stop with an error from `find`. They now act only on skills: a directory with a `SKILL.md`, plus `_lib`, the shared helper directory, which installs beside every skill as before. A dot-name, `__pycache__` and any other directory without a `SKILL.md` are skipped, and naming one (`install.sh __pycache__`, `install.sh --uninstall notes`) is refused as `Unknown skill: <name>` with nothing copied or removed.
+
 ### The ledger's brief at session start comes from the ledger's own plugin
 
 This plugin no longer declares a `SessionStart` hook: `hooks/hooks.json` and `hooks/session-start.py` are gone, and the plugin declares no hooks at all. The ledger's brief at the start of a session now comes from the ledger's own plugin, `ledger-hooks`, from ledger v0.2.0 or later, which also records your submitted prompts and question-picker answers. Install it from the ledger repository, following the Claude Code plugin section of its README.

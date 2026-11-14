@@ -17,16 +17,24 @@ usage() {
   exit 2
 }
 
+# A skill is a directory under skills/ that holds a SKILL.md, or `_lib`, the shared
+# helper directory that has none and is installed beside every skill. A dot-name
+# (.pytest_cache among them) and __pycache__ are never skills, and neither is any
+# other directory without a SKILL.md: a test run leaves caches there, and they must
+# not be installed, uninstalled or accepted by name.
+is_skill_name() {
+  case "$1" in
+    ''|.*|*/*|__pycache__) return 1 ;;
+    _lib) [ -d "$skills_dir/_lib" ] ;;
+    *) [ -d "$skills_dir/$1" ] && [ -f "$skills_dir/$1/SKILL.md" ] ;;
+  esac
+}
+
 require_skill() {
   skill_name=$1
-  case "$skill_name" in
-    ''|.|..|*/*) ;;
-    *)
-      if [ -d "$skills_dir/$skill_name" ]; then
-        return
-      fi
-      ;;
-  esac
+  if is_skill_name "$skill_name"; then
+    return
+  fi
   printf 'Unknown skill: %s\n' "$skill_name" >&2
   exit 1
 }
@@ -67,14 +75,14 @@ uninstall_one() {
 
 install_all() {
   for skill_path in "$skills_dir"/*; do
-    [ -d "$skill_path" ] || continue
+    is_skill_name "${skill_path##*/}" || continue
     install_one "${skill_path##*/}"
   done
 }
 
 uninstall_all() {
   for skill_path in "$skills_dir"/*; do
-    [ -d "$skill_path" ] || continue
+    is_skill_name "${skill_path##*/}" || continue
     uninstall_one "${skill_path##*/}"
   done
 }
