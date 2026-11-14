@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### `ci/check.sh` discovers skills by the rule `install.sh` uses
+
+`ci/check.sh` listed skills with the bare glob `skills/*`, so a leftover `skills/__pycache__` from a local test run was counted as a skill, `install.sh --all` correctly skipped it, and the `install-all` and `install-one` checks failed. It now discovers a skill exactly as `install.sh` does: a directory with a `SKILL.md`, plus `_lib`, and never a dot-name, `__pycache__` or any other directory without a `SKILL.md`. The `install-all` check also fails when `install.sh` installs an entry the script did not discover, so the two copies of the rule cannot drift apart unseen. CI runs on a clean checkout, so only local runs were affected.
+
 ### `install.sh --all` skips directories that are not skills
 
 `install.sh --all` and `install.sh --uninstall --all` used to treat every directory under `skills/` as a skill. A leftover `skills/__pycache__` from a test run made `--all` stop with an error from `find`. They now act only on skills: a directory with a `SKILL.md`, plus `_lib`, the shared helper directory, which installs beside every skill as before. A dot-name, `__pycache__` and any other directory without a `SKILL.md` are skipped, and naming one (`install.sh __pycache__`, `install.sh --uninstall notes`) is refused as `Unknown skill: <name>` with nothing copied or removed.

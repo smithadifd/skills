@@ -10,7 +10,33 @@ fail() {
   exit 1
 }
 
-skill_paths=(skills/*)
+# A skill is named by the rule install.sh's is_skill_name applies, and this copy
+# of it must stay the same rule: a name is a skill when it is not empty, not a
+# dot-name, not `__pycache__` and holds no slash, and then it is either `_lib`
+# (the shared helper directory, which has no SKILL.md) as a directory, or a
+# directory that holds a SKILL.md. A cache directory a local test run leaves
+# under skills/ is therefore never discovered here, and install.sh skipping it
+# never fails an assertion below. Drift between the two copies shows in
+# check_install_all, which compares both directions: everything discovered is
+# installed, and everything installed was discovered.
+is_skill_name() {
+  case "$1" in
+    ''|.*|*/*|__pycache__) return 1 ;;
+    _lib) [ -d "skills/_lib" ] ;;
+    *) [ -d "skills/$1" ] && [ -f "skills/$1/SKILL.md" ] ;;
+  esac
+}
+
+# dotglob lists the dot-names too, so the rule above is the one that turns them
+# away, not the glob.
+skill_paths=()
+shopt -s nullglob dotglob
+for skill_path in skills/*; do
+  if is_skill_name "${skill_path##*/}"; then
+    skill_paths+=("$skill_path")
+  fi
+done
+shopt -u nullglob dotglob
 ((${#skill_paths[@]} > 0)) || fail 'no skills were discovered'
 # `skills/_lib` is shared code, not a skill: it has no SKILL.md and installs
 # beside every skill. Everything below that counts skills leaves it out.
@@ -28,7 +54,7 @@ done
 ((${#agent_paths[@]} > 0)) || fail 'no agents were discovered'
 
 check_install_all() {
-  local home skill_path skill_name
+  local home skill_path skill_name installed_path
   home=$(mktemp -d)
   HOME="$home" ./install.sh --all
   for skill_path in "${skill_paths[@]}"; do
@@ -36,6 +62,13 @@ check_install_all() {
     skill_name=${skill_path##*/}
     [ -d "$home/.claude/skills/$skill_name" ] || fail "install-all did not install discovered skill: $skill_name"
   done
+  # The other direction: nothing is installed that this script did not discover,
+  # so the rule here cannot fall behind the one in install.sh unseen.
+  shopt -s nullglob dotglob
+  for installed_path in "$home/.claude/skills"/*; do
+    is_skill_name "${installed_path##*/}" || fail "install-all installed an entry that is not a discovered skill: ${installed_path##*/}"
+  done
+  shopt -u nullglob dotglob
   [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || fail 'install-all did not install the shared _lib beside the skills'
   printf 'PASS: install-all installed every discovered skill\n'
 }
