@@ -370,27 +370,69 @@ ledger_e2e_json() {
   "$ledger_e2e_python" -I -c 'import json, sys; e = json.load(sys.stdin); d = e["data"]; print(eval(sys.argv[1]) if e["ok"] else "refused: " + str(e["error"]["code"]))' "$1"
 }
 
+# Write a JSON map of every path under a directory (ignored paths included,
+# directories included, symlinks not followed) to its inode, to a file.
+ledger_e2e_listing() {
+  "$ledger_e2e_python" -I - "$1" "$2" <<'PY'
+import json, os, sys
+
+
+def raise_error(error):
+    raise error
+
+
+root, out = sys.argv[1], sys.argv[2]
+listing = {}
+for base, dirs, files in os.walk(root, followlinks=False, onerror=raise_error):
+    for name in dirs + files:
+        path = os.path.join(base, name)
+        listing[os.path.relpath(path, root)] = os.lstat(path).st_ino
+with open(out, "w") as handle:
+    json.dump(listing, handle)
+PY
+}
+
 check_ledger_e2e() {
   local scratch home python out asked name
   # Fail closed: no URL, no run. The message names the variable, never a value.
   [ -n "${LEDGER_E2E_URL:-}" ] ||
     ledger_e2e_fail setup "LEDGER_E2E_URL is unset; set it to the ledger repository's clone URL"
-  local fixtures="$repo_dir/ci/fixtures"
-  local f_session="$fixtures/ledger-e2e-session-start.json"
-  local f_prompt="$fixtures/ledger-e2e-prompt.json"
-  local f_picker="$fixtures/ledger-e2e-picker.json"
   scratch=$(mktemp -d)
   home="$scratch/home"
   mkdir -p -- "$home" "$scratch/bin" "$scratch/data"
-  for name in "$f_session" "$f_prompt" "$f_picker"; do
-    [ -f "$name" ] || ledger_e2e_fail fixtures "missing recorded hook input: ${name##*/}"
-  done
 
   # The interpreter that runs the pinned ledger, by absolute path.
   python=$(command -v python3) || ledger_e2e_fail python 'no python3 on PATH'
   "$python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' ||
     ledger_e2e_fail python "the pinned ledger needs Python 3.11 or newer; $python is older"
   ledger_e2e_python=$python
+
+  # Both installs and every later step run against a throwaway copy of this
+  # source tree (ignored paths included, .git left out), beside the throwaway
+  # home. The whole copy is made read-only, then directories under its skills/
+  # (and only those) get write permission back, because install.sh copies each
+  # skill with cp -R and the next skill's install must be able to replace the
+  # installed directory it carried. A listing of the copy (every path with its
+  # inode) taken before the installs must equal the one taken after; a
+  # difference fails step install by relative path, never by contents. The
+  # boundary: an installer that chmods a source file u+w and rewrites it in
+  # place keeps its inode and is not caught; the threat model is accidental
+  # writes.
+  local src="$scratch/src"
+  ledger_e2e_src=$src
+  trap 'chmod -R u+w "$ledger_e2e_src" 2> /dev/null; rm -r -- "$ledger_e2e_src" 2> /dev/null' EXIT
+  "$python" -I -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True, ignore=shutil.ignore_patterns(".git"))' "$repo_dir" "$src" ||
+    ledger_e2e_fail install 'copying the source tree failed'
+  chmod -R a-w "$src" || ledger_e2e_fail install 'making the source copy read-only failed'
+  find "$src/skills" -type d -exec chmod u+w {} + ||
+    ledger_e2e_fail install 'giving write permission back to the copy of skills/ directories failed'
+  local fixtures="$src/ci/fixtures"
+  local f_session="$fixtures/ledger-e2e-session-start.json"
+  local f_prompt="$fixtures/ledger-e2e-prompt.json"
+  local f_picker="$fixtures/ledger-e2e-picker.json"
+  for name in "$f_session" "$f_prompt" "$f_picker"; do
+    [ -f "$name" ] || ledger_e2e_fail fixtures "missing recorded hook input: ${name##*/}"
+  done
 
   # The sdlc plugin from this working tree. It declares no hooks; its skills
   # and agents install into the throwaway home the way a plugin install lays
@@ -399,12 +441,12 @@ check_ledger_e2e() {
   # outside HOME: a write through any of them, or into this repository, fails
   # the step below.
   local decoy_ccd="$scratch/decoy-ccd" decoy_xdg="$scratch/decoy-xdg" decoy_tmp="$scratch/decoy-tmp"
-  local status_before status_after decoy
-  status_before=$(git status --porcelain 2>&1) ||
-    ledger_e2e_fail install 'git status of this repository failed before the install'
+  local decoy listing_diff listing_status=0
+  ledger_e2e_listing "$src" "$scratch/listing-before.json" ||
+    ledger_e2e_fail install 'listing the source copy failed before the install'
   local install_env=(env -i HOME="$home" PATH=/usr/bin:/bin CLAUDE_CONFIG_DIR="$decoy_ccd" XDG_CONFIG_HOME="$decoy_xdg" TMPDIR="$decoy_tmp")
-  "${install_env[@]}" ./install.sh --all > /dev/null || ledger_e2e_fail sdlc-install 'install.sh --all failed'
-  "${install_env[@]}" ./install.sh --all-agents > /dev/null || ledger_e2e_fail sdlc-install 'install.sh --all-agents failed'
+  (cd "$src" && "${install_env[@]}" ./install.sh --all > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all failed'
+  (cd "$src" && "${install_env[@]}" ./install.sh --all-agents > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all-agents failed'
   [ -f "$home/.claude/skills/ticket/ticket.py" ] || ledger_e2e_fail sdlc-install 'the ticket skill was not installed'
   [ -f "$home/.claude/skills/_lib/ledger_cli.py" ] || ledger_e2e_fail sdlc-install 'the shared _lib was not installed'
   for decoy in "$decoy_ccd" "$decoy_xdg" "$decoy_tmp"; do
@@ -412,10 +454,21 @@ check_ledger_e2e() {
       ledger_e2e_fail install "the install wrote outside HOME: ${decoy#"$scratch"/}"
     fi
   done
-  status_after=$(git status --porcelain 2>&1) ||
-    ledger_e2e_fail install 'git status of this repository failed after the install'
-  [ "$status_after" = "$status_before" ] ||
-    ledger_e2e_fail install 'the install changed this repository (git status differs from before the install)'
+  ledger_e2e_listing "$src" "$scratch/listing-after.json" ||
+    ledger_e2e_fail install 'listing the source copy failed after the install'
+  listing_diff=$("$python" -I - "$scratch/listing-before.json" "$scratch/listing-after.json" <<'PY' 2>&1
+import json, sys
+
+before = json.load(open(sys.argv[1]))
+after = json.load(open(sys.argv[2]))
+changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+if changed:
+    print("\n".join(changed))
+    sys.exit(1)
+PY
+  ) || listing_status=$?
+  [ "$listing_status" -eq 0 ] ||
+    ledger_e2e_fail install "the install changed the source tree (exit $listing_status): ${listing_diff//$'\n'/; }"
 
   # The footprint allowlist owns everything the two installs lay down: every
   # path under the throwaway home, directories included, is either listed here
@@ -433,7 +486,7 @@ check_ledger_e2e() {
   # the frontmatter parser's, below; the plugin root is the plugin no-hooks
   # test's.
   local footprint footprint_status=0
-  footprint=$("$python" -I - "$home" "$repo_dir" <<'PY' 2>&1
+  footprint=$("$python" -I - "$home" "$src" <<'PY' 2>&1
 import os, stat, sys
 
 home, repo = sys.argv[1], sys.argv[2]
@@ -505,7 +558,7 @@ PY
   local installed_agent_files=("$home"/.claude/agents/*)
   shopt -u nullglob
   ((${#installed_agent_files[@]} > 0)) || ledger_e2e_fail install 'no installed agent files were found to check'
-  frontmatter_out=$("$python" -E "$repo_dir/ci/frontmatter.py" "${installed_files[@]}" "${installed_agent_files[@]}" 2>&1) ||
+  frontmatter_out=$("$python" -E "$src/ci/frontmatter.py" "${installed_files[@]}" "${installed_agent_files[@]}" 2>&1) ||
     frontmatter_status=$?
   if [ "$frontmatter_status" -ne 0 ]; then
     # Name the files by their path under the throwaway home, as the walk does.
