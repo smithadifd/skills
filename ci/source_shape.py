@@ -12,7 +12,9 @@ every skill) or a directory that holds a regular file named SKILL.md. Any other
 directory under skills/ (a cache, a notes folder) is not a skill. An agent is a regular
 file ending in .md whose name is not a dot-name. `names` raises on any `violations`
 finding before it reads a name, so no symlink under either root is ever followed by the
-SKILL.md check.
+SKILL.md check. A listed skills entry that vanishes or is replaced before its check ends
+raises rather than being dropped: only a SKILL.md missing from a directory that is still the
+same directory (same st_dev and st_ino) makes the name a non-skill.
 
 Run as a script with the tree as its one argument: it prints one violation per line and
 exits 1, or prints one line and exits 2 on an OSError; exit 0 prints nothing.
@@ -50,13 +52,6 @@ def violations(src):
     return found
 
 
-def _lstat_kind(path):
-    try:
-        return stat.S_IFMT(os.lstat(path).st_mode)
-    except FileNotFoundError:
-        return None
-
-
 def _is_skill_name(skills_dir, name):
     # The rule install.sh's is_skill_name applies (and ci/check.sh copies): refuse the
     # empty name, a dot-name, a name with a slash and __pycache__; `_lib` is a skill when it
@@ -66,11 +61,23 @@ def _is_skill_name(skills_dir, name):
     if name == "" or name.startswith(".") or "/" in name or name == "__pycache__":
         return False
     path = os.path.join(skills_dir, name)
-    if _lstat_kind(path) != stat.S_IFDIR:
+    # The name came from a listing, so it exists: an entry that is gone when this lstat runs
+    # raises (FileNotFoundError) instead of being dropped from the footprint gate's input.
+    first = os.lstat(path)
+    if not stat.S_ISDIR(first.st_mode):
         return False
     if name == "_lib":
         return True
-    return _lstat_kind(os.path.join(path, "SKILL.md")) == stat.S_IFREG
+    try:
+        kind = stat.S_IFMT(os.lstat(os.path.join(path, "SKILL.md")).st_mode)
+    except FileNotFoundError:
+        # No SKILL.md makes the name a non-skill only while the same directory is still
+        # there; re-lstat it (raises if gone) and compare identity with the first lstat.
+        again = os.lstat(path)
+        if not stat.S_ISDIR(again.st_mode) or (again.st_dev, again.st_ino) != (first.st_dev, first.st_ino):
+            raise OSError("skills entry changed during the scan: " + name)
+        return False
+    return kind == stat.S_IFREG
 
 
 def names(src):

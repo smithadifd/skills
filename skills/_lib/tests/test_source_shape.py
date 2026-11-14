@@ -11,6 +11,7 @@ holding a regular SKILL.md; `__pycache__` and a directory without a SKILL.md are
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -158,6 +159,70 @@ def test_a_symlinked_skill_md_is_refused_before_any_name_is_read(tree, tmp_path)
     os.symlink(tmp_path / "outside" / "f.md", tree / "skills" / "linked" / "SKILL.md")
     with pytest.raises(ValueError, match="skills.linked.SKILL.md"):
         shape.names(str(tree))
+
+
+def test_a_listed_skill_directory_removed_before_its_check_raises(tree, monkeypatch):
+    victim = tree / "skills" / "victim"
+    victim.mkdir()
+    (victim / "SKILL.md").write_text("x")
+    real_listdir = os.listdir
+
+    def listdir_then_remove(path):
+        listed = real_listdir(path)
+        if Path(path) == tree / "skills" and victim.exists():
+            shutil.rmtree(victim)
+        return listed
+
+    monkeypatch.setattr(os, "listdir", listdir_then_remove)
+    with pytest.raises(FileNotFoundError):
+        shape.names(str(tree))
+
+
+def test_a_skill_directory_removed_while_its_skill_md_is_checked_raises(tree, monkeypatch):
+    victim = tree / "skills" / "victim"
+    victim.mkdir()
+    (victim / "SKILL.md").write_text("x")
+    real_lstat = os.lstat
+    real_listdir = os.listdir
+    listed = []
+
+    def listdir_noted(path):
+        listed.append(path)
+        return real_listdir(path)
+
+    def lstat_removing_before_skill_md(path, *args, **kwargs):
+        # Only after the listing: violations() lstats the same file earlier and must see it.
+        if listed and Path(path) == victim / "SKILL.md" and victim.exists():
+            shutil.rmtree(victim)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "listdir", listdir_noted)
+    monkeypatch.setattr(os, "lstat", lstat_removing_before_skill_md)
+    with pytest.raises(FileNotFoundError):
+        shape.names(str(tree))
+
+
+def test_a_skill_directory_replaced_while_its_skill_md_is_missing_raises(tree, monkeypatch):
+    # SKILL.md is absent in a directory that still exists, but its identity changed between
+    # the first lstat and the one taken after the miss: not a plain non-skill, so it raises.
+    (tree / "skills" / "notes").mkdir()
+    real_lstat = os.lstat
+    missed = []
+
+    def lstat_changing_identity(path, *args, **kwargs):
+        if Path(path) == tree / "skills" / "notes" / "SKILL.md":
+            missed.append(path)
+        result = real_lstat(path, *args, **kwargs)
+        if missed and Path(path) == tree / "skills" / "notes":
+            fields = list(result)
+            fields[1] += 1
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(os, "lstat", lstat_changing_identity)
+    with pytest.raises(OSError, match="changed during the scan: notes"):
+        shape.names(str(tree))
+    assert len(missed) == 1
 
 
 def test_the_real_repo_names_match_install_sh_is_skill_name():
