@@ -9,7 +9,7 @@ import pytest
 
 import ticket
 from ticket_support import (
-    A, B, B_EDITED, C, EDIT_WHAT, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F12, KEY, REORDERED, STATUS, TITLE, UPDATED, Source,
+    A, B, B_EDITED, C, EDIT_WHAT, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F12, F13, KEY, REORDERED, STATUS, TITLE, UPDATED, Source,
     assert_only_a_claim, build, build_released, card_bytes, changes, edit_card, go_plan,
     new_text, open_pass, passing, present, read_card, refusal, removed_text,
 )
@@ -89,6 +89,62 @@ def test_A1_4_a_source_change_before_the_plan_go_resumes_at_plan_removed(repo):
     assert session.phase == "plan"
     assert session.reconciliation == (F1(1, removed_text(B)),)
     assert_only_a_claim(repo, before)
+
+
+# --- A1b: a resume before the plan is presented (checkpoint 1, finding 11) ----------------------------
+#
+# Orient and research are in-memory steps that write nothing (design 3.2b), so the card cannot say how far
+# an earlier pass got. A resume with no plan repeats both, and says so; a first open on a blank card does not.
+
+
+def test_CP1_11_1_a_resume_after_a_more_info_exit_before_the_plan_says_orient_and_research_start_again(repo):
+    src = Source()
+    first = open_pass(repo, src)
+    first.finish_orient()
+    first.finish_research()
+    first.more_info("research", "Which branch holds the guard?")
+    before = read_card(repo)
+    assert before["plan"] is None and before["stamps"]
+    session = open_pass(repo, src)
+    assert session.phase == "orient"
+    assert session.reconciliation == (F13,)
+    assert_only_a_claim(repo, before)
+    session.finish_orient()
+    session.finish_research()
+    assert session.phase == "plan"
+
+
+def test_CP1_11_2_a_join_of_a_live_pass_before_the_plan_says_orient_and_research_start_again(repo):
+    src = Source()
+    first = open_pass(repo, src)
+    first.finish_orient()
+    first.finish_research()
+    before = card_bytes(repo)
+    joined = open_pass(repo, src, pass_id=first.pass_id)
+    assert joined.phase == "orient"
+    assert joined.reconciliation == (F13,)
+    assert card_bytes(repo) == before
+
+
+def test_CP1_11_3_a_tried_record_before_the_plan_makes_the_next_open_a_resume(repo):
+    src = Source()
+    first = open_pass(repo, src)
+    first.record_tried("Read the module.", outcome="It has no guard.")
+    first.end()
+    session = open_pass(repo, src)
+    assert session.phase == "orient"
+    assert session.reconciliation == (F13,)
+
+
+def test_CP1_11_4_a_first_open_and_a_resume_with_a_plan_do_not_say_it(repo):
+    src = Source()
+    first = open_pass(repo, src)
+    assert first.reconciliation == ()
+    present(first)
+    first.end()
+    again = open_pass(repo, src)
+    assert F13 not in again.reconciliation
+    assert again.phase == "plan"
 
 
 # --- A2: building ------------------------------------------------------------

@@ -16,7 +16,7 @@ import pytest
 import ticket
 from ledger_support import FakeLedger, build_ledger, open_ledger
 from ticket_support import (
-    A, B, F5, KEY, TITLE, Source, build, build_released, card_bytes, card_path, changes, edit_card,
+    A, B, F5, KEY, TITLE, Source, build, build_released, card_bytes, card_path, changes, claim_line, edit_card,
     go_outward, go_plan, open_pass, passing, present, read_card, refusal, store,
 )
 
@@ -1172,6 +1172,119 @@ def test_F10_reopening_a_closed_ticket_keeps_its_passing_review_in_the_plan(repo
     assert reopened.phase == "closed"
     assert reopened.plan.review is not None
     assert reopened.plan.render() == closing
+
+
+# --- CP1-9: the final message states the pass id -------------------------------------------------------
+#
+# The final message is written by the model, not by ticket.py: no render or close function shapes it. So
+# SKILL.md is what carries the instruction, and the test reads it from there.
+
+
+def _skill_section(heading):
+    text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    start = text.index(f"\n## {heading}\n") + 1
+    end = text.find("\n## ", start + 1)
+    return text[start:end if end != -1 else len(text)]
+
+
+def test_CP1_9_skill_md_tells_the_final_message_to_state_the_pass_id():
+    section = _skill_section("The final message")
+    assert "\nPass: <session.pass_id>\n" in section
+    assert "open(..., pass_id=<that id>)" in section
+    assert "every session" in section
+    # The live-pass section points at it, so the report-at-every-stop rule and the final message agree.
+    assert "The final message" in _skill_section("One live pass")
+
+
+def test_CP1_11_skill_md_names_the_early_resume_line_where_a_resume_lands():
+    orient = _skill_section("1. Orient")
+    assert "no plan is stored for this ticket, so orient and research start again" in " ".join(orient.split())
+    assert "orient and research start again" in orient.split("| no plan yet |")[1].splitlines()[0]
+
+
+@pytest.mark.parametrize("end", ["more_info", "close"])
+def test_CP1_9_the_pass_id_the_final_message_states_is_readable_after_the_pass_ends(repo, end):
+    if end == "close":
+        session = build(repo, Source(), "S4", 1)
+        session.close("Done.", refs=("example/repo#14",))
+        recorded = read_card(repo)["plan"]["pass"]
+    else:
+        session = build(repo, Source(), "S1")
+        recorded = read_card(repo)["pass"]["id"]
+        session.more_info("person", "Which branch?")
+    assert session.live is False
+    assert session.pass_id == recorded
+    assert re.fullmatch("[0-9a-f]+", session.pass_id)
+
+
+# --- CP1-10: the plan card shows the pass's claim ------------------------------------------------------
+
+
+def _claim_lines(rendered):
+    return [line for line in rendered.splitlines() if line.startswith("Claim: ")]
+
+
+def test_CP1_10_the_plan_card_shows_the_claim_next_to_the_plan(repo):
+    session = build(repo, Source(), "S1")
+    claim = read_card(repo)["pass"]
+    assert claim["id"] == session.pass_id
+    rendered = session.plan.render()
+    assert _claim_lines(rendered) == [claim_line(claim)]
+    lines = rendered.splitlines()
+    assert lines[0].startswith(f"# Plan: {KEY}")
+    assert lines.index(claim_line(claim)) < lines.index("## Acceptance criteria")
+
+
+def test_CP1_10_a_joined_pass_shows_the_claim_it_continues(repo):
+    first = build(repo, Source(), "S1")
+    claim = read_card(repo)["pass"]
+    joined = open_pass(repo, Source(), pass_id=first.pass_id)
+    assert _claim_lines(joined.plan.render()) == [claim_line(claim)]
+
+
+def test_CP1_10_a_new_pass_that_presents_again_shows_its_own_claim(repo):
+    build_released(repo, Source(), "S1")
+    second = open_pass(repo, Source())
+    claim = read_card(repo)["pass"]
+    assert claim["id"] == second.pass_id
+    assert _claim_lines(second.plan.render()) == [claim_line(claim)]
+    present(second)
+    assert _claim_lines(second.plan.render()) == [claim_line(claim)]
+
+
+def test_CP1_10_the_ledger_card_shows_the_claim_too(tmp_path):
+    fake = FakeLedger(tmp_path / "bin")
+    session = build_ledger(fake, Source(), "S1")
+    lines = _claim_lines(session.plan.render())
+    assert len(lines) == 1
+    assert lines[0].startswith(f"Claim: pass {session.pass_id}, host ")
+
+
+def test_CP1_10_a_claim_that_is_released_is_not_shown(repo):
+    session = build(repo, Source(), "S1")
+    assert len(_claim_lines(session.plan.render())) == 1
+    session.end()
+    assert _claim_lines(session.plan.render()) == []
+    # A plan not yet presented has no claim to show either.
+    assert _claim_lines(ticket.PlanCard(session.ticket).render()) == []
+
+
+def test_CP1_10_a_terminal_resume_takes_no_claim_and_shows_none(repo):
+    src = Source()
+    build(repo, src, "S6", 1)
+    reopened = open_pass(repo, src)
+    assert reopened.phase == "closed"
+    assert _claim_lines(reopened.plan.render()) == []
+
+
+def test_CP1_10_a_terminal_resume_shows_no_claim_it_does_not_hold(repo):
+    src = Source()
+    build(repo, src, "S6", 1)
+    # A claim planted on a closed card by a hand edit is not this resume's claim.
+    edit_card(repo, lambda card: card.update(**{"pass": {"id": "ab12", "host": "elsewhere", "started_at": "2026-10-17T14:30:00Z"}}))
+    reopened = open_pass(repo, src)
+    assert (reopened.phase, reopened.live) == ("closed", False)
+    assert _claim_lines(reopened.plan.render()) == []
 
 
 # --- SK36: each step's rendered status is derived from the stored events -----

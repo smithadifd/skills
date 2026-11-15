@@ -240,6 +240,12 @@ def _one_sentence(text: str) -> bool:
     return len(parts) == 1
 
 
+def claim_line(claim: Mapping[str, Any]) -> str:
+    """A pass's claim as one line: the id a later session resumes with, the host and the start time ``open`` recorded."""
+
+    return f"pass {claim['id']}, host {claim['host']}, started {claim['started_at']}"
+
+
 class PlanCard:
     """The plan a pass presents: the ticket's criteria in order, the six steps,
     skip reasons, a one-sentence diff when the plan step is skipped, and open
@@ -255,6 +261,11 @@ class PlanCard:
     step of it complete only when the set names it, skipped when the snapshot
     skipped it, and pending otherwise, whatever the snapshot's status says. The
     snapshot itself is never changed.
+
+    ``claim`` is the live claim of the pass that holds the plan (its pass id,
+    host and start time), set by the pass while it is live and None on a plan
+    not yet stored, on a pass that ended and on a terminal resume. ``render``
+    shows it next to the plan.
     """
 
     def __init__(self, ticket: Ticket):
@@ -267,6 +278,7 @@ class PlanCard:
         self.review: Mapping[str, Any] | None = None
         # None until the plan is stored: an unsynchronized plan renders as its author set it.
         self.reached: frozenset[str] | None = None
+        self.claim: Mapping[str, Any] | None = None
 
     @property
     def acceptance_criteria(self) -> tuple[str, ...]:
@@ -339,6 +351,7 @@ class PlanCard:
         plan.review = None
         # A stored plan: nothing is proven until the pass sets the steps its card's events reach.
         plan.reached = frozenset()
+        plan.claim = None
         return plan
 
     def rendered_status(self, step: PlanStep) -> str:
@@ -353,7 +366,10 @@ class PlanCard:
 
     def render(self) -> str:
         passing = self.review
-        lines = [f"# Plan: {self.key}: {self.title}", "", "## Acceptance criteria"]
+        lines = [f"# Plan: {self.key}: {self.title}", ""]
+        if self.claim is not None:
+            lines.extend((f"Claim: {claim_line(self.claim)}", ""))
+        lines.append("## Acceptance criteria")
         for index, text in enumerate(self._criteria):
             passes = passing is not None and index in passing["passed"]
             line = f"- [{'x' if passes else ' '}] passes: {str(passes).lower()} - {text}"
@@ -953,6 +969,14 @@ def _f8(m: int) -> str:
     return f"plan revision {m} was presented by another pass and has no plan go; resuming at plan to present it again"
 
 
+def _f13() -> str:
+    return (
+        "no plan is stored for this ticket, so orient and research start again: the card does not record "
+        "them (they run in memory and write nothing), so what an earlier pass found is not kept; read the "
+        "ticket and the repository again before presenting a plan"
+    )
+
+
 def _source_flags(plan: Mapping[str, Any], ticket: Ticket) -> list[str]:
     """F9, F10 and F12: status, update-time and title edits are flags, never changes."""
 
@@ -1015,7 +1039,10 @@ def _derive(card: Mapping[str, Any], ticket: Ticket, pass_id: str | None, key: s
         flags = [_f7("; ".join(differences))] if differences else []
         return "closed", flags + _source_flags(card["plan"], ticket), identity
     if identity is None:
-        return "orient", [], None
+        # A card an earlier pass already touched (a stop stamp, a tried record) or a join of a live pass is a
+        # resume, and orient and research are repeated; a blank card with no pass id is a first open.
+        resumed = pass_id is not None or bool(card["stamps"]) or bool(card["tried"])
+        return "orient", [_f13()] if resumed else [], None
     revision = identity[0]
     source_changes = _source_differences(identity[1], ticket.acceptance_criteria) + _spec_differences(card["plan"], ticket)
     card_changes = _card_side_changes(card, identity, key)
@@ -2605,6 +2632,7 @@ class TicketPass:
             session._token = store.apply(token, [("join", {"id": pass_id})])
             session._pass_id = pass_id
         session._live = True
+        session._sync_steps()
         return session
 
     def _claim(self) -> None:
@@ -2665,6 +2693,8 @@ class TicketPass:
         if not self._live:
             return
         self._live = False
+        if self._plan is not None:
+            self._plan.claim = None
         self.store.release()
 
     def _end_quietly(self) -> None:
@@ -2712,6 +2742,8 @@ class TicketPass:
 
         if self._plan is not None:
             self._plan.reached = _reached_steps(self._card, self._identity, self.key)
+            # The claim is shown only while this pass is live: an ended pass or a terminal resume holds none.
+            self._plan.claim = self._card["pass"] if self._live else None
 
     def _stamp(self, point: str, next_skills: Sequence[str], refs: Sequence[str], *, phase: str | None = None, close: bool = False) -> tuple[str, Any]:
         return (
