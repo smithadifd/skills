@@ -244,7 +244,9 @@ A ticket has at most one live pass. `open` claims the ticket with the pass's
 id, host and start time. Read `session.pass_id`, keep it in the conversation,
 and report it at every stop: each later step, in a new process, continues the
 same pass with `open(..., pass_id=<id>)`. Never take a pass id from the card or
-from a refusal to continue a pass you did not start.
+from a refusal to continue a pass you did not start. The last message of a
+session states it too (see "The final message" below), so a person can resume
+with it the next day.
 
 One store handle serves one pass. The store refuses a reused handle, one
 bound to a pass or whose pass has ended, as `handle_used` at the claim or
@@ -285,13 +287,22 @@ Where a resume lands:
 
 | Card | `phase` |
 |---|---|
-| no plan yet | `orient` |
+| no plan yet | `orient`; orient and research start again (see below) |
 | plan presented, no plan go | `plan_go` for the pass that presented it; `plan` for another pass, which presents it again |
 | plan go recorded | `build` (do not call `begin_build` again) |
 | a passing final review of the plan | `outward_go` |
 | outward go recorded | `outward_go`, and `approved("outward")` is true |
 | three review rounds and no passing one | `stopped` |
 | closed | `closed` |
+
+Orient and research are in-memory steps: they write nothing, so the card
+cannot say how far a pass got before its plan was presented. A resume with no
+plan on the card therefore repeats both. When the card shows an earlier pass (a
+stop stamp or a tried record) or the open joined a live pass, `reconciliation`
+says so, in one line starting `no plan is stored for this ticket, so orient and
+research start again`. Read it to the person, then redo orient and research; do
+not skip them on the strength of what an earlier session remembers. A blank
+card with no pass id is a first open and prints no such line.
 
 A change on the ticket's acceptance criteria (added, removed, edited,
 duplicated or reordered), or on a ledger item's spec, sends the pass back to `plan`: the stored plan must be
@@ -337,8 +348,11 @@ card.
 ## 4. Plan go: a hard stop
 
 `session.present_plan(plan)` stores the plan as the next revision, with the
-pass that presented it, and stamps the stop in the same write. Present the
-card and stop. Do not edit product files or dispatch `builder-core` until the
+pass that presented it, and stamps the stop in the same write. Show the person
+`session.plan.render()`: its `Claim:` line, above the acceptance criteria, is the
+live pass's claim (the pass id, host and start time `open` recorded), so the
+person sees which pass holds the ticket next to the plan. Present the card and
+stop. Do not edit product files or dispatch `builder-core` until the
 person approves, then record it from the same pass with
 `session.record_go("plan", evidence=<ref>, verbatim=<their words>)`. A plan go
 records the plan revision, its criteria and the pass; it opens nothing for
@@ -392,6 +406,25 @@ Use exactly one when the pass cannot proceed:
   person to send. Do not contact the role or imply the ask was sent.
 
 Each exit stamps the stop and ends the pass.
+
+## The final message
+
+The last message of every session, whether it stops at the plan go or the
+outward go, takes a more-information exit, ends at the review cap or closes,
+ends with this line, with the id from `session.pass_id` (it stays readable after
+the pass ends):
+
+```
+Pass: <session.pass_id>
+```
+
+At a go stop the pass is still live, so add one line: `Resume with
+open(..., pass_id=<that id>)`, from a fresh `choose_store` handle. A person who
+returns the next day gives that id back and continues the same pass. After a
+more-information exit, the review cap or close the pass has ended and released
+its claim: the next open takes a new claim and needs no id, and the line says
+that instead. Either way the `Pass:` line stays, even when the plan card
+already showed the id.
 
 ## Records
 
