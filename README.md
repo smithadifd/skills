@@ -98,20 +98,7 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 
 ## Install
 
-You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables above say so. With the ledger, install this plugin last, as step 4 of "Using the ledger" below; without it, this section is the whole install. Add this repository's GitHub marketplace pinned to a release tag, then install the `sdlc` plugin, which carries every skill and agent:
-
-```sh
-claude plugin marketplace add https://github.com/smithadifd/skills.git#vX.Y.Z
-claude plugin install sdlc@skills
-```
-
-`vX.Y.Z` stands for a release tag from the [tags](https://github.com/smithadifd/skills/tags) page; each tag's entry in [CHANGELOG.md](CHANGELOG.md) says what it carries. The `#vX.Y.Z` suffix pins the marketplace to that tag, so the plugin is not served from a branch that keeps moving; without the suffix Claude Code follows the default branch. For the ledger's setup step, take a tag whose entry lists that step. To try a local clone instead, run `claude plugin marketplace add ./` from the clone: a bare `.` is refused as `Invalid marketplace source format`, because a local path has to start with `./` or `../`, or be absolute. To move to a newer tag, run `claude plugin marketplace remove skills` (it uninstalls the plugins installed from that marketplace), add the marketplace again at the new tag, and install again.
-
-A plugin install prefixes every command with the plugin's name and a colon. Where this README writes `/review`, a plugin install also answers to `sdlc:review` typed after the slash, and the same goes for every other skill. The examples below give the bare form first and the plugin form in parentheses, with the slash left for you to type. An `install.sh` install has only the bare names.
-
-The alternative is `install.sh`, which copies skills into `~/.claude/skills/` and agents into `~/.claude/agents/` with no marketplace involved. Use one route, not both. It also installs `_lib` beside the skills: a small shared folder (it is not a skill) that finds the optional ledger CLI.
-
-**The ledger setting.** One rule, in `skills/_lib/ledger_cli.py`, decides whether the ledger is on for `topic`, `sharpen`, `shape` and `ticket`. An explicit setting wins: `ledger_cli` in the `topic` skill's config (`~/.claude/skill-config/topic.json` over the shipped file), and for `ticket` also `TICKET_LEDGER_CLI`, which comes first. `none` turns the ledger off. With no setting, `topic`, `sharpen`, `shape` and `ticket` turn the ledger on when you invoke them, a `ledger` on your `PATH` passes the compatibility check (`ledger append-many --help` names `--expect-revision`), and `LEDGER_DB` names an existing database file. Such a skill runs the first `ledger` on your `PATH`, as `ticket` has since 0.12.0, so a writable folder put on `PATH` ahead of the real install could plant one. The setup step in the next section ends that lookup by writing the real CLI's absolute path as `ledger_cli`; setting `ledger_cli` by hand to an absolute path, or to `none`, does the same. While any setting names a CLI, no skill reads `PATH` for `ledger`. A pinned path that is later moved or removed is refused by name, in one line that starts with `ledger_cli_moved:` and gives the setup command to rerun; nothing falls back to `PATH`. Anything else leaves it off, and every skill behaves as it always did. Each skill's first ledger line names the rule that chose: `explicit setting`, `off by setting`, `ledger on PATH with LEDGER_DB` or `not configured`. This plugin declares no hooks: the ledger's brief at the start of a session, and the capture of your submitted prompts and question-picker answers, come from the ledger's own plugin (step 3 below). The release notes for each version are in [CHANGELOG.md](CHANGELOG.md).
+You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables above say so. Without the ledger, the two commands below are the whole install; with it, do the four steps below in order, of which step 4 is the two commands.
 
 **Using the ledger.** Do these four steps in this order; each needs the one before it. The first three are the ledger's: follow its README for their commands rather than copying them from here.
 
@@ -132,11 +119,44 @@ The alternative is `install.sh`, which copies skills into `~/.claude/skills/` an
    "LEDGER_HARNESS": "claude-code"
    ```
 
+   When `~/.claude/settings.json` does not exist yet, create it (and the `~/.claude` folder if it is missing) as this whole file:
+
+   ```json
+   {
+     "env": {
+       "LEDGER_DB": "/absolute/path/to/home/.local/share/ledger/<system>.db",
+       "LEDGER_OPERATOR": "<your name>",
+       "LEDGER_HARNESS": "claude-code"
+     }
+   }
+   ```
+
    `LEDGER_DB` names the database file, conventionally under `~/.local/share/ledger/` with one file per system; write it as an absolute path in the settings file, because `~` is not expanded there. `LEDGER_OPERATOR` is the human the writes are attributed to; set it yourself. `LEDGER_HARNESS` is optional in the settings file, because the ledger's plugin (step 3) supplies `claude-code` when it is unset; setting it there only makes it explicit. The shell needs it for the next write, where `cli` says you typed the command yourself.
 
    Then make the ledger's first write, step 6 of its start-here page. There is no separate init step: that write creates the database. Do it now, before any check below, because the `PATH` rule waits for that file and until it exists the ledger stays off unless `ledger_cli` names the command.
 3. Install the ledger's own plugin, `ledger-hooks` (ledger v0.2.0 or later), following the Claude Code plugin section of its README. It prints the ledger's brief at the start of each session and records your submitted prompts and question-picker answers; this plugin does neither. It runs the first `ledger` on the `PATH` Claude Code runs hooks with and takes no `ledger_cli` setting. An earlier release of this plugin (0.12.0) printed the brief itself; with that release installed beside the ledger's plugin the brief may print twice, so update this plugin.
-4. Install this plugin (Install, above), then pin the ledger command with the setup step: `python3 <skills>/_lib/ledger_cli.py setup`, where `<skills>` is the `skills` folder of the plugin's install. For a plugin install that is `~/.claude/plugins/cache/skills/sdlc/<version>/skills`, where `<version>` is the plugin's version; the `installPath` of `sdlc@skills` in `~/.claude/plugins/installed_plugins.json` names the folder when more than one version is there. For an `install.sh` copy it is `~/.claude/skills`, and from a clone it is the clone's `skills` folder. The step finds `ledger` once on your `PATH` (run it from a shell whose `PATH` you trust, because it runs that `ledger` once for the compatibility check), checks that it passes, and writes its absolute path as `ledger_cli` in `~/.claude/skill-config/topic.json`, keeping every other key. It never changes a setting that is in force: an existing `ledger_cli` (a path that still runs, a bare name, `none`) is refused as `ledger_cli_setup_exists` and the file is left as it was. The one exception is a pinned path that no longer exists, which is exactly the case where a skill told you to rerun setup. This step is optional: the four skills would also find a `ledger` on your `PATH` once the `LEDGER_DB` of step 2 names a database, but the pinned path keeps them from running whichever `ledger` comes first on `PATH`. Until you run it, the manual form is the same pin: set `ledger_cli` to the output of `command -v ledger`.
+4. Install this plugin (the two commands below), then pin the ledger command with the setup step: `python3 <skills>/_lib/ledger_cli.py setup`, where `<skills>` is the `skills` folder of the plugin's install. For a plugin install that is `~/.claude/plugins/cache/skills/sdlc/<version>/skills`, where `<version>` is the plugin's version; the `installPath` of `sdlc@skills` in `~/.claude/plugins/installed_plugins.json` names the folder when more than one version is there. For an `install.sh` copy it is `~/.claude/skills`, and from a clone it is the clone's `skills` folder. The step finds `ledger` once on your `PATH` (run it from a shell whose `PATH` you trust, because it runs that `ledger` once for the compatibility check), checks that it passes, and writes its absolute path as `ledger_cli` in `~/.claude/skill-config/topic.json`, keeping every other key. It never changes a setting that is in force: an existing `ledger_cli` (a path that still runs, a bare name, `none`) is refused as `ledger_cli_setup_exists` and the file is left as it was. The one exception is a pinned path that no longer exists, which is exactly the case where a skill told you to rerun setup. This step is optional: the four skills would also find a `ledger` on your `PATH` once the `LEDGER_DB` of step 2 names a database, but the pinned path keeps them from running whichever `ledger` comes first on `PATH`. Until you run it, the manual form is the same pin: set `ledger_cli` to the output of `command -v ledger`.
+
+Add this repository's GitHub marketplace pinned to a release tag, then install the `sdlc` plugin, which carries every skill and agent:
+
+```sh
+claude plugin marketplace add https://github.com/smithadifd/skills.git#vX.Y.Z
+claude plugin install sdlc@skills
+```
+
+`vX.Y.Z` stands for a release tag from the [tags](https://github.com/smithadifd/skills/tags) page; each tag's entry in [CHANGELOG.md](CHANGELOG.md) says what it carries. The `#vX.Y.Z` suffix pins the marketplace to that tag, so the plugin is not served from a branch that keeps moving; without the suffix Claude Code follows the default branch. For the ledger's setup step, take a tag whose entry lists that step. To try a local clone instead, run `claude plugin marketplace add ./` from the clone: a bare `.` is refused as `Invalid marketplace source format`, because a local path has to start with `./` or `../`, or be absolute. To move to a newer tag, run `claude plugin marketplace remove skills` (it uninstalls the plugins installed from that marketplace), add the marketplace again at the new tag, and install again.
+
+This command prints the newest release tag of this repository; its output is the tag to put after `#`:
+
+```sh
+git ls-remote --tags --refs --sort=-v:refname https://github.com/smithadifd/skills.git 'v*' | sed -n '1s|.*refs/tags/||p'
+```
+
+A plugin install prefixes every command with the plugin's name and a colon. Where this README writes `/review`, a plugin install also answers to `sdlc:review` typed after the slash, and the same goes for every other skill. The examples below give the bare form first and the plugin form in parentheses, with the slash left for you to type. An `install.sh` install has only the bare names.
+
+The alternative is `install.sh`, which copies skills into `~/.claude/skills/` and agents into `~/.claude/agents/` with no marketplace involved. Use one route, not both. It also installs `_lib` beside the skills: a small shared folder (it is not a skill) that finds the optional ledger CLI.
+
+**The ledger setting.** One rule, in `skills/_lib/ledger_cli.py`, decides whether the ledger is on for `topic`, `sharpen`, `shape` and `ticket`. An explicit setting wins: `ledger_cli` in the `topic` skill's config (`~/.claude/skill-config/topic.json` over the shipped file), and for `ticket` also `TICKET_LEDGER_CLI`, which comes first. `none` turns the ledger off. With no setting, `topic`, `sharpen`, `shape` and `ticket` turn the ledger on when you invoke them, a `ledger` on your `PATH` passes the compatibility check (`ledger append-many --help` names `--expect-revision`), and `LEDGER_DB` names an existing database file. Such a skill runs the first `ledger` on your `PATH`, as `ticket` has since 0.12.0, so a writable folder put on `PATH` ahead of the real install could plant one. The setup step (step 4 of "Using the ledger", above) ends that lookup by writing the real CLI's absolute path as `ledger_cli`; setting `ledger_cli` by hand to an absolute path, or to `none`, does the same. While any setting names a CLI, no skill reads `PATH` for `ledger`. A pinned path that is later moved or removed is refused by name, in one line that starts with `ledger_cli_moved:` and gives the setup command to rerun; nothing falls back to `PATH`. Anything else leaves it off, and every skill behaves as it always did. Each skill's first ledger line names the rule that chose: `explicit setting`, `off by setting`, `ledger on PATH with LEDGER_DB` or `not configured`. This plugin declares no hooks: the ledger's brief at the start of a session, and the capture of your submitted prompts and question-picker answers, come from the ledger's own plugin (step 3 above). The release notes for each version are in [CHANGELOG.md](CHANGELOG.md).
 
 The question pickers (the capture of your question-picker answers) and the ledger's pane need an interactive Claude Code session; neither works under `claude -p`. The `/plugin` commands do not run there either, so install plugins from your shell with `claude plugin`.
 
