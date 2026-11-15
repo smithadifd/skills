@@ -2,7 +2,9 @@
 
 Release notes for the `sdlc` plugin, newest first.
 
-## Unreleased
+## 0.13.0
+
+This is the release tagged v1.3.0 in the repository. It mainly carries the ledger-on path for `ticket` (a ledger item can be the ticket, and the open records the ticket as the item's spec), `setup` pinning the ledger CLI's absolute path, the session brief moving from this plugin to the ledger's own plugin (this plugin no longer declares a hook), and the README's one setup order. The sections below list every change.
 
 ### The ticket skill states the pass id, shows its claim on the plan card, and says when orient and research start again
 
@@ -92,6 +94,10 @@ What changes for you:
 - With `ledger` on your `PATH` and `LEDGER_DB` set, `topic`, `sharpen` and `shape` now use the ledger with no `ledger_cli` when you invoke them. Like `ticket` since 0.12.0, such a skill runs the first `ledger` on your `PATH`; setting `ledger_cli` to an absolute path, or to `none`, avoids that lookup. To keep them on files, set `"ledger_cli": "none"` in `~/.claude/skill-config/topic.json`.
 - `ticket` now also follows `ledger_cli`: a CLI named there is used (and refused when it fails the check), and `none` there keeps the markdown store.
 - `"ledger_cli": null` in your override file no longer forces the ledger off. It clears the setting, and the `PATH` rule decides.
+
+### A ticket card's plan steps show what its stored events prove
+
+A closed ticket card showed its `plan`, `build`, `review` and `outward` steps as pending, because the plan snapshot is written once, when the plan is presented, and the card rendered the status stored in it. The card now derives each step's status from its stored events, the way it already derives each criterion's result from the stored rounds. It fails closed: a step shows complete only when the stored events prove it (`plan` needs a plan go of the presenting pass, `build` a stored review round, `review` a passing last round, `outward` a closed card and an outward go), each step from `plan` on only after the step before it, a step the plan skipped shows skipped, and every other step shows pending, whatever the snapshot holds. Nothing derived is stored: the snapshot, both stores and the ledger notes are unchanged.
 
 ## 0.12.0
 
