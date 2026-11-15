@@ -101,12 +101,16 @@ temp file to the path, again never replacing a file. Different: it links the
 backup back to the path and refuses `config_changed`. If at either link a file
 has reappeared at the path, setup leaves that file, keeps the backup and
 refuses `config_changed` naming it. No step renames or replaces onto the path
-except the one below. After a successful commit setup renames the in-flight
-file to `topic.json.setup-previous` (the completed-version name), replacing
-any older file of that name, and the success line names it. The rename moves
-the file itself, so a racing in-place edit stays in it. Setup never unlinks
-either file after a commit. It removes the in-flight file only after a
-successful restore, and then only while it is the same file as the one at the
+except the one below. After a successful commit setup gives the in-flight
+file a kept name, `topic.json.setup-previous.<UTC timestamp>-<pid>` (with a
+`-<counter>` suffix after a name already taken), by linking the file to it
+(`os.link`, which fails rather than replace a file) and then removing the
+in-flight name. Every displaced version thus ends at a name setup never uses
+again, and no earlier kept file is ever replaced. The success line names the
+kept file and says it may be removed once no editor has it open. Setup never
+removes the last name of, or replaces, a file that has been at the override
+path. It removes the in-flight name only after the kept name is linked, or after
+a successful restore, and then only while it is the same file as the one at the
 path.
 
 Only an interrupted commit is ever recovered. The in-flight name is fixed so a
@@ -116,20 +120,21 @@ to the path. An in-flight file that is the same file as the one at the path (a
 run that stopped after its restore) is dropped. Any other in-flight file found
 beside a present file is a version setup cannot place, so a run that would move
 the file aside refuses `config_changed` naming it rather than move a file over
-it: check it, remove it and rerun. The completed-version file is a record that
-setup never reads: deleting or editing the override later never brings its keys
-back. If the rename to it fails after a successful commit, setup still exits 0
-and its line says the version it replaced was left at the in-flight path; that
-file is then handled as above, and neither file is ever unlinked.
+it: check it, remove it and rerun. The kept files are records that setup never reads,
+restores, prunes or rotates: deleting or editing the override later never
+brings their keys back. If the link to a kept name fails after a successful
+commit, setup still exits 0 and its line says the version it replaced was left
+at the in-flight path; that file is then handled as above.
 
 Residual: a writer that edits in place, on a descriptor it opened before the
 move, and writes after setup's compare, lands its edit in the displaced file.
 When that write lands before setup's last read of it, setup names the
-completed-version file and exits 1 (`config_changed`), though `ledger_cli` is
-already written at the path; a write that lands after that last read is in the
-file too, which setup keeps, and setup exits 0 naming it. Merge any such edit
-by hand. The next successful commit replaces the completed-version file, so
-keep what you need from it. Editors that save by writing a new file and
+kept file and exits 1 (`config_changed`), though `ledger_cli` is already
+written at the path; a write that lands after that last read is in the kept
+file too, and setup exits 0 naming it. The edit is in that side file, not in
+the override: merge it by hand. A later setup run keeps its own displaced
+version under a new name, so the file holding the edit is never replaced.
+Editors that save by writing a new file and
 renaming it over the path are covered. After a restore, the check that the
 backup is the file at the path and its removal are two steps: a save by rename
 that lands between them replaces the restored version at the path, as that
@@ -174,6 +179,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -216,8 +222,12 @@ LOCK_SUFFIX = ".lock"
 # The in-flight name, beside the override, that setup moves the file it displaces to. Crash recovery
 # reads only this name.
 BACKUP_SUFFIX = ".setup-backup"
-# The completed-version name: a successful commit renames the in-flight file to it. Never read.
+# The kept-name prefix: a successful commit links the in-flight file to
+# `<override>.setup-previous.<UTC timestamp>-<pid>` (plus `-<counter>` after a name already taken).
+# Setup never replaces, reads, prunes or removes a file under such a name.
 PREVIOUS_SUFFIX = ".setup-previous"
+# How many counter suffixes setup tries after a kept name is taken before it leaves the file in-flight.
+KEEP_ATTEMPTS = 1000
 
 
 class ConfigError(ValueError):
@@ -533,9 +543,35 @@ def _backup_path(target: Path) -> Path:
     return target.parent / (target.name + BACKUP_SUFFIX)
 
 
-def _previous_path(target: Path) -> Path:
-    """Where a completed commit keeps the displaced version; crash recovery never reads it."""
-    return target.parent / (target.name + PREVIOUS_SUFFIX)
+def _utc_stamp() -> str:
+    """The UTC timestamp part of a kept name."""
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+
+def _keep_displaced(target: Path, backup: Path) -> Optional[Path]:
+    """Give the in-flight file a kept name that no earlier file has: link it there, then unlink `backup`.
+
+    The kept name is `<override>.setup-previous.<UTC timestamp>-<pid>`, with a `-<counter>` suffix
+    after a `FileExistsError`. `os.link` never replaces a file, so no earlier kept file is touched,
+    and nothing is renamed onto a kept name. Returns the kept path, or None when the file stays at
+    the in-flight name: the link failed, every counter was taken, or the in-flight name could not be
+    removed after the link. Crash recovery reads only the in-flight name, never a kept one.
+    """
+    stem = f"{target.name}{PREVIOUS_SUFFIX}.{_utc_stamp()}-{os.getpid()}"
+    for counter in range(KEEP_ATTEMPTS):
+        kept = target.parent / (stem if counter == 0 else f"{stem}-{counter}")
+        try:
+            os.link(backup, kept)
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+        try:
+            os.unlink(backup)
+        except OSError:
+            return None
+        return kept
+    return None
 
 
 def _drop_backup_if_restored(target: Path, backup: Path) -> None:
@@ -592,14 +628,16 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optiona
     The caller holds the setup lock, which serializes setup runs; the move aside and the no-clobber
     links guard against a writer that takes no lock. Nothing renames or replaces onto `target`.
     Raises _Refusal or OSError with nothing committed. After a commit the in-flight backup is
-    renamed to the completed-version name (`topic.json.setup-previous`, replacing an older one) so
-    crash recovery, which reads only the in-flight name, never restores it; neither file is ever
-    unlinked. The rename moves the file itself, so an in-place writer's later write stays in it.
+    linked to a kept name (`topic.json.setup-previous.<UTC timestamp>-<pid>`, plus a counter after
+    a name already taken) and its in-flight name removed, so crash recovery, which reads only the
+    in-flight name, never restores it. Setup never renames or links over, or removes the last name
+    of, any file that has been at the override path, and never replaces, reads, prunes or restores
+    a kept file; an in-place writer's later write lands in the kept file, to be merged by hand.
     Returns (kept, edited, left): kept is None when the file was created (nothing displaced), else
-    the path of the displaced version (the completed-version file, or the in-flight file when the
-    rename failed, in which case `left` is True); edited is True when a re-read of that file shows
-    it no longer holds `expected` (a writer edited it in place after the compare) or could not be
-    read. A write that lands after that re-read is in the kept file too.
+    the path of the displaced version (the kept file, or the in-flight file when it could not be
+    given a kept name, in which case `left` is True); edited is True when a re-read of that file
+    shows it no longer holds `expected` (a writer edited it in place after the compare) or could
+    not be read. A write that lands after that re-read is in the kept file too.
     """
     backup = _backup_path(target)
     fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
@@ -660,14 +698,13 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optiona
         except OSError:
             _restore(target, backup)
             raise
-        # Committed. The displaced version stays as a record under the completed-version name, which
-        # crash recovery never reads; os.rename moves the file itself, so an in-place writer's
-        # later write stays in it. If the rename fails the file stays at the in-flight name.
-        kept, left = _previous_path(target), False
-        try:
-            os.rename(backup, kept)
-        except OSError:
-            kept, left = backup, True
+        # Committed. The displaced version stays as a record under a kept name nothing has used
+        # before, which crash recovery never reads. If it cannot be linked the file stays at the
+        # in-flight name.
+        kept = _keep_displaced(target, backup)
+        left = kept is None
+        if kept is None:
+            kept = backup
         # Note whether an in-place writer has already edited it.
         try:
             return kept, kept.read_bytes() != expected, left
@@ -783,10 +820,13 @@ def _setup_locked(override: Path, target: Path) -> int:
     if left:
         print(
             f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced was left at {kept} "
-            f"(it could not be renamed to {_previous_path(target)}): remove it before the next setup run"
+            f"(it could not be given a {target.name}{PREVIOUS_SUFFIX}.* name): remove it before the next setup run"
         )
     elif kept is not None:
-        print(f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced is kept at {kept}")
+        print(
+            f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced is kept at {kept}; "
+            "remove it once no editor has it open"
+        )
     else:
         print(f"{CONFIG_KEY} set to {pinned} in {target}")
     return 0
