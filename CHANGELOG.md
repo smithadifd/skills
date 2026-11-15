@@ -2,7 +2,9 @@
 
 Release notes for the `sdlc` plugin, newest first.
 
-## Unreleased
+## 0.13.0
+
+This is the release tagged v1.3.0 in the repository. It mainly carries the ledger-on path for `ticket` (a ledger item can be the ticket, and the open records the ticket as the item's spec), `setup` pinning the ledger CLI's absolute path, the session brief moving from this plugin to the ledger's own plugin (this plugin no longer declares a hook), and the README's one setup order. The sections below list every change.
 
 ### The ticket skill states the pass id, shows its claim on the plan card, and says when orient and research start again
 
