@@ -82,7 +82,14 @@ commit that the residual below describes:
   lock (an editor, say) saved it meanwhile, or a backup from an earlier run
   stands beside it (below). The file that writer left stays at the path; the
   line names the backup when setup kept one; rerun.
-- `ledger_cli_setup_write_failed`: the directory or file could not be written.
+- `ledger_cli_setup_no_hardlinks`: the override's folder does not take hard links (the link
+  probe below failed), so setup could not put the file back if a step failed. Nothing is
+  moved, created or written: the override is untouched and no temp, probe or backup file
+  is left.
+- `ledger_cli_setup_write_failed`: the directory or file could not be written, or the
+  link probe's file could not be removed (the line names it, and nothing was moved), or a
+  moved-aside version could not be linked back (the line names where it is kept; move it
+  back by hand when a rerun cannot link it).
 
 How setup writes. Setup never removes or overwrites a version of the override
 file it did not read. It commits only by (1) creating the file when absent, or
@@ -91,7 +98,11 @@ and creating the new file no-clobber. In every other case the file a
 non-locking writer left is the one at the path when setup exits, and setup
 exits 1. While (2) runs, the path is briefly absent.
 
-In detail: the new text goes to a temp file in the same folder. (1) With no
+In detail: the new text goes to a temp file in the same folder. Before anything is created or
+moved, setup links that temp file to a probe name beside it (the temp file's name plus
+`.link-probe`; `os.link`, which never replaces) and removes the probe: a failed link, of any
+kind, refuses `ledger_cli_setup_no_hardlinks`, and a probe that cannot be removed refuses
+`ledger_cli_setup_write_failed` naming it; either way the override is as it was. (1) With no
 file at the path, setup links the temp file there (`os.link`, which fails rather
 than replace a file that appeared meanwhile; that refuses `config_changed`).
 (2) Otherwise setup renames the file to `topic.json.setup-backup` beside it
@@ -153,7 +164,9 @@ check runs.
 Setup runs the first `ledger` on `PATH` once, for the compatibility check, so
 run it from a shell whose `PATH` you trust. A rerun after a stop at any step is
 safe: the file is either as it was, holds the pinned path, or is absent with its
-version in the in-flight backup, which the rerun restores before it reads; a rerun after
+version in the in-flight backup, which the rerun restores before it reads (by a hard link, which
+setup has shown works in that folder before it moved anything; should that link still fail,
+the backup holds the version and is moved back by hand); a rerun after
 success refuses `ledger_cli_setup_exists`. This plugin declares no hooks: the
 ledger's brief at session start comes from the ledger's own `ledger-hooks`
 plugin, which takes no `ledger_cli` setting and which this file does not govern.
@@ -215,8 +228,11 @@ SETUP_INCOMPATIBLE = "ledger_cli_setup_incompatible"
 SETUP_CONFIG_UNREADABLE = "ledger_cli_setup_config_unreadable"
 SETUP_EXISTS = "ledger_cli_setup_exists"
 SETUP_CONFIG_CHANGED = "ledger_cli_setup_config_changed"
+SETUP_NO_HARDLINKS = "ledger_cli_setup_no_hardlinks"
 SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
 SETUP_LOCK_FAILED = "ledger_cli_setup_lock_failed"
+# The hard-link probe's name is setup's temp file name plus this suffix, in the override's folder.
+PROBE_SUFFIX = ".link-probe"
 # The lock file sits beside the override and is named by appending this to its name.
 LOCK_SUFFIX = ".lock"
 # The in-flight name, beside the override, that setup moves the file it displaces to. Crash recovery
@@ -600,7 +616,8 @@ def _restore(target: Path, backup: Path) -> None:
         raise _Refusal(
             SETUP_WRITE_FAILED,
             f"could not put {target} back ({_one_line(exc.strerror or str(exc))}); its version is "
-            f"kept at {backup}, and rerunning setup puts it back",
+            f"kept at {backup}; a rerun links it back only if that link can succeed, so if a rerun "
+            "fails the same way, move it back by hand",
         ) from None
     _drop_backup_if_restored(target, backup)
 
@@ -616,6 +633,34 @@ def _recover(target: Path) -> None:
     _drop_backup_if_restored(target, backup)
 
 
+def _require_hard_links(target: Path, temp: str) -> None:
+    """Show that a hard link works in the override's folder before anything is created or moved.
+
+    Links setup's own temp file to `<temp>.link-probe` (`os.link`, which never replaces) and
+    removes that name. Any OSError from the link (EPERM, ENOTSUP, EXDEV, EMLINK or other) means
+    the folder has no usable hard links: refuses SETUP_NO_HARDLINKS. A probe name that cannot
+    be removed refuses SETUP_WRITE_FAILED naming it. Both refuse before any rename, so the
+    override is present and unchanged.
+    """
+    probe_name = temp + PROBE_SUFFIX
+    try:
+        os.link(temp, probe_name)
+    except OSError as exc:
+        raise _Refusal(
+            SETUP_NO_HARDLINKS,
+            f"{target.parent} does not take hard links ({_one_line(exc.strerror or str(exc))}), so setup "
+            f"cannot move {target.name} aside and put it back; nothing was moved or written",
+        ) from None
+    try:
+        os.unlink(probe_name)
+    except OSError as exc:
+        raise _Refusal(
+            SETUP_WRITE_FAILED,
+            f"could not remove the link probe file {probe_name} ({_one_line(exc.strerror or str(exc))}); "
+            "nothing was moved or written: remove it and rerun setup",
+        ) from None
+
+
 def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optional[Path], bool, bool]:
     """Write `text` at `target`, the version setup read being `expected` (None: absent).
 
@@ -624,6 +669,9 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optiona
     bytes equal what setup read, and creating the new file no-clobber. In every other case the file
     a non-locking writer left is the one at the path when setup exits, and setup exits 1. While (2)
     runs, the path is briefly absent.
+
+    Before either path touches the override, `_require_hard_links` shows a hard link works in its
+    folder, so a folder without hard links is refused with nothing moved or created.
 
     The caller holds the setup lock, which serializes setup runs; the move aside and the no-clobber
     links guard against a writer that takes no lock. Nothing renames or replaces onto `target`.
@@ -646,6 +694,7 @@ def _commit(target: Path, text: str, expected: Optional[bytes]) -> tuple[Optiona
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        _require_hard_links(target, temp)
         if expected is None:
             # (1) Create-if-absent: os.link never replaces a file at its destination.
             try:
