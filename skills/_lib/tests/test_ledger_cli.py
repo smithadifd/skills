@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -501,6 +502,9 @@ SETUP_TOKENS = (
 
 LOCK_NAME = "topic.json.lock"
 BACKUP_NAME = "topic.json.setup-backup"
+PREVIOUS_NAME = "topic.json.setup-previous"
+# The grammar of a kept name: the prefix, a UTC timestamp, the pid, and an optional collision counter.
+KEPT_GRAMMAR = re.compile(r"^topic\.json\.setup-previous\.\d{8}T\d{6}Z-\d+(-\d+)?$")
 
 
 def _plant(directory, marker):
@@ -548,7 +552,13 @@ def _refusal(proc, token):
 def _no_temp_files(home):
     folder = _override_file(home).parent
     if folder.is_dir():
-        assert [p.name for p in folder.iterdir() if p.name not in ("topic.json", LOCK_NAME)] == []
+        # The kept files of displaced versions are left on purpose after a commit.
+        leftovers = [
+            p.name
+            for p in folder.iterdir()
+            if p.name not in ("topic.json", LOCK_NAME) and not p.name.startswith(PREVIOUS_NAME + ".")
+        ]
+        assert leftovers == []
 
 
 def _nothing_written(home):
@@ -572,7 +582,12 @@ def test_setup_writes_the_absolute_path_and_keeps_every_other_key(machine, befor
     proc = machine.run("setup")
     assert proc.returncode == 0 and proc.stderr == ""
     path = _override_file(machine.home_dir)
-    assert proc.stdout.splitlines() == [f"ledger_cli set to {machine.ledger} in {path}"]
+    kept = (
+        ""
+        if before is None
+        else f"; the version it replaced is kept at {_previous(machine.home_dir)}; remove it once no editor has it open"
+    )
+    assert proc.stdout.splitlines() == [f"ledger_cli set to {machine.ledger} in {path}{kept}"]
     written = json.loads(path.read_text(encoding="utf-8"))
     assert written == {**(before or {}), "ledger_cli": str(machine.ledger)}
     assert list(written)[: len(before or {})] == list(before or {}), "the key order is kept"
@@ -765,7 +780,14 @@ def test_setup_replaces_a_dead_absolute_path_only(machine, tmp_path):
         "keep": 1,
     }
     _put_override(machine.home_dir, json.dumps({"ledger_cli": "~/.claude/gone/ledger"}))
+    # The first run's displaced version sits under a kept name, which never blocks a later run and is
+    # never replaced: the second commit keeps the version it displaced under another name.
+    first_kept = _previous(machine.home_dir)
+    first_bytes = first_kept.read_bytes()
     assert machine.run("setup").returncode == 0
+    kept = _kept(machine.home_dir)
+    assert len(kept) == 2 and first_kept in kept and first_kept.read_bytes() == first_bytes
+    assert [p for p in kept if p != first_kept and json.loads(p.read_text(encoding="utf-8")) == {"ledger_cli": "~/.claude/gone/ledger"}]
     assert _override_file(machine.home_dir).read_text(encoding="utf-8").count(str(machine.ledger)) == 1
 
 
@@ -1009,7 +1031,22 @@ def _same_path(one, two):
 
 
 def _backup(home):
+    """The in-flight name: the only one crash recovery reads."""
     return _override_file(home).parent / BACKUP_NAME
+
+
+def _kept(home):
+    """Every kept file beside the override: where finished commits keep the displaced versions."""
+    folder = _override_file(home).parent
+    return sorted(p for p in folder.iterdir() if p.name.startswith(PREVIOUS_NAME + "."))
+
+
+def _previous(home):
+    """The one kept file after a single displacing commit."""
+    files = _kept(home)
+    assert len(files) == 1, files
+    assert KEPT_GRAMMAR.match(files[0].name), files[0].name
+    return files[0]
 
 
 def test_an_editor_save_in_the_commit_window_is_the_file_left_at_the_path(machine, monkeypatch, capsys):
@@ -1164,7 +1201,7 @@ def test_a_backup_that_is_the_same_file_as_the_present_one_is_dropped(machine):
     _no_temp_files(machine.home_dir)
 
 
-def test_an_in_place_edit_after_the_compare_lands_in_the_kept_backup(machine, monkeypatch, capsys):
+def test_an_in_place_edit_after_the_compare_lands_in_the_kept_file(machine, monkeypatch, capsys):
     """The residual: a writer holding a descriptor opened before the move writes after the compare."""
     module = _load()
     machine.use(monkeypatch)
@@ -1188,10 +1225,115 @@ def test_an_in_place_edit_after_the_compare_lands_in_the_kept_backup(machine, mo
         monkeypatch.setattr(module.os, "link", real_link)
         handle.close()
     captured = capsys.readouterr()
-    backup = _backup(machine.home_dir)
+    backup = _previous(machine.home_dir)
     assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert not _backup(machine.home_dir).exists(), "a completed commit leaves no in-flight file"
     assert backup.read_bytes() == edited, "the in-place edit is kept"
     assert captured.err.startswith("ledger_cli_setup_config_changed: ") and str(backup) in captured.err
+    assert json.loads(path.read_text(encoding="utf-8")) == {"keep": 1, "ledger_cli": str(machine.ledger)}
+
+
+def test_a_successful_commit_keeps_the_displaced_bytes_under_a_kept_name(
+    machine, capsys, monkeypatch
+):
+    """Setup never unlinks the displaced version after a commit, and leaves no in-flight file."""
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    result = module.setup()
+    captured = capsys.readouterr()
+    previous = _previous(machine.home_dir)
+    assert result == 0, captured.err
+    assert not _backup(machine.home_dir).exists() and not os.path.lexists(_backup(machine.home_dir))
+    assert previous.read_bytes() == b'{"keep": 1}', "the displaced version is kept"
+    assert not os.path.samefile(previous, path)
+    assert captured.out == (
+        f"ledger_cli set to {machine.ledger} in {path}; the version it replaced is kept at {previous}; "
+        "remove it once no editor has it open\n"
+    )
+    # A rerun finds the pin and leaves both files as they are.
+    written = path.read_bytes()
+    rerun = module.setup()
+    assert rerun == 1 and path.read_bytes() == written and previous.read_bytes() == b'{"keep": 1}'
+    capsys.readouterr()
+
+
+def test_deleting_the_override_after_a_commit_does_not_bring_the_displaced_keys_back(machine, capsys, monkeypatch):
+    """A kept file is never read: setup treats a deleted override as a first run."""
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": "deleted-state"}')
+    assert module.setup() == 0
+    capsys.readouterr()
+    previous = _previous(machine.home_dir)
+    assert previous.read_bytes() == b'{"keep": "deleted-state"}'
+    path.unlink()
+    assert module.setup() == 0
+    captured = capsys.readouterr()
+    assert json.loads(path.read_text(encoding="utf-8")) == {"ledger_cli": str(machine.ledger)}
+    assert captured.out == f"ledger_cli set to {machine.ledger} in {path}\n"
+    assert not _backup(machine.home_dir).exists()
+    assert previous.read_bytes() == b'{"keep": "deleted-state"}', "the record is left as it was"
+
+
+def test_a_link_to_a_kept_name_that_fails_leaves_the_in_flight_file_and_exits_0(machine, capsys, monkeypatch):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    real_link = os.link
+
+    def refuse_the_kept_link(source, destination, *args, **kwargs):
+        if os.path.basename(os.fspath(destination)).startswith(PREVIOUS_NAME + "."):
+            raise PermissionError(13, "Permission denied")
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", refuse_the_kept_link)
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    captured = capsys.readouterr()
+    backup = _backup(machine.home_dir)
+    assert result == 0, captured.err
+    assert backup.read_bytes() == b'{"keep": 1}' and _kept(machine.home_dir) == [], "nothing is unlinked or lost"
+    assert str(backup) in captured.out and "left at" in captured.out and f"{PREVIOUS_NAME}.*" in captured.out
+    assert json.loads(path.read_text(encoding="utf-8")) == {"keep": 1, "ledger_cli": str(machine.ledger)}
+    # With the override present the in-flight file is not restored; a rerun finds the pin.
+    assert module.setup() == 1 and backup.read_bytes() == b'{"keep": 1}'
+    capsys.readouterr()
+
+
+def test_an_in_place_edit_after_setups_last_read_is_in_the_named_file_and_setup_exits_0(
+    machine, monkeypatch, capsys
+):
+    """The editor holds a descriptor opened before the move and writes after setup's last read of the
+    backup (at the success line): setup still exits 0, and the edit is in the backup the line names."""
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    edited = b'{"keep": 1, "edited": "in place"}'
+    handle = open(path, "r+b")
+    lines = []
+
+    def edit_then_report(text, *args, **kwargs):
+        handle.seek(0)
+        handle.write(edited)
+        handle.truncate()
+        handle.flush()
+        lines.append(text)
+
+    monkeypatch.setattr(module, "print", edit_then_report, raising=False)
+    try:
+        result = module.setup()
+    finally:
+        handle.close()
+    captured = capsys.readouterr()
+    backup = _previous(machine.home_dir)
+    assert result == 0, f"setup exited {result}; stderr {captured.err!r}"
+    assert not _backup(machine.home_dir).exists(), "a completed commit leaves no in-flight file"
+    assert backup.read_bytes() == edited, "the in-place edit is in the named completed-version file"
+    assert lines == [
+        f"ledger_cli set to {machine.ledger} in {path}; the version it replaced is kept at {backup}; "
+        "remove it once no editor has it open"
+    ]
     assert json.loads(path.read_text(encoding="utf-8")) == {"keep": 1, "ledger_cli": str(machine.ledger)}
 
 
@@ -1327,4 +1469,106 @@ def test_setup_never_renames_or_replaces_onto_the_override_path(machine, monkeyp
     for name, function in real.items():
         monkeypatch.setattr(module.os, name, function)
     assert result == 0
-    assert seen == [("rename", "topic.json", BACKUP_NAME)]
+    assert seen == [("rename", "topic.json", BACKUP_NAME)], "the kept name is linked to, never renamed onto"
+
+
+def _spare_cli(tmp_path, machine, name):
+    """A second live `ledger` in a directory of its own, for the run after the first pin goes dead."""
+    directory = tmp_path / name
+    directory.mkdir()
+    shutil.copy(machine.ledger, directory / "ledger")
+    return directory
+
+
+def test_a_second_setup_never_replaces_the_file_an_editor_still_holds(machine, monkeypatch, capsys, tmp_path):
+    """An editor holds a descriptor on the override across two displacing setups and saves late: its
+    bytes stay in a kept file, and the second displaced version is kept byte for byte beside it."""
+    module = _load()
+    spare = _spare_cli(tmp_path, machine, "spare")
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    handle = open(path, "r+b")
+    held = os.fstat(handle.fileno()).st_ino
+    late = b'{"keep": 1, "late": "editor save"}'
+    try:
+        assert module.setup() == 0
+        second_displaced = path.read_bytes()
+        machine.ledger.unlink()  # the pinned CLI is dead, so the next setup replaces the pin
+        monkeypatch.setenv("PATH", f"{spare}{os.pathsep}{machine.path}")
+        assert module.setup() == 0
+        handle.seek(0)
+        handle.write(late)
+        handle.truncate()
+        handle.flush()
+    finally:
+        handle.close()
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    kept = _kept(machine.home_dir)
+    assert len(kept) == 2, [p.name for p in kept]
+    assert all(KEPT_GRAMMAR.match(p.name) for p in kept), [p.name for p in kept]
+    holding = [p for p in kept if p.stat().st_ino == held]
+    others = [p for p in kept if p.stat().st_ino != held]
+    assert len(holding) == 1 and len(others) == 1, "the editor's file and the second displaced file are distinct"
+    assert holding[0].read_bytes() == late, "the late save is in the file the editor held"
+    assert others[0].read_bytes() == second_displaced, "the second displaced version is kept byte for byte"
+    assert not _backup(machine.home_dir).exists()
+    assert json.loads(path.read_text(encoding="utf-8"))["ledger_cli"] == str(spare / "ledger")
+
+
+def test_every_file_that_has_been_at_the_override_path_keeps_a_name_after_three_setups(
+    machine, monkeypatch, capsys, tmp_path
+):
+    """Setup never removes the last name of a file that was at the override path."""
+    module = _load()
+    spares = [_spare_cli(tmp_path, machine, "spare1"), _spare_cli(tmp_path, machine, "spare2")]
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    recorded = []
+    held = []  # open descriptors keep a lost file's inode from being reused by a later file
+
+    def record():
+        recorded.append(path.stat().st_ino)
+        held.append(open(path, "rb"))
+
+    try:
+        record()
+        assert module.setup() == 0
+        for dead, spare in ((machine.ledger, spares[0]), (spares[0] / "ledger", spares[1])):
+            dead.unlink()  # the pinned CLI is dead, so the next setup replaces the pin
+            monkeypatch.setenv("PATH", f"{spare}{os.pathsep}{machine.path}")
+            record()
+            assert module.setup() == 0
+        names = [p for p in path.parent.iterdir()]
+        reachable = {os.stat(p).st_ino for p in names}
+        missing = [ino for ino in recorded if ino not in reachable]
+        assert missing == [], f"inodes with no name left in {sorted(p.name for p in names)}: {missing}"
+        assert len(_kept(machine.home_dir)) == 3
+    finally:
+        for handle in held:
+            handle.close()
+    capsys.readouterr()
+
+
+def test_a_taken_kept_name_is_left_byte_identical_and_another_name_is_used(machine, monkeypatch, capsys):
+    """The first candidate names exist already: setup links to the next free name, never over them."""
+    module = _load()
+    machine.use(monkeypatch)
+    monkeypatch.setattr(module, "_utc_stamp", lambda: "20000101T000000Z")
+    monkeypatch.setattr(module.os, "getpid", lambda: 4242)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    folder = path.parent
+    first = folder / f"{PREVIOUS_NAME}.20000101T000000Z-4242"
+    second = folder / f"{PREVIOUS_NAME}.20000101T000000Z-4242-1"
+    first.write_bytes(b"precious one")
+    second.write_bytes(b"precious two")
+    inodes = (first.stat().st_ino, second.stat().st_ino)
+    result = module.setup()
+    captured = capsys.readouterr()
+    third = folder / f"{PREVIOUS_NAME}.20000101T000000Z-4242-2"
+    assert result == 0, captured.err
+    assert first.read_bytes() == b"precious one" and second.read_bytes() == b"precious two"
+    assert (first.stat().st_ino, second.stat().st_ino) == inodes
+    assert third.read_bytes() == b'{"keep": 1}', "the displaced version is kept under the next free name"
+    assert not _backup(machine.home_dir).exists()
+    assert str(third) in captured.out
