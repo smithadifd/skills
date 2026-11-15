@@ -95,6 +95,10 @@ What changes for you:
 - `ticket` now also follows `ledger_cli`: a CLI named there is used (and refused when it fails the check), and `none` there keeps the markdown store.
 - `"ledger_cli": null` in your override file no longer forces the ledger off. It clears the setting, and the `PATH` rule decides.
 
+### A ticket card's plan steps show what its stored events prove
+
+A closed ticket card showed its `plan`, `build`, `review` and `outward` steps as pending, because the plan snapshot is written once, when the plan is presented, and the card rendered the status stored in it. The card now derives each step's status from its stored events, the way it already derives each criterion's result from the stored rounds. It fails closed: a step shows complete only when the stored events prove it (`plan` needs a plan go of the presenting pass, `build` a stored review round, `review` a passing last round, `outward` a closed card and an outward go), each step from `plan` on only after the step before it, a step the plan skipped shows skipped, and every other step shows pending, whatever the snapshot holds. Nothing derived is stored: the snapshot, both stores and the ledger notes are unchanged.
+
 ## 0.12.0
 
 This is the first tagged release (repository tag v1.2.0) that carries the session-start hook, the shared `_lib` folder and the ledger features listed under 0.11.0. The 0.11.0 notes below were written but never tagged; the previous tag, v1.1.1, is plugin 0.10.0 and has no hook.
