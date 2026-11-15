@@ -8,7 +8,10 @@ as an argument; nothing the install does to the source copy can add a name to th
 The end-to-end tests run `ci/check.sh ledger-e2e` from a throwaway copy of this repository
 whose install.sh is a wrapper: it runs the real installer (kept beside it as
 install-real.sh), installs one extra skill, `planted`, into the throwaway home, and leaves a
-background process behind. That process waits until the step has recorded the source copy
+background process behind in a session (and process group) of its own, which the step's
+install quiesce does not end: it ends only the install's own process group, and a process
+that leaves the group is the known limit this test covers. That process waits until the
+step has recorded the source copy
 after the installs (so the before/after record cannot see it), then changes the copy: it adds
 skills/planted holding a regular SKILL.md and, in one case, first swaps a listed skill
 directory for a symlink. The footprint check must fail naming exactly the two planted
@@ -60,7 +63,9 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ "${1:-}" = --all ]; then
   mkdir -p "$HOME/.claude/skills/planted"
   printf '%%s' %(skill_md)s > "$HOME/.claude/skills/planted/SKILL.md"
-  %(python)s -I -B %(child)s "$here" "$HOME" %(mode)s %(victim)s %(out)s < /dev/null > /dev/null &
+  # A new session, entered before the launcher returns, so the child outlives the quiesce.
+  %(python)s -I -c 'import subprocess, sys; subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)' \
+    %(python)s -I -B %(child)s "$here" "$HOME" %(mode)s %(victim)s %(out)s
 fi
 """
 

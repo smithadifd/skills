@@ -455,6 +455,101 @@ with open(out, "w") as handle:
 PY
 }
 
+# Run one install of the sdlc plugin from the source copy ($1, with the install
+# flag $2, under the environment command line in $3...) and return only once
+# every process it started has exited. The install's stdout is discarded and
+# its stdin is /dev/null; its stderr is the step's.
+#
+# Invariant: the footprint and source-tree checks that follow see the state
+# the install left, never a state a process it started changes afterwards.
+# install.sh runs as the leader of a fresh process group (its pid is the group
+# id). Once the leader has exited, the group is sent SIGTERM, and SIGKILL after
+# a grace of GRACE seconds; the group must then be empty (a probe of it returns
+# ESRCH) within DEADLINE seconds of the SIGTERM. The leader is waited on without
+# being reaped (WNOWAIT) until the SIGTERM is sent, so its pid, which is the
+# group id, cannot be reused for another process before then.
+#
+# Fail closed: a group still non-empty at the deadline, or any error starting,
+# signalling or probing it other than ESRCH (and EPERM, below), fails step
+# sdlc-install naming the install, before any later check runs. A non-zero exit
+# of the leader fails the same step, after its group has been emptied. EPERM is
+# never read as empty: macOS returns it for a group whose only members are
+# zombies (a child killed by the SIGTERM, before it is reaped), so it counts as
+# not yet empty and is polled until the deadline.
+#
+# Known limits: a child that leaves the group on its own (setsid or setpgid) is
+# outside this check, and so is a write it makes later. After the leader is
+# reaped, its pid could in principle be reused as the id of an unrelated new
+# group once this group is empty; the probe would then see that group.
+ledger_e2e_install() {
+  local src=$1 flag=$2 quiesce_out quiesce_status=0
+  shift 2
+  quiesce_out=$("$ledger_e2e_python" -I -B - "$src" "$flag" "$@" <<'PY'
+import errno, os, signal, subprocess, sys, time
+
+GRACE = 1.0
+DEADLINE = 5.0
+src, flag, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+name = "install.sh " + flag
+
+
+def finish(code, message):
+    print(message)
+    sys.exit(code)
+
+
+def error_name(error):
+    return errno.errorcode.get(error.errno, type(error).__name__)
+
+
+def send(pgid, sig):
+    # True once the group is shown empty (ESRCH); EPERM is not empty.
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+try:
+    leader = subprocess.Popen(
+        argv + ["./install.sh", flag],
+        cwd=src,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        process_group=0,
+    )
+except OSError as error:
+    finish(3, "%s could not be started as a process group leader: %s" % (name, error_name(error)))
+pgid = leader.pid
+try:
+    info = os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOWAIT)
+    succeeded = info.si_code == os.CLD_EXITED and info.si_status == 0
+    term_at = time.monotonic()
+    send(pgid, signal.SIGTERM)
+    leader.wait()
+    killed = False
+    while not send(pgid, 0):
+        waited = time.monotonic() - term_at
+        if waited >= DEADLINE:
+            finish(3, "%s left processes in its process group that were still there %.0f seconds after SIGTERM and SIGKILL" % (name, DEADLINE))
+        if not killed and waited >= GRACE:
+            killed = True
+            if send(pgid, signal.SIGKILL):
+                break
+        time.sleep(0.02)
+except OSError as error:
+    finish(3, "%s: signalling or probing its process group failed: %s" % (name, error_name(error)))
+if not succeeded:
+    finish(1, name + " failed")
+PY
+  ) || quiesce_status=$?
+  [ "$quiesce_status" -eq 0 ] ||
+    ledger_e2e_fail sdlc-install "${quiesce_out:-install.sh $flag: the process group helper failed (exit $quiesce_status)}"
+}
+
 check_ledger_e2e() {
   local scratch home python out asked name
   # Fail closed: no URL, no run. The message names the variable, never a value.
@@ -536,8 +631,10 @@ print(json.dumps({"skills": sorted(skills), "agents": sorted(agents)}))
 PY
   ) || ledger_e2e_fail install 'reading the skill and agent names of the source copy failed before the install'
   local install_env=(env -i HOME="$home" PATH=/usr/bin:/bin CLAUDE_CONFIG_DIR="$decoy_ccd" XDG_CONFIG_HOME="$decoy_xdg" TMPDIR="$decoy_tmp")
-  (cd "$src" && "${install_env[@]}" ./install.sh --all > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all failed'
-  (cd "$src" && "${install_env[@]}" ./install.sh --all-agents > /dev/null) || ledger_e2e_fail sdlc-install 'install.sh --all-agents failed'
+  # Each install returns only once its process group is empty (see
+  # ledger_e2e_install), so nothing it started can write after the checks below.
+  ledger_e2e_install "$src" --all "${install_env[@]}"
+  ledger_e2e_install "$src" --all-agents "${install_env[@]}"
   ledger_e2e_record "$src" "$scratch/record-after.json" ||
     ledger_e2e_fail install 'recording the source copy failed after the install'
   [ -f "$home/.claude/skills/ticket/ticket.py" ] || ledger_e2e_fail sdlc-install 'the ticket skill was not installed'

@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The ledger-e2e step waits for each install's processes before it checks the footprint
+
+The ledger-e2e step of `ci/check.sh` ran `install.sh --all` and `install.sh --all-agents` and then checked what they left in the throwaway home, but nothing waited for processes an install started in the background: one could write a forbidden file, such as `.claude/settings.json`, after the footprint check had passed, and the step still passed. Each install now runs as the leader of a fresh process group. Once it exits, the group is sent SIGTERM, then SIGKILL after a one-second grace, and must be empty within five seconds; only then do the source-tree, decoy, footprint and frontmatter checks run. A group that is still not empty at the deadline, or that cannot be started, signalled or probed, fails step `sdlc-install` naming the install. Known limit: a process that leaves the install's process group on its own (with `setsid` or `setpgid`) is not waited for, and a write it makes later is not seen.
+
 ### The ticket tests choose the ledger from a home and an environment they own
 
 The ticket tests' autouse fixture cleared only `TICKET_LEDGER_CLI`, but `ticket` also reads `ledger_cli` from `~/.claude/skill-config/topic.json` and, with a `ledger` on `PATH`, `LEDGER_DB`. On a machine with a configured ledger, the setup of a markdown-store test wrote markdown while the `ticket.py release` it ran in a subprocess selected the ledger, so `test_E11d` and `test_E11f` failed. The fixture now sets `HOME` to a fresh directory under the test's temporary directory and clears `LEDGER_DB` as well, so the test and every subprocess it starts decide the ledger from what the test sets, and a test that wants a ledger sets these itself. This changes the tests only. CI runs with a fresh `HOME` and was not affected.
