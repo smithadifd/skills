@@ -12,7 +12,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def private_tmp(tmp_path, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     monkeypatch.setattr("tempfile.tempdir", None)
+    # Ledger selection reads more than TICKET_LEDGER_CLI: `ledger_cli` in the topic config
+    # (`~/.claude/skill-config/topic.json`) and, with a `ledger` on PATH, LEDGER_DB (rule 2 selects
+    # the ledger with no topic config at all). A test and any subprocess it starts must decide the
+    # ledger from a HOME and an environment the test owns, so HOME is a fresh directory and both
+    # variables are cleared. PATH is left alone; a test that wants a ledger sets these itself.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("TICKET_LEDGER_CLI", raising=False)
+    monkeypatch.delenv("LEDGER_DB", raising=False)
     return tmp_path
 
 

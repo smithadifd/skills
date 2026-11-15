@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The ticket tests choose the ledger from a home and an environment they own
+
+The ticket tests' autouse fixture cleared only `TICKET_LEDGER_CLI`, but `ticket` also reads `ledger_cli` from `~/.claude/skill-config/topic.json` and, with a `ledger` on `PATH`, `LEDGER_DB`. On a machine with a configured ledger, the setup of a markdown-store test wrote markdown while the `ticket.py release` it ran in a subprocess selected the ledger, so `test_E11d` and `test_E11f` failed. The fixture now sets `HOME` to a fresh directory under the test's temporary directory and clears `LEDGER_DB` as well, so the test and every subprocess it starts decide the ledger from what the test sets, and a test that wants a ledger sets these itself. This changes the tests only. CI runs with a fresh `HOME` and was not affected.
+
 ### `setup` pins the ledger CLI's absolute path, and a moved CLI is refused by name
 
 A skill with no `ledger_cli` setting runs the first `ledger` on `PATH`, so a writable folder put on `PATH` ahead of the real install could plant one. `python3 skills/_lib/ledger_cli.py setup` (the `_lib` folder beside the skills, in the plugin and in an `install.sh` copy alike) now resolves `ledger` once, checks it against the same compatibility check, and writes its absolute path as `ledger_cli` in `~/.claude/skill-config/topic.json`, keeping every other key. It refuses by name, with nothing written, when no `ledger` is found (`ledger_cli_setup_not_found`), when it is incompatible (`ledger_cli_setup_incompatible`), when the file cannot be read (`ledger_cli_setup_config_unreadable`), changed while setup ran (`ledger_cli_setup_config_changed`) cannot be written (`ledger_cli_setup_write_failed`), or its lock cannot be taken (`ledger_cli_setup_lock_failed`), and when `ledger_cli` is already set (`ledger_cli_setup_exists`): a live setting, `none` or a bare name is never changed. A pinned absolute path that is no longer an executable file is the one value it replaces.
