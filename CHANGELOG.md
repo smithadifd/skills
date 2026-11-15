@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The README's setup path needs no hand edit
+
+- The README's setup steps are one ordered list that matches the ledger's own docs: install the ledger CLI at a tag, set the environment (`LEDGER_DB` as an absolute path, `LEDGER_OPERATOR`, optional `LEDGER_HARNESS`) in the shell and as keys added to the `env` block of Claude Code's settings (no whole `settings.json` any more), install `ledger-hooks`, then install this plugin and run its setup step, with the ledger's first write, which creates the database, before any check. The install adds the marketplace from GitHub at a release tag (`claude plugin marketplace add smithadifd/skills#vX.Y.Z`) in place of `claude plugin marketplace add .`, which Claude Code refuses as `Invalid marketplace source format`; the setup step's folder is named for a plugin install; the link to the ledger repository is its GitHub address; command examples give the plugin-prefixed form beside the bare one; a new section lists what to remove to uninstall the plugin route (the plugin, the marketplace, the environment keys, the skill configuration file, and what Claude Code's plugin cache keeps); and the README says the question pickers and the ledger's pane need an interactive session, not `claude -p`. Docs only; no skill, script or setting changed.
+
 ### The README names a ledger item as a source for `ticket`
 
 The `ticket` row of the README's skills table now says that, with the ledger on, a ledger item with a spec can be the ticket, as `/ticket <ITEM-ID>`, and links the walkthrough in `docs/lifecycle.md` that shows how it is read and what is refused. Docs only; no skill, script or setting changed.
