@@ -160,7 +160,7 @@ this order, the first match wins:
 | 1 | `_identity` refuses | refusal `plan_unidentifiable` | in any state, closed included |
 | 2 | `status == "closed"` and `_closed_problems(card)` is empty | `closed` | terminal; a source change is flag F7; a metadata change is F9, F10 or F12 (section 4.2) |
 | 3 | `status == "closed"` and problems remain | refusal `close_invalid` | the card was edited or an outside writer set the status (ledger); a person repairs it |
-| 4 | no plan (`_identity` is `None`) | `orient` | S0 |
+| 4 | no plan (`_identity` is `None`) | `orient` | S0; flag F13 when the card shows an earlier pass (a stop stamp or a `tried` record) or the open joined a live pass (3.2b) |
 | 5 | a change is present (section 4.2 or 4.3) | section 4.4 decides: `plan` or `stopped` | the change rows |
 | 6 | three rounds stored and no passing final review covers `I` | `stopped` | S5, flag F5 |
 | 7 | no plan go covers `I` | `plan_go` when `plan.pass == pass_id`, else `plan` with flag F8 | S1 |
@@ -186,7 +186,7 @@ only and write nothing: `finish_orient` (`orient` → `research`), `finish_resea
 
 | Live phase, reached by | Card | A resume derives |
 |---|---|---|
-| `orient`; `research` (`finish_orient`); `plan` (`finish_research`) | S0 | `orient`: the card does not record the three in-memory steps; the pass repeats them |
+| `orient`; `research` (`finish_orient`); `plan` (`finish_research`) | S0 | `orient`: the card does not record the three in-memory steps; the pass repeats them, and says so (F13) when the card shows an earlier pass or the open joined a live pass |
 | `plan_go` before its go (`present_plan`) | S1 | `plan_go` for the same pass (join); `plan` with F8 for a new pass |
 | `plan_go` approved (`record_go("plan")`, before `begin_build`) | S2[0] | `build`: the go is on the card and nothing is left to wait for; `begin_build` is not called again |
 | `build` (`begin_build`; `record_review("changes")`, rounds 1–2) | S2[r] | `build` |
@@ -194,6 +194,15 @@ only and write nothing: `finish_orient` (`orient` → `research`), `finish_resea
 | `outward_go` approved (`record_go("outward")`) | S4[r] | `outward_go`, `approved("outward")` true |
 | `plan` after a changed resume (section 4.4) | S1–S4 with the change | `plan` again, with the same flags, until `present_plan` lands |
 | `stopped`; `closed` | S5; S6 | the same; not live |
+
+Why the repeat is stated and not avoided. Recording how far a pass got would need a write at
+`finish_orient` and `finish_research`, which the design keeps off the card (E17, E21, and the ledger's
+one-`append-many`-per-step mapping in 6.2.2), so it would change the store contract. The card therefore
+cannot say what an earlier pass found, and a resume says that plainly instead of redoing the two steps
+unannounced: F13 (4.6), in `reconciliation`, when the card has no plan and shows an earlier pass (a stop
+stamp or a `tried` record) or the open joined a live pass (`pass_id` given). A blank card opened with no
+pass id is a first open and carries no flag. The fail-closed default is the same rule: a card that says
+nothing of how far a pass got resumes from `orient`.
 
 A step requires the live phase, never the resume state: `present_plan` requires `plan`, which a fresh
 pass reaches through the two in-memory steps and a resumed pass reaches only through a change (4.4)
@@ -289,6 +298,16 @@ stored (built, never presented) renders the statuses its author set; `from_snaps
 make it a stored plan. A closed card, which validates only with every one of those events (4.5 `close_invalid`),
 renders every step complete or skipped. Nothing derived is stored, so the snapshot, the stores and the
 ledger notes are unchanged.
+
+The rendered plan card also names the pass's claim, next to the plan, on a `Claim: pass <id>, host <host>,
+started <time>` line under the title: the id, host and start time `open` recorded on the card's `pass`
+field (`PlanCard.claim`, set by the pass with `reached` on every sync). It is shown only while the pass is
+live: an ended pass, a plan not yet stored and a terminal resume (`stopped`, `closed`) show no claim, so a
+closed card's render is the same live and reopened.
+
+The last message of a session states the pass id too. That message is written by the model, so no
+function in `ticket.py` shapes it; SKILL.md ("The final message") carries the instruction, and the id is
+`session.pass_id`, which stays readable after the pass ends.
 
 ## 4. The resume rules
 
@@ -410,6 +429,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 - F10 `ticket was updated since the plan card was written`
 - F11 `review round {N} reviewed other acceptance criteria than plan revision {M} on the card` / `the plan go of plan revision {M} approved other acceptance criteria than the card's plan`
 - F12 `ticket title changed: {old} -> {new}`
+- F13 `no plan is stored for this ticket, so orient and research start again: the card does not record them (they run in memory and write nothing), so what an earlier pass found is not kept; read the ticket and the repository again before presenting a plan`
 
 `{what}` is the `; `-joined list from 4.2 alone: F11 lines (4.3) stand alone and are never part of
 `{what}`. F1, F2, F3 and F6 appear only when the ticket source differs from the stored criteria; a

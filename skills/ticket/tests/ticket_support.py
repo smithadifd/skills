@@ -83,6 +83,19 @@ def F9(old, new):
 
 F10 = "ticket was updated since the plan card was written"
 
+# The resume line for a card with no plan that an earlier pass touched: orient and research start again.
+F13 = (
+    "no plan is stored for this ticket, so orient and research start again: the card does not record "
+    "them (they run in memory and write nothing), so what an earlier pass found is not kept; read the "
+    "ticket and the repository again before presenting a plan"
+)
+
+
+def claim_line(claim):
+    """The plan card's claim line, spelled out from the card's own claim record."""
+
+    return f"Claim: pass {claim['id']}, host {claim['host']}, started {claim['started_at']}"
+
 
 def F12(old, new):
     return f"ticket title changed: {old} -> {new}"

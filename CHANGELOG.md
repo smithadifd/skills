@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The ticket skill states the pass id, shows its claim on the plan card, and says when orient and research start again
+
+Three findings from a walk of the ticket skill as a newcomer. The last message of a session now ends with a `Pass: <id>` line (SKILL.md, "The final message"), and at a go stop adds how to resume with it, so a person can continue the same pass the next day. The rendered plan card names the live claim beside the plan, on a `Claim: pass <id>, host <host>, started <time>` line under the title; it is not shown once the pass has ended, nor on a stopped or closed ticket. A resume with no plan on the card repeats orient and research, because they write nothing to the card, and `reconciliation` now says so (`no plan is stored for this ticket, so orient and research start again: ...`) when the card shows an earlier pass or the open joined a live pass; a first open on a blank card prints nothing. This does not record how far a pass got: that would need a write at each of those steps and so a change to the store contract.
+
 ### The README names a ledger item as a source for `ticket`
 
 The `ticket` row of the README's skills table now says that, with the ledger on, a ledger item with a spec can be the ticket, as `/ticket <ITEM-ID>`, and links the walkthrough in `docs/lifecycle.md` that shows how it is read and what is refused. Docs only; no skill, script or setting changed.

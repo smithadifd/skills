@@ -28,6 +28,11 @@ the list `c` (the duplicate rows, A8); its source fixture is then rewritten to t
 |---|---|---|---|---|
 | A0.0 | `test_a_blank_card_resumes_at_orient` | S0 × none | phase `orient`; no flags; a claim is written and nothing else | `_derive` returns `plan` for a card with no plan |
 | A0.1–4 | — | S0 × any edit | impossible by construction: no stored identity exists to differ from; the pass plans from the source it pulled | — |
+| A0.5 | `test_CP1_11_1_a_resume_after_a_more_info_exit_before_the_plan_says_orient_and_research_start_again` | a pass that finished orient and research and took the `research` more-information exit; a new open | phase `orient`; flags exactly `[F13]`; a claim is written and nothing else; the pass can step through `finish_orient` and `finish_research` | `_derive` row 4 drops the stop-stamp test of `resumed` |
+| A0.6 | `test_CP1_11_2_a_join_of_a_live_pass_before_the_plan_says_orient_and_research_start_again` | a live pass with no plan; `join(P)` | phase `orient`; flags exactly `[F13]`; nothing written | `_derive` row 4 drops the `pass_id is not None` test of `resumed` |
+| A0.7 | `test_CP1_11_3_a_tried_record_before_the_plan_makes_the_next_open_a_resume` | a pass that recorded a `tried` and ended; a new open | phase `orient`; flags exactly `[F13]` | `_derive` row 4 drops the `tried` test of `resumed` |
+| A0.8 | `test_CP1_11_4_a_first_open_and_a_resume_with_a_plan_do_not_say_it` | a blank card; then a card with a presented plan, resumed | no F13 either time (the second resumes at `plan` with F8) | `_derive` row 4 flags every no-plan card (`resumed = True`, also fails A0.0) |
+| A0.9 | `test_CP1_11_skill_md_names_the_early_resume_line_where_a_resume_lands` | SKILL.md, section 1 | the resume table's `no plan yet` row says orient and research start again, and the section quotes the F13 opening | the sentence or the table's clause dropped from SKILL.md |
 | A1.0a | `test_a_presented_plan_resumes_at_plan_go_for_its_own_pass` | S1 × none, `join(P)` | phase `plan_go`; no flags; `begin_build()` raises `GateRequired`; nothing written | `_derive` row 7 returns `build` when no plan go covers `I` (the go check dropped) |
 | A1.0b | `test_a_presented_plan_resumes_at_plan_for_another_pass` | S1 × none, new pass after `release` | phase `plan`; flag F8 with M=1; `present_plan` then stores revision 2 with `pass` = the new id | `_derive` row 7 ignores `plan.pass != pass_id` and returns `plan_go` |
 | A1.1 | `test_a_source_change_before_the_plan_go_resumes_at_plan[reorder]` | S1 × reorder | phase `plan`; flags exactly `[F1(M=1, what=reordered)]`; nothing written; `session.plan` holds the stored order; `present_plan` with the source order stores revision 2 | `_source_differences` compares `sorted(stored) == sorted(source)` (a reorder is no change) `(shared with A2.1, A4.1, A5.2, A6.1)` |
@@ -180,6 +185,14 @@ bind (design section 5).
 | E28 | `test_SK36_events_that_do_not_cover_the_plan_leave_the_later_steps_pending` | S4[1] whose last round names plan revision 9 | resume: orient, research, plan complete; build, review, outward pending | `build` counts a round that does not cover the plan |
 | E29 | `test_SK36_a_plan_go_of_another_pass_leaves_every_step_after_research_pending` | S3[1] whose plan go names another pass | resume: only orient and research complete | `plan` counts a go of another pass; a step is placed without its predecessor |
 | E30 | `test_SK36_the_outward_step_needs_the_close_and_the_outward_go` | `_reached_steps` on the S6 card, on the same card with `status` open, with no outward go, and with no identity | all six; the first five; the first five; none | `outward` ignores the close, or the outward go |
+| E31 | `test_CP1_9_skill_md_tells_the_final_message_to_state_the_pass_id` | SKILL.md | its `The final message` section holds the line `Pass: <session.pass_id>` and the resume instruction `open(..., pass_id=<that id>)`, and the live-pass section points at it | the `Pass:` line, the resume instruction or the pointer dropped from SKILL.md |
+| E32 | `test_CP1_9_the_pass_id_the_final_message_states_is_readable_after_the_pass_ends[more_info | close]` | S1 then `more_info`; S4 then `close` | `session.pass_id` equals the id the card recorded and is lowercase hex, with the pass ended | `end()` clears `_pass_id` |
+| E33 | `test_CP1_10_the_plan_card_shows_the_claim_next_to_the_plan` | S1 | `plan.render()` has one `Claim: pass <id>, host <host>, started <time>` line, equal to the card's claim, below the title and above `## Acceptance criteria` | `render` drops the claim line |
+| E34 | `test_CP1_10_a_joined_pass_shows_the_claim_it_continues` | S1, `join(P)`; and a new pass that presents again after a release | the claim line of the live claim, joined or new | `open` does not sync the plan after `_live` is set |
+| E35 | `test_CP1_10_the_ledger_card_shows_the_claim_too` | S1 on the fake ledger | one claim line naming the pass id | `render` drops the claim line `(shared with E33)` |
+| E36 | `test_CP1_10_a_claim_that_is_released_is_not_shown` | S1, then `end()`; a plan never presented | no claim line either time | `end()` leaves the claim on the plan |
+| E37 | `test_CP1_10_a_terminal_resume_takes_no_claim_and_shows_none` | S6 reopened | phase `closed`; no claim line | `_sync_steps` shows the claim of a pass that is not live (with E38) |
+| E38 | `test_CP1_10_a_terminal_resume_shows_no_claim_it_does_not_hold` | S6 with a claim planted on the card, reopened | phase `closed`, not live; no claim line | `_sync_steps` drops the `self._live` test |
 
 ## F. Close
 
@@ -320,11 +333,11 @@ identity of its `and`/`or`.
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
-- Rows: A 43 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 47, F 8, G 31,
-  H 38, I 26. Total 226 rows. Eight carry no test with a mutation of their own in this release:
+- Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 8, G 31,
+  H 38, I 26. Total 239 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 218 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 231 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's
