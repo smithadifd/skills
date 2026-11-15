@@ -8,6 +8,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 The README's Install now prints one command that gives this repository's newest release tag, so the tag after `#` no longer has to be found on the tags page by hand. The four ledger setup steps are the first thing Install says, followed by the two marketplace commands that are step 4, so a reader starting there is not sent down the page first. Step 2 now says to create `~/.claude/settings.json`, and the `~/.claude` folder, as a whole file when the settings file does not exist yet, and shows that file. Docs only; no skill, script or setting changed.
 
+### The README prints the command that finds the installed skills folder
+
+Step 4 of the README's setup steps now prints one command that reads the `installPath` recorded for `sdlc@skills` in Claude Code's installed-plugins file and appends `/skills`, then shows the setup step run with its output, so a plugin install no longer needs the cache's version folders listed by hand; when the file records more than one install, it takes the last one whose scope is `user`, or the last one listed if none has that scope. Docs only; no skill, script or setting changed.
+
 ## 0.13.0
 
 This is the release tagged v1.3.0 in the repository. It mainly carries the ledger-on path for `ticket` (a ledger item can be the ticket, and the open records the ticket as the item's spec), `setup` pinning the ledger CLI's absolute path, the session brief moving from this plugin to the ledger's own plugin (this plugin no longer declares a hook), and the README's one setup order. The sections below list every change.
