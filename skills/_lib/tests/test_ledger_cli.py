@@ -1,5 +1,6 @@
 """The shared rule that decides whether the ledger is on: one rule, four named outcomes, never raises."""
 
+import errno
 import importlib.util
 import json
 import os
@@ -495,6 +496,7 @@ SETUP_TOKENS = (
     "ledger_cli_setup_config_unreadable",
     "ledger_cli_setup_exists",
     "ledger_cli_setup_config_changed",
+    "ledger_cli_setup_no_hardlinks",
     "ledger_cli_setup_write_failed",
     "ledger_cli_setup_lock_failed",
 )
@@ -1008,6 +1010,7 @@ def test_every_setup_refusal_token_is_a_distinct_fixed_name():
         module.SETUP_CONFIG_UNREADABLE,
         module.SETUP_EXISTS,
         module.SETUP_CONFIG_CHANGED,
+        module.SETUP_NO_HARDLINKS,
         module.SETUP_WRITE_FAILED,
         module.SETUP_LOCK_FAILED,
     ) == SETUP_TOKENS
@@ -1470,6 +1473,112 @@ def test_setup_never_renames_or_replaces_onto_the_override_path(machine, monkeyp
         monkeypatch.setattr(module.os, name, function)
     assert result == 0
     assert seen == [("rename", "topic.json", BACKUP_NAME)], "the kept name is linked to, never renamed onto"
+
+
+def _no_hard_links(code):
+    """A stand-in for `os.link` on a mount that takes no hard links."""
+
+    def refuse(source, destination, *args, **kwargs):
+        raise OSError(code, os.strerror(code))
+
+    return refuse
+
+
+@pytest.mark.parametrize(
+    "code",
+    [errno.EPERM, errno.ENOTSUP, errno.EXDEV, errno.EMLINK, errno.EIO],
+    ids=["EPERM", "ENOTSUP", "EXDEV", "EMLINK", "EIO"],
+)
+def test_setup_on_a_folder_without_hard_links_leaves_the_override_in_place_and_refuses_by_name(
+    machine, monkeypatch, capsys, code
+):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1, "z": [1, 2]}')
+    original = path.read_bytes()
+    real_link = os.link
+    monkeypatch.setattr(module.os, "link", _no_hard_links(code))
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    captured = capsys.readouterr()
+    assert path.exists(), "the override was moved aside and never put back"
+    assert path.read_bytes() == original
+    assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert captured.out == "" and len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("ledger_cli_setup_no_hardlinks: "), captured.err
+    assert "nothing was moved or written" in captured.err
+    # No backup, probe or temp file is left; only the override and the lock stand in the folder.
+    assert sorted(p.name for p in path.parent.iterdir()) == sorted(["topic.json", LOCK_NAME])
+    # The same folder with working links then pins normally.
+    assert module.setup() == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "keep": 1,
+        "z": [1, 2],
+        "ledger_cli": str(machine.ledger),
+    }
+
+
+def test_setup_with_no_override_on_a_folder_without_hard_links_refuses_by_name_and_creates_nothing(
+    machine, monkeypatch, capsys
+):
+    module = _load()
+    machine.use(monkeypatch)
+    real_link = os.link
+    monkeypatch.setattr(module.os, "link", _no_hard_links(errno.EPERM))
+    result = module.setup()
+    monkeypatch.setattr(module.os, "link", real_link)
+    captured = capsys.readouterr()
+    assert not _override_file(machine.home_dir).exists(), "the override was created"
+    assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert captured.out == "" and len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("ledger_cli_setup_no_hardlinks: "), captured.err
+    _nothing_written(machine.home_dir)
+
+
+def test_a_link_probe_that_cannot_be_removed_refuses_write_failed_naming_it_and_moves_nothing(
+    machine, monkeypatch, capsys
+):
+    module = _load()
+    machine.use(monkeypatch)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    original = path.read_bytes()
+    real_unlink = os.unlink
+
+    def refuse_to_remove_the_probe(name, *args, **kwargs):
+        if os.fspath(name).endswith(module.PROBE_SUFFIX):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "unlink", refuse_to_remove_the_probe)
+    result = module.setup()
+    monkeypatch.setattr(module.os, "unlink", real_unlink)
+    captured = capsys.readouterr()
+    assert result == 1, f"setup exited {result}; stderr {captured.err!r}"
+    assert captured.out == "" and len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("ledger_cli_setup_write_failed: "), captured.err
+    probes = [p for p in path.parent.iterdir() if p.name.endswith(module.PROBE_SUFFIX)]
+    assert len(probes) == 1, "the probe file that could not be removed is left, and named"
+    assert str(probes[0]) in captured.err
+    assert path.read_bytes() == original
+    assert not _backup(machine.home_dir).exists(), "nothing was moved aside"
+    # Only the probe is left besides the override and the lock: the temp file is removed.
+    assert sorted(p.name for p in path.parent.iterdir()) == sorted(["topic.json", LOCK_NAME, probes[0].name])
+
+
+def test_a_restore_that_cannot_link_does_not_promise_that_a_rerun_puts_it_back(tmp_path, monkeypatch):
+    module = _load()
+    target = tmp_path / "topic.json"
+    backup = tmp_path / "topic.json.setup-backup"
+    backup.write_text('{"keep": 1}', encoding="utf-8")
+    monkeypatch.setattr(module.os, "link", _no_hard_links(errno.EPERM))
+    with pytest.raises(module._Refusal) as raised:
+        module._restore(target, backup)
+    assert raised.value.token == module.SETUP_WRITE_FAILED
+    detail = raised.value.detail
+    assert str(backup) in detail, "the line names where the version is kept"
+    assert "rerunning setup puts it back" not in detail
+    assert "move it back by hand" in detail
+    assert backup.read_text(encoding="utf-8") == '{"keep": 1}' and not target.exists()
 
 
 def _spare_cli(tmp_path, machine, name):
