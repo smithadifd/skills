@@ -4,6 +4,10 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The README names a ledger item as a source for `ticket`
+
+The `ticket` row of the README's skills table now says that, with the ledger on, a ledger item with a spec can be the ticket, as `/ticket <ITEM-ID>`, and links the walkthrough in `docs/lifecycle.md` that shows how it is read and what is refused. Docs only; no skill, script or setting changed.
+
 ### The ledger-e2e step waits for each install's processes before it checks the footprint
 
 The ledger-e2e step of `ci/check.sh` ran `install.sh --all` and `install.sh --all-agents` and then checked what they left in the throwaway home, but nothing waited for processes an install started in the background: one could write a forbidden file, such as `.claude/settings.json`, after the footprint check had passed, and the step still passed. Each install now runs as the leader of a fresh process group. Once it exits, the group is sent SIGTERM, then SIGKILL after a one-second grace, and must be empty within five seconds; only then do the source-tree, decoy, footprint and frontmatter checks run. A group that is still not empty at the deadline, or that cannot be started, signalled or probed, fails step `sdlc-install` naming the install. Known limit: a process that leaves the install's process group on its own (with `setsid` or `setpgid`) is not waited for, and a write it makes later is not seen.
