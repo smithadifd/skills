@@ -13,10 +13,13 @@ The headings below are plugin versions, the number `claude plugin list` shows fo
 | v0.10.0 to v1.1.1 | 0.10.0 | none |
 | v1.2.0 | 0.12.0 | 0.12.0 |
 | v1.3.0 | 0.13.0 | 0.13.0 |
+| v1.4.0 | 0.14.0 | 0.14.0 |
 
 Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0.12.0 (tag v1.2.0). Only tags from v1.2.0 on have an entry, because this file did not exist at earlier tags.
 
-## Unreleased
+## 0.14.0
+
+This is the release tagged v1.4.0 in the repository. It mainly carries the `ticket` skill binding a plan go and an outward go to the captured prompt, the README and this file mapping each tag to its plugin version, `setup` refusing to pin a ledger in Claude Code's plugin cache (with the README naming the no-pin route), changes to the README's Install section, and the README command that finds the installed skills folder. The sections below list every change.
 
 ### The ticket skill binds a plan go and an outward go to the captured prompt
 
