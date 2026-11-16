@@ -499,6 +499,7 @@ SETUP_TOKENS = (
     "ledger_cli_setup_no_hardlinks",
     "ledger_cli_setup_write_failed",
     "ledger_cli_setup_lock_failed",
+    "ledger_cli_setup_plugin_command",
 )
 
 
@@ -1013,8 +1014,157 @@ def test_every_setup_refusal_token_is_a_distinct_fixed_name():
         module.SETUP_NO_HARDLINKS,
         module.SETUP_WRITE_FAILED,
         module.SETUP_LOCK_FAILED,
+        module.SETUP_PLUGIN_COMMAND,
     ) == SETUP_TOKENS
     assert module.MOVED_TOKEN == "ledger_cli_moved:"
+
+
+def _cache_bin(home, *extra_parts):
+    """A `bin` folder under `home` whose path has the given segments after `home`."""
+    folder = home.joinpath(*extra_parts)
+    folder.mkdir(parents=True)
+    return folder
+
+
+def _copy_ledger(src, dest_dir):
+    dest = dest_dir / "ledger"
+    shutil.copy(src, dest)
+    dest.chmod(dest.stat().st_mode | stat.S_IXUSR)
+    return dest
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/x/.claude/plugins/cache/bin/ledger",
+        "/x/.claude/y/plugins/cache/bin/ledger",
+        "/.claude/plugins/cache/ledger",
+    ],
+)
+def test_a_plugin_cache_path_matches_the_stated_grammar(path):
+    assert _load()._in_claude_plugin_cache(path) is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/x/.Claude/plugins/cache/bin/ledger",
+        "/x/.claude/Plugins/cache/bin/ledger",
+        "/x/.claude/plugins/Cache/bin/ledger",
+        "/x/.claude/plugin/cache/bin/ledger",
+        "/x/.claude/plugins cache/bin/ledger",
+        "/x/.claude/plugins-cache/bin/ledger",
+        "/x/.claude/plugins/bin/ledger",
+        "/x/.claude/cache/bin/ledger",
+        "/x/plugins/cache/bin/ledger",
+        "/x/plugins/cache/.claude/bin/ledger",
+        "/x/.claude/plugins/other/cache/bin/ledger",
+        "/x/.claudeplugins/cache/bin/ledger",
+        "ledger",
+    ],
+)
+def test_a_near_miss_plugin_cache_path_is_not_in_the_cache(path):
+    assert _load()._in_claude_plugin_cache(path) is False
+
+
+def test_setup_refuses_a_ledger_in_the_plugin_cache_and_writes_nothing(tmp_path):
+    machine = Machine(tmp_path)
+    cache_bin = _cache_bin(
+        machine.home_dir, ".claude", "plugins", "cache", "skills", "ledger-hooks", "1.0.0", "bin"
+    )
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    line = _refusal(proc, "ledger_cli_setup_plugin_command")
+    assert "needs no pin" in line and "plugin update" in line
+    _nothing_written(machine.home_dir)
+    assert machine.calls() == [], "the plugin-cache refusal runs no compatibility check"
+
+
+def test_setup_plugin_cache_refusal_leaves_an_existing_override_untouched(tmp_path):
+    machine = Machine(tmp_path)
+    path = _put_override(machine.home_dir, '{"keep": 1}')
+    before = path.read_bytes()
+    cache_bin = _cache_bin(
+        machine.home_dir, ".claude", "plugins", "cache", "skills", "ledger-hooks", "1.0.0", "bin"
+    )
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    _refusal(proc, "ledger_cli_setup_plugin_command")
+    assert path.read_bytes() == before
+
+
+def test_setup_pins_a_ledger_whose_path_is_a_near_miss_of_the_plugin_cache(tmp_path):
+    machine = Machine(tmp_path)
+    other_bin = _cache_bin(machine.home_dir, ".claude", "plugins", "other", "cache", "bin")
+    planted = _copy_ledger(machine.ledger, other_bin)
+    proc = machine.run("setup", PATH=f"{other_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert proc.returncode == 0, proc.stderr
+    pin = json.loads(_override_file(machine.home_dir).read_text(encoding="utf-8"))["ledger_cli"]
+    assert pin == str(planted.resolve())
+
+
+def test_setup_treats_a_path_that_cannot_be_made_absolute_as_not_in_the_cache(machine, monkeypatch):
+    module = _load()
+    machine.use(monkeypatch)
+    monkeypatch.setattr(module, "_absolute_path", lambda _path: None)
+    assert module.setup() == 0
+    pin = json.loads(_override_file(machine.home_dir).read_text(encoding="utf-8"))["ledger_cli"]
+    assert pin == str(machine.ledger)
+
+
+def test_setup_clears_a_moved_plugin_cache_pin_and_keeps_other_keys(tmp_path):
+    machine = Machine(tmp_path)
+    dead = (
+        machine.home_dir
+        / ".claude"
+        / "plugins"
+        / "cache"
+        / "skills"
+        / "ledger-hooks"
+        / "0.0.1"
+        / "bin"
+        / "ledger"
+    )
+    path = _put_override(
+        machine.home_dir,
+        json.dumps({"ledger_cli": str(dead), "keep": 1, "topics_dir": "/somewhere"}),
+    )
+    cache_bin = _cache_bin(
+        machine.home_dir, ".claude", "plugins", "cache", "skills", "ledger-hooks", "1.0.0", "bin"
+    )
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == {"keep": 1, "topics_dir": "/somewhere"}
+    assert list(written) == ["keep", "topics_dir"]
+    kept = (
+        f"; the version it replaced is kept at {_previous(machine.home_dir)}; "
+        "remove it once no editor has it open"
+    )
+    assert proc.stdout.splitlines() == [
+        f"stale plugin pin cleared from {path}; the plugin route needs no pin{kept}"
+    ]
+    assert machine.calls() == [], "clearing a stale plugin pin runs no compatibility check"
+    previous = json.loads(_previous(machine.home_dir).read_text(encoding="utf-8"))
+    assert previous["ledger_cli"] == str(dead) and previous["keep"] == 1
+    _no_temp_files(machine.home_dir)
+
+
+def test_setup_refuses_a_moved_non_cache_pin_when_path_ledger_is_in_the_plugin_cache(tmp_path):
+    machine = Machine(tmp_path)
+    dead = tmp_path / "gone" / "ledger"
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(dead), "keep": 1}))
+    before = path.read_bytes()
+    cache_bin = _cache_bin(
+        machine.home_dir, ".claude", "plugins", "cache", "skills", "ledger-hooks", "1.0.0", "bin"
+    )
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    _refusal(proc, "ledger_cli_setup_plugin_command")
+    assert path.read_bytes() == before
+    assert machine.calls() == []
 
 
 def test_setup_takes_no_config_flag_and_the_no_argument_form_is_unchanged(machine, tmp_path):
