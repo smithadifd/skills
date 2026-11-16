@@ -102,7 +102,7 @@ You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables 
 
 **Using the ledger.** Two routes.
 
-**Default tier (plugin, no pin).** With the ledger's plugin (`ledger-hooks`) installed and its options set (`ledger_db`, `ledger_operator`, `ledger_harness`), a Claude Code session puts that plugin's `ledger` on PATH and exports `LEDGER_DB`, `LEDGER_OPERATOR` and `LEDGER_HARNESS` for the session's commands. The four ledger-using skills (`topic`, `sharpen`, `shape` and `ticket`) then find `ledger` on PATH and `LEDGER_DB` in the environment with no `ledger_cli` pin. Skip the setup step on this route: `setup` refuses a ledger that lives inside Claude Code's plugin cache (`ledger_cli_setup_plugin_command`), because a pinned versioned cache path turns into `ledger_cli_moved` at the next plugin update. The skills still follow the existing PATH rule: `LEDGER_DB` must name an existing file, so until that file exists they stay off (`not configured`). The ledger plugin does not create the database when a session begins. A person on this route who has not yet made a first write therefore sees `not configured` in normal use. The first write is a ledger CLI write (terminal route step 2 below); the skills will not make it while the file is absent. pipx and the setup pin stay for the terminal route below.
+**Default tier (plugin, no pin).** With the ledger's plugin (`ledger-hooks`) installed and its options set (`ledger_db`, `ledger_operator`, `ledger_harness`), a Claude Code session puts that plugin's `ledger` on PATH and exports `LEDGER_DB`, `LEDGER_OPERATOR` and `LEDGER_HARNESS` for the session's commands. The four ledger-using skills (`topic`, `sharpen`, `shape` and `ticket`) then find `ledger` on PATH and `LEDGER_DB` in the environment with no `ledger_cli` pin. Skip the setup step on this route: `setup` refuses a ledger that lives inside Claude Code's plugin cache (`ledger_cli_setup_plugin_command`), because a pinned versioned cache path turns into `ledger_cli_moved` at the next plugin update. The skills still follow the existing PATH rule: `LEDGER_DB` must name an existing file, so until that file exists they stay off (`not configured`). The ledger plugin does not create the database when a session begins, but its prompt capture (the `UserPromptSubmit` hook) does: the first submitted prompt that capture does not skip creates the file `LEDGER_DB` names (capture skips prompts the harness injects, prompts from folders you opted out, and every prompt when `capture_prompts` is false in the ledger's `config.json`). Until that prompt, or a ledger CLI write (terminal route step 2 below), a person sees `not configured`; the skills will not make a write while the file is absent. pipx and the setup pin stay for the terminal route below.
 
 **Terminal route.** Do these four steps in this order; each needs the one before it. The first three are the ledger's: follow its README for their commands rather than copying them from here.
 
@@ -119,8 +119,7 @@ You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables 
 
    ```json
    "LEDGER_DB": "/absolute/path/to/home/.local/share/ledger/<system>.db",
-   "LEDGER_OPERATOR": "<your name>",
-   "LEDGER_HARNESS": "claude-code"
+   "LEDGER_OPERATOR": "<your name>"
    ```
 
    When `~/.claude/settings.json` does not exist yet, create it (and the `~/.claude` folder if it is missing) as this whole file:
@@ -129,15 +128,14 @@ You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables 
    {
      "env": {
        "LEDGER_DB": "/absolute/path/to/home/.local/share/ledger/<system>.db",
-       "LEDGER_OPERATOR": "<your name>",
-       "LEDGER_HARNESS": "claude-code"
+       "LEDGER_OPERATOR": "<your name>"
      }
    }
    ```
 
-   `LEDGER_DB` names the database file, conventionally under `~/.local/share/ledger/` with one file per system; write it as an absolute path in the settings file, because `~` is not expanded there. `LEDGER_OPERATOR` is the human the writes are attributed to; set it yourself. `LEDGER_HARNESS` is optional in the settings file, because the ledger's plugin (step 3) supplies `claude-code` when it is unset; setting it there only makes it explicit. The shell needs it for the next write, where `cli` says you typed the command yourself.
+   `LEDGER_DB` names the database file, conventionally under `~/.local/share/ledger/` with one file per system; write it as an absolute path in the settings file, because `~` is not expanded there. `LEDGER_OPERATOR` is the human the writes are attributed to; set it yourself. Leave `LEDGER_HARNESS` out of the settings file: the ledger's plugin (step 3) sets `claude-code` when it is unset. The shell needs it for the next write, where `cli` says you typed the command yourself.
 
-   Then make the ledger's first write, step 6 of its start-here page. There is no separate init step: that write creates the database. Do it now, before any check below, because the `PATH` rule waits for that file and until it exists the ledger stays off unless `ledger_cli` names the command.
+   Then make the ledger's first write, step 6 of its start-here page. There is no separate init step: that write creates the database (with the ledger's plugin installed, the first submitted prompt that its capture does not skip creates it too). Do it now, before any check below, because the `PATH` rule waits for that file and until it exists the ledger stays off unless `ledger_cli` names the command.
 3. Install the ledger's own plugin, `ledger-hooks` (ledger v0.2.0 or later), following the Claude Code plugin section of its README. It prints the ledger's brief at the start of each session and records your submitted prompts and question-picker answers; this plugin does neither. It runs the first `ledger` on the `PATH` Claude Code runs hooks with and takes no `ledger_cli` setting. An earlier release of this plugin (0.12.0) printed the brief itself; with that release installed beside the ledger's plugin the brief may print twice, so update this plugin.
 4. Install this plugin (the two commands below), then pin the ledger command with the setup step, `python3 <skills>/_lib/ledger_cli.py setup`, where `<skills>` is the `skills` folder of the plugin's install. For a plugin install, the first line below prints that folder and the second runs the setup step with it:
 
@@ -192,7 +190,7 @@ claude plugin marketplace remove skills
 
 Removing the marketplace also uninstalls every plugin installed from it, so the second command alone is enough. Neither command removes the environment keys you added or this plugin's configuration file, so then:
 
-- **The environment keys.** If you added `LEDGER_DB`, `LEDGER_OPERATOR` and `LEDGER_HARNESS` to the `env` block of `~/.claude/settings.json` for this and nothing else you run reads them (the ledger's plugin does), delete those keys and keep every other key. Unset them in your shell profile too.
+- **The environment keys.** If you added `LEDGER_DB` and `LEDGER_OPERATOR` (and `LEDGER_HARNESS`, if you set it) to the `env` block of `~/.claude/settings.json` for this and nothing else you run reads them (the ledger's plugin does), delete those keys and keep every other key. Unset them in your shell profile too.
 - **The skill configuration file.** `~/.claude/skill-config/topic.json` holds the `ledger_cli` pin that the setup step wrote, and any other keys you set. Delete the `ledger_cli` key, or the whole file when nothing else is in it. Setup may also have left `topic.json.lock`, `topic.json.setup-backup` and `topic.json.setup-previous.<timestamp>-<pid>` beside it; remove those once no editor has them open.
 - **What Claude Code's plugin cache keeps.** The cache belongs to Claude Code, not to this plugin. An uninstall marks the plugin's version folder under `~/.claude/plugins/cache/skills/sdlc/` with an `.orphaned_at` marker, and a background cleanup removes the folder 14 days later. That cleanup runs only while at least one plugin is installed, so after you uninstall your last plugin the folder stays until you install another. Claude Code removes the plugin's data folder under `~/.claude/plugins/data/` on uninstall unless you pass `--keep-data`; this plugin writes nothing there.
 

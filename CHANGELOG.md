@@ -17,6 +17,12 @@ The headings below are plugin versions, the number `claude plugin list` shows fo
 
 Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0.12.0 (tag v1.2.0). Only tags from v1.2.0 on have an entry, because this file did not exist at earlier tags.
 
+## Unreleased
+
+### README: one `LEDGER_HARNESS` convention, and when the database is created
+
+The terminal route's settings examples no longer set `LEDGER_HARNESS`, matching the ledger's docs: leave it out of Claude Code's settings, because the ledger's plugin sets `claude-code` when it is unset; the shell block keeps `export LEDGER_HARNESS=cli`. The default-tier paragraph and step 2 now say that the first submitted prompt the ledger plugin's prompt capture does not skip creates the database when `LEDGER_DB` names a missing file, not only a ledger CLI write. Docs only; no skill, script or setting changed.
+
 ## 0.14.0
 
 This is the release tagged v1.4.0 in the repository. It mainly carries the `ticket` skill binding a plan go and an outward go to the captured prompt, the README and this file mapping each tag to its plugin version, `setup` refusing to pin a ledger in Claude Code's plugin cache (with the README naming the no-pin route), changes to the README's Install section, and the README command that finds the installed skills folder. The sections below list every change.
