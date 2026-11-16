@@ -354,9 +354,13 @@ live pass's claim (the pass id, host and start time `open` recorded), so the
 person sees which pass holds the ticket next to the plan. Present the card and
 stop. Do not edit product files or dispatch `builder-core` until the
 person approves, then record it from the same pass with
-`session.record_go("plan", evidence=<ref>, verbatim=<their words>)`. A plan go
-records the plan revision, its criteria and the pass; it opens nothing for
-other criteria or another revision. `session.begin_build()` raises
+`session.record_go("plan", evidence=<ref>, verbatim=<exact span copied from their prompt>)`.
+Pass `verbatim` as that exact span, not a paraphrase. Report the bound
+election, or the exact line `go recorded, not bound to a captured utterance`.
+The binding never opens a ledger gate; the ticket-decision note stays the
+gate truth. A plan go records the plan revision, its criteria and the pass;
+it opens nothing for other criteria or another revision.
+`session.begin_build()` raises
 `GateRequired` without it.
 
 ## 5. Build and review
@@ -385,7 +389,10 @@ other criteria or another revision. `session.begin_build()` raises
 Show the final diff summary, verification evidence, the evidence for each
 criterion, the decisions, and every proposed outward action. Stop. Nothing
 leaves the machine before the person approves and you record it with
-`session.record_go("outward", evidence=..., verbatim=...)`: no push, pull
+`session.record_go("outward", evidence=..., verbatim=<exact span copied from their prompt>)`.
+Pass `verbatim` as that exact span, not a paraphrase. Report the bound
+election, or the exact line `go recorded, not bound to a captured utterance`.
+The binding never opens a ledger gate. Then: no push, pull
 request, tracker comment, status change, message, merge, release or deploy.
 Call `session.require_outward_go()` before each outward action; it reads the
 card fresh and refuses (`GateRequired`, or `stale` if the card changed).

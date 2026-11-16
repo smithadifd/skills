@@ -18,6 +18,16 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 
 ## Unreleased
 
+### The ticket skill binds a plan go and an outward go to the captured prompt
+
+After the ticket-decision note lands, `/ticket` runs `ledger elect` then one
+`decision.recorded` citing the election, quoting an exact span of this
+session's captured person prompt. The note stays the gate truth: a missing
+session, no matching utterance, a refused elect or append, or the markdown
+store reports `bound=False` and never says a ledger gate opened. The seat
+passes the go words as a span copied from the prompt and reports the bound
+election or the line `go recorded, not bound to a captured utterance`.
+
 ### The README and this file map each tag to its plugin version
 
 A repository tag and the plugin version it installs are different numbers: tag v1.3.0 installs `sdlc` 0.13.0, and the changelog's headings are plugin versions. This file now opens with a table that gives each tag's plugin version, and the README's Install says the same where it tells the reader to pick a tag, so a reader comparing `claude plugin list` with a tag is not left to find the mismatch. The README no longer says every tag has a changelog entry: tags before v1.2.0 predate this file. Docs only; no skill, script or setting changed.
