@@ -586,8 +586,12 @@ decision cannot cite an event that lands in the same batch (its `source_event_id
 exist). The store therefore writes the ticket's own records (plan, decision, review) as `item.note`
 events whose `text` is a self-describing *ticket record* (6.2.3), and uses the ledger's own kinds only
 where the schema holds every field unchanged (`item.created`, `session.*`, `item.stopped`,
-`item.tried`, `item.state`). No event cites another event; every record is complete on its own, so a
-batch resolves nothing and the ledger needs no new schema.
+`item.tried`, `item.state`). No event in an `append-many` batch cites another event; every ticket
+record is complete on its own, so a batch resolves nothing and the ledger needs no new schema.
+The binder in `record_go` is the one exception: after the ticket-decision note lands, it runs
+`ledger elect` then one `ledger append --kind decision.recorded` (source_event_id = the election)
+outside the batch. Those writes never gate the go; a failure leaves the note in place and reports
+`bound=False`.
 
 Mapping of events to ledger kinds, the writer name `W` in each payload's `source`, ticket key `K`,
 pass `P`, held token `R`, close token `T`:
@@ -634,8 +638,10 @@ version lives inside the note text, where the skill, not the ledger, reads it.
 
 The skill's validators (section I of the matrix) are at least as strict as each rule, so a payload the
 skill accepts is one the schema accepts; H24 pins this by running the ledger's own `validate_payload`
-over every batch the store builds. The kinds the store no longer writes are `decision.recorded`,
-`review.recorded` and `outside.recorded`; no payload carries `source_event_id`.
+over every batch the store builds. The kinds an `append-many` batch no longer writes are `decision.recorded`,
+`review.recorded` and `outside.recorded`; no batch payload carries `source_event_id`.
+The binder is the one writer of `decision.recorded` (and of `decision.elected` via `elect`),
+and the one payload that carries `source_event_id`, always the election's event id.
 
 #### 6.2.2 What each transition appends
 
@@ -650,11 +656,11 @@ mapping table:
 | `open(pass_id=P)`; `finish_orient`; `finish_research` | nothing | — |
 | `begin_build`; `require_outward_go`; `approved` | nothing (a `query` for the token comparison, then `export-item` only when equal) | — |
 | `present_plan` | `item.note` (plan), `item.stopped` (phase `plan`) | `R` |
-| `record_go("plan")` | `item.note` (decision) | `R` |
+| `record_go("plan")` | `item.note` (decision); then, outside the batch, `elect` and `append decision.recorded` (fail closed) | `R` |
 | `record_review("changes")`, rounds 1–2 | `item.note` (review) | `R` |
 | `record_review("changes")`, round 3 | `item.note` (review), `item.stopped` (phase `review`) | `R` |
 | `record_review("pass")` | `item.note` (review), `item.stopped` (phase `review`) | `R` |
-| `record_go("outward")` | `item.note` (decision) | `R` |
+| `record_go("outward")` | `item.note` (decision); then, outside the batch, `elect` and `append decision.recorded` (fail closed) | `R` |
 | `record_tried` | `item.tried` | `R` |
 | `more_info` | `item.stopped` (the store phase of the live phase) | `R` |
 | `close` | `item.stopped` (phase `close`, key `ticket-close/K/P/T/stop`), `item.state` (key `ticket-close/K/P/T/state`) | `R` |
@@ -684,7 +690,10 @@ the normalizer walks every `item.note` of the export in id order:
   order.
 
 The ledger's own `decision.recorded`, `review.recorded` and `outside.recorded` events on the item are
-another tool's and fold into nothing (H12).
+another tool's and fold into nothing (H12). The binder's `decision.elected` and `decision.recorded`
+are the one exception to "the store never writes `decision.recorded`" and still fold into nothing
+on the ticket card: the ledger card shows the election line under `## Decisions` and the verbatim
+under `## Decision records`.
 
 #### 6.2.4 Reading the CLI's answer
 

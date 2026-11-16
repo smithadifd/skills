@@ -2,10 +2,13 @@
 
 H19 and H24 need the ledger's own code: they run when ``LEDGER_CLI`` names
 the ledger CLI (H24 loads ``ledger/schema.py`` from beside it) and are
-skipped otherwise. Every other row runs against the fake.
+skipped otherwise. H39–H41 bind a go to a captured utterance: H39 and H40
+run against the fake; H41 runs when ``LEDGER_REAL_CLI`` names the ledger CLI
+and is skipped otherwise. Every other row runs against the fake.
 """
 
 import importlib.util
+import json
 import os
 import sqlite3
 import subprocess
@@ -21,6 +24,10 @@ from ticket_support import A, B, KEY, TITLE, Source, changes, go_plan, passing, 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 LEDGER_CLI = os.environ.get("LEDGER_CLI", "")
 needs_ledger_cli = pytest.mark.skipif(not LEDGER_CLI, reason="LEDGER_CLI does not name the ledger CLI")
+LEDGER_REAL_CLI = os.environ.get("LEDGER_REAL_CLI", "")
+needs_real_cli = pytest.mark.skipif(
+    not LEDGER_REAL_CLI, reason="LEDGER_REAL_CLI does not name the ledger CLI",
+)
 
 
 @pytest.fixture
@@ -508,16 +515,20 @@ def test_H24_every_batch_the_store_builds_passes_the_ledger_schema(tmp_path):
                 session.more_info("person", "Which release is this for?")
             session.end()
         finally:
-            # Every batch the fake received, whether or not the stage finished.
-            for element in (element for call in fake.appends() for element in call.batch):
-                assert set(element) == {"kind", "payload", "item_id", "idempotency_key"}
-                validate_payload(element["kind"], element["payload"])
-                assert element["payload"]["source"] == WRITER
-                assert element["kind"] not in ("decision.recorded", "review.recorded", "outside.recorded")
-                assert "source_event_id" not in element["payload"]
-                if element["kind"] == "item.stopped":
-                    assert "close" not in element["payload"]
-                kinds_sent.add(element["kind"])
+            # Every append-many batch the fake received, whether or not the stage
+            # finished. The binder's elect and append calls are separate and are
+            # excluded here: they are not append-many batches.
+            for call in fake.appends():
+                assert call.verb == "append-many"
+                for element in call.batch:
+                    assert set(element) == {"kind", "payload", "item_id", "idempotency_key"}
+                    validate_payload(element["kind"], element["payload"])
+                    assert element["payload"]["source"] == WRITER
+                    assert element["kind"] not in ("decision.recorded", "review.recorded", "outside.recorded")
+                    assert "source_event_id" not in element["payload"]
+                    if element["kind"] == "item.stopped":
+                        assert "close" not in element["payload"]
+                    kinds_sent.add(element["kind"])
     assert kinds_sent == {
         "item.created", "session.opened", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
 
@@ -948,3 +959,166 @@ def test_a_moved_pinned_cli_stops_import_cards_by_name(tmp_path, monkeypatch, ca
     err = capsys.readouterr().err
     assert err.startswith("ticket.py: ledger_cli_moved: ") and len(err.splitlines()) == 1
     assert not marker.exists()
+
+
+GO_WORDS = "Go with this plan."
+
+
+def _prompt(session_id, text=GO_WORDS, origin="person", **extra):
+    payload = {"origin": origin, "text": text, "session_id": session_id}
+    payload.update(extra)
+    return payload
+
+
+def _capture(fake, payload, key=None):
+    """An item-less utterance.captured event, as ``ledger capture --kind prompt`` writes."""
+
+    fake._append(None, "utterance.captured", payload, key or f"capture:{len(fake.events())}")
+
+
+def _binder_kinds(fake):
+    return [event["kind"] for event in fake.events() if event["kind"] in ("decision.elected", "decision.recorded")]
+
+
+def test_H39_bind_picks_this_sessions_newest_utterance(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    _capture(fake, _prompt("sess-other"))
+    this_id, other_id = [event["id"] for event in fake.events() if event["kind"] == "utterance.captured"]
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is True
+    assert result["utterance_id"] == this_id != other_id
+    elected = [event for event in fake.events() if event["kind"] == "decision.elected"]
+    recorded = [event for event in fake.events() if event["kind"] == "decision.recorded"]
+    assert len(elected) == 1 and len(recorded) == 1
+    assert elected[0]["payload"]["quote_ref"] == this_id
+    assert elected[0]["payload"]["quotes"] == [GO_WORDS]
+    assert elected[0]["payload"]["chosen"] == "go"
+    assert elected[0]["payload"]["rejected"] == ["hold"]
+    assert elected[0]["idempotency_key"] == f"ticket-bind/{KEY}/plan/1/{this_id}/elect"
+    assert recorded[0]["payload"]["source_event_id"] == elected[0]["id"] == result["election_id"]
+    assert recorded[0]["payload"]["who"] == "the person"
+    assert recorded[0]["payload"]["who_kind"] == "person"
+    assert recorded[0]["payload"]["standing"] == "settled"
+    assert recorded[0]["payload"]["source"] == WRITER
+    assert recorded[0]["payload"]["verbatim"] == GO_WORDS
+    assert recorded[0]["idempotency_key"] == f"ticket-bind/{KEY}/plan/1/{this_id}/decision"
+    assert fake.calls("elect") and fake.calls("append")
+    assert all("decision.recorded" not in (call.stdin or "") for call in fake.appends())
+
+
+@pytest.mark.parametrize(
+    "case, reason",
+    [
+        ("unset", "LEDGER_SESSION unset"),
+        ("no match", "no matching utterance"),
+        ("other session", "no matching utterance"),
+        ("other origin", "no matching utterance"),
+        ("omitted", "no matching utterance"),
+        ("wrong words", "no matching utterance"),
+    ],
+)
+def test_H40_bind_fails_closed_with_no_write(fake, monkeypatch, case, reason):
+    if case != "unset":
+        monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    else:
+        monkeypatch.delenv("LEDGER_SESSION", raising=False)
+    session = open_ledger(fake, Source())
+    present(session)
+    if case == "unset":
+        _capture(fake, _prompt("sess-this"))
+    elif case == "other session":
+        _capture(fake, _prompt("sess-other"))
+    elif case == "other origin":
+        _capture(fake, {"text": GO_WORDS, "session_id": "sess-this"})
+    elif case == "omitted":
+        _capture(fake, _prompt("sess-this", omitted_bytes=12, omitted_sha256="a" * 64))
+    elif case == "wrong words":
+        _capture(fake, _prompt("sess-this", text="Ship it."))
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result == {"bound": False, "reason": reason}
+    assert _binder_kinds(fake) == []
+    assert fake.calls("elect") == []
+    assert fake.calls("append") == []
+    if case == "unset":
+        assert fake.calls("events") == []
+
+
+def test_H40_bind_fails_closed_when_elect_is_refused(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    fake.answer("elect", "usage")
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is False and result["reason"].startswith("elect refused:")
+    assert _binder_kinds(fake) == []
+    assert fake.calls("append") == []
+
+
+def test_H40_bind_fails_closed_when_append_is_refused(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    fake.answer("append", "validation")
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is False and result["reason"].startswith("append refused:")
+    assert [event["kind"] for event in fake.events() if event["kind"] == "decision.elected"]
+    assert [event["kind"] for event in fake.events() if event["kind"] == "decision.recorded"] == []
+
+
+def test_a_markdown_go_is_not_bound(repo):
+    from ticket_support import open_pass
+
+    session = open_pass(repo, Source())
+    present(session)
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result == {"bound": False, "reason": "no ledger"}
+
+
+@needs_real_cli
+def test_H41_a_bound_go_chains_decision_to_election_to_utterance(tmp_path, monkeypatch):
+    cli = LEDGER_REAL_CLI
+    db = str(tmp_path / "ledger.db")
+    session_id = "sess-real-bind"
+    monkeypatch.setenv("LEDGER_DB", db)
+    monkeypatch.setenv("LEDGER_HARNESS", "ticket-tests")
+    monkeypatch.setenv("LEDGER_SESSION", session_id)
+    other = '[{"kind": "item.created", "payload": {"type": "ticket", "title": "Another ticket"}}]'
+    subprocess.run(
+        [cli, "--json", "append-many", "EK-1"], input=other, text=True, check=True, capture_output=True,
+    )
+    session = open_ledger(cli, Source())
+    present(session)
+    hook = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": GO_WORDS,
+        "session_id": session_id,
+        "prompt_id": "prompt-bind-1",
+    }
+    captured = subprocess.run(
+        [cli, "--json", "capture", "--kind", "prompt"],
+        input=json.dumps(hook), text=True, check=True, capture_output=True,
+    )
+    utterance_id = json.loads(captured.stdout)["data"]["event"]["id"]
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is True, result
+    assert result["utterance_id"] == utterance_id
+    listed = subprocess.run(
+        [cli, "--json", "decisions", "--item", KEY], text=True, check=True, capture_output=True,
+    )
+    rows = json.loads(listed.stdout)["data"]["decisions"]
+    assert len(rows) == 1
+    assert rows[0]["standing"] == "settled"
+    assert rows[0]["source_event_id"] == result["election_id"]
+    card = subprocess.run([cli, "card", "--full", KEY], text=True, check=True, capture_output=True)
+    body = card.stdout
+    decisions = body.split("## Decisions", 1)[1].split("\n## ", 1)[0]
+    records = body.split("## Decision records", 1)[1].split("\n## ", 1)[0]
+    assert f"quote_ref={utterance_id}" in decisions
+    assert "-> go" in decisions
+    assert GO_WORDS in records
+    assert f"source event {result['election_id']}" in records

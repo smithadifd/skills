@@ -4,6 +4,16 @@ Release notes for the `sdlc` plugin, newest first.
 
 ## Unreleased
 
+### The ticket skill binds a plan go and an outward go to the captured prompt
+
+After the ticket-decision note lands, `/ticket` runs `ledger elect` then one
+`decision.recorded` citing the election, quoting an exact span of this
+session's captured person prompt. The note stays the gate truth: a missing
+session, no matching utterance, a refused elect or append, or the markdown
+store reports `bound=False` and never says a ledger gate opened. The seat
+passes the go words as a span copied from the prompt and reports the bound
+election or the line `go recorded, not bound to a captured utterance`.
+
 ### Setup refuses to pin a ledger in Claude Code's plugin cache, and the README names the no-pin default-tier route
 
 With the ledger's plugin installed, the four ledger-using skills find `ledger` on the session's PATH and `LEDGER_DB` in its environment with no `ledger_cli` pin. `python3 skills/_lib/ledger_cli.py setup` now refuses, exit 1 with one stderr line starting `ledger_cli_setup_plugin_command:`, when the resolved `ledger` path (made absolute) has a `plugins/cache/` folder segment under a `.claude` folder, and writes nothing: that path changes with every plugin update, so a pin would become `ledger_cli_moved`. A path that cannot be made absolute is not treated as in the cache. When the existing `ledger_cli` setting is a moved pin inside that cache and the `ledger` now on PATH is also inside it, setup removes that one key, keeps every other key, and prints that the stale plugin pin was cleared (exit 0). A fresh setup with no pin, a live pin, or a moved pin outside the cache still refuse as before. The README's "Using the ledger" names this default-tier route beside the existing four terminal steps and says to skip setup on it. The README's Install preface names the two routes (plugin route skips setup; terminal route keeps the four steps). The resolver's rules 1 to 3 are unchanged.

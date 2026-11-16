@@ -1844,6 +1844,147 @@ class LedgerStore:
         result = subprocess.run([self.cli, "--json", *args], input=stdin, capture_output=True, encoding="utf-8", check=False)
         return _ledger_answer(result.returncode, result.stdout, result.stderr)
 
+    def find_utterance(self, session_id: str, verbatim: str, since: str) -> Mapping[str, Any] | None:
+        """Newest person prompt in ``session_id`` since ``since`` that contains ``verbatim``.
+
+        Reads ``ledger events --kind utterance.captured --since --limit 200``.
+        A match is payload.session_id equal to ``session_id``, origin "person",
+        no omitted_bytes, and payload.text containing ``verbatim`` as a
+        byte-exact substring. Newest first; the first match wins. Any other
+        answer (empty, usage, unreadable) is no match.
+        """
+
+        answer = self._run(
+            "events", "--kind", "utterance.captured", "--since", since, "--limit", "200",
+        )
+        if not answer.ok or type(answer.data) is not dict or type(answer.data.get("events")) is not list:
+            return None
+        needle = verbatim.encode("utf-8")
+        for event in answer.data["events"]:
+            if type(event) is not dict:
+                continue
+            payload = event.get("payload")
+            if type(payload) is not dict:
+                continue
+            if payload.get("session_id") != session_id:
+                continue
+            if payload.get("origin") != "person":
+                continue
+            if "omitted_bytes" in payload:
+                continue
+            text = payload.get("text")
+            if type(text) is not str:
+                continue
+            try:
+                haystack = text.encode("utf-8")
+            except UnicodeEncodeError:
+                continue
+            if needle not in haystack:
+                continue
+            return event
+        return None
+
+    def _go_election(self, gate: str, revision: int) -> tuple[str, str, str, str]:
+        """Question, chosen description, rejected label and scope for a bound go."""
+
+        if gate == "plan":
+            return (
+                f"Approve the plan for {self.key} (revision {revision})?",
+                "Approve the plan and begin the build.",
+                "hold",
+                f"the plan gate of {self.key} revision {revision}",
+            )
+        return (
+            f"Approve outward actions for {self.key} (revision {revision})?",
+            "Approve the outward actions of this pass.",
+            "no go",
+            f"the outward gate of {self.key} revision {revision}",
+        )
+
+    def bind_go(
+        self,
+        *,
+        gate: str,
+        revision: int,
+        verbatim: str,
+        evidence: str,
+        phase: str,
+        effect: str,
+        started_at: str,
+    ) -> dict[str, Any]:
+        """Elect the go against this session's captured prompt, then record it.
+
+        Runs after the ticket-decision note has landed, outside apply's batch.
+        Fail closed: any miss or refusal writes nothing more and returns
+        ``bound=False`` with a reason. Never raises; never claims a ledger gate
+        opened. No fallback when LEDGER_SESSION is unset.
+        """
+
+        session_id = os.environ.get("LEDGER_SESSION")
+        if not session_id:
+            return {"bound": False, "reason": "LEDGER_SESSION unset"}
+        utterance = self.find_utterance(session_id, verbatim, started_at)
+        if utterance is None:
+            return {"bound": False, "reason": "no matching utterance"}
+        utterance_id = utterance.get("id")
+        if type(utterance_id) is not int:
+            return {"bound": False, "reason": "no matching utterance"}
+        question, chosen_description, rejected, scope = self._go_election(gate, revision)
+        elect_key = f"ticket-bind/{self.key}/{gate}/{revision}/{utterance_id}/elect"
+        decision_key = f"ticket-bind/{self.key}/{gate}/{revision}/{utterance_id}/decision"
+        elect = self._run(
+            "elect", self.key,
+            "--question", question,
+            "--chosen", "go",
+            "--chosen-description", chosen_description,
+            "--rejected", rejected,
+            "--scope", scope,
+            "--quote-ref", str(utterance_id),
+            "--quote", verbatim,
+            "--idempotency-key", elect_key,
+        )
+        if not elect.ok:
+            why = elect.code or elect.output or "no envelope"
+            if elect.message:
+                why = f"{why}: {elect.message}" if elect.code else elect.message
+            return {"bound": False, "reason": f"elect refused: {why}"}
+        event = elect.data.get("event") if type(elect.data) is dict else None
+        election_id = event.get("id") if type(event) is dict else None
+        if type(election_id) is not int:
+            return {"bound": False, "reason": "elect refused: no event id"}
+        payload = {
+            "who": "the person",
+            "who_kind": "person",
+            "standing": "settled",
+            "effect": effect,
+            "tags": [{"type": "ticket", "id": self.key}],
+            "verbatim": verbatim,
+            "phase": phase,
+            "evidence": evidence,
+            "source_event_id": election_id,
+            "source": _LEDGER_WRITER,
+        }
+        appended = self._run(
+            "append",
+            "--kind", "decision.recorded",
+            "--item", self.key,
+            "--payload", json.dumps(payload),
+            "--idempotency-key", decision_key,
+        )
+        if not appended.ok:
+            why = appended.code or appended.output or "no envelope"
+            if appended.message:
+                why = f"{why}: {appended.message}" if appended.code else appended.message
+            return {"bound": False, "reason": f"append refused: {why}"}
+        recorded = appended.data.get("event") if type(appended.data) is dict else None
+        decision_id = recorded.get("id") if type(recorded) is dict else None
+        return {
+            "bound": True,
+            "utterance_id": utterance_id,
+            "election_id": election_id,
+            "decision_id": decision_id,
+        }
+
     def _refused(self, what: str, answer: _Answer) -> StoreUnavailable:
         said = f"{answer.code}: {answer.message}" if answer.code else f"no envelope, exit status {answer.status}: {answer.output}"
         return StoreUnavailable(
@@ -2776,8 +2917,36 @@ class TicketPass:
         self._sync_steps()
         self._phase = "plan_go"
 
+    def _bind_recorded_go(self, gate: str, revision: int, decision: Mapping[str, Any]) -> dict[str, Any]:
+        """Bind the landed go to a captured utterance, or fail closed. Never raises."""
+
+        bind = getattr(self.store, "bind_go", None)
+        if not callable(bind):
+            return {"bound": False, "reason": "no ledger"}
+        started = (self._card.get("pass") or {}).get("started_at")
+        if not _is_text(started):
+            return {"bound": False, "reason": "no matching utterance"}
+        try:
+            result = bind(
+                gate=gate,
+                revision=revision,
+                verbatim=decision["verbatim"],
+                evidence=decision["evidence"],
+                phase=decision["phase"],
+                effect=decision["effect"],
+                started_at=started,
+            )
+        except Exception:
+            return {"bound": False, "reason": "elect refused"}
+        if type(result) is not dict:
+            return {"bound": False, "reason": "not bound"}
+        if result.get("bound") is True:
+            return result
+        reason = result.get("reason")
+        return {"bound": False, "reason": reason if _is_text(reason) else "not bound"}
+
     @_ends_on_failure
-    def record_go(self, gate: str, *, evidence: str, verbatim: str) -> None:
+    def record_go(self, gate: str, *, evidence: str, verbatim: str) -> dict[str, Any]:
         if gate not in GATES:
             raise TicketError(f"unknown gate: {gate}")
         self._require("plan_go" if gate == "plan" else "outward_go")
@@ -2801,6 +2970,7 @@ class TicketPass:
         if gate == "plan":
             decision["pass"] = self._pass_id
         self._write([("decision", decision)])
+        return self._bind_recorded_go(gate, revision, decision)
 
     @_ends_on_failure
     def approved(self, gate: str) -> bool:

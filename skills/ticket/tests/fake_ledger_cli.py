@@ -2,8 +2,9 @@
 
 It answers the verbs the store sends (``query --item``, ``export-item``,
 ``append-many`` and ``append-many --help``, and the spec intake's ``spec set``
-and ``spec diff``), and the ones the ledger-item source reads (``spec show
-ITEM`` and ``links ITEM``), as ledger 0.1.22 answers them, with the CLI's
+and ``spec diff``), the ones the ledger-item source reads (``spec show
+ITEM`` and ``links ITEM``), and the go binder's ``events``, ``elect`` and
+``append``, as ledger 0.1.22 answers them, with the CLI's
 ``{ok, data, error}`` envelope and its exit statuses: ``spec show`` refuses an
 unknown item ``not_found`` and an item with no spec ``no_spec``, and ``links``
 refuses an unknown item ``not_found`` and an item no link names ``empty``.
@@ -335,6 +336,142 @@ def append_many(state, item, expect, stdin):
     return {"item_id": item, "events": answer}
 
 
+def store_event(state, kind, payload, item_id, key):
+    """Append one event, replaying ``key`` when the stored event matches."""
+
+    events = list(state["events"])
+    stored = next((event for event in events if event["idempotency_key"] == key), None)
+    if stored is not None:
+        if (stored["kind"], stored["payload"], stored["item_id"]) != (kind, payload, item_id):
+            raise Refusal("conflict", f"idempotency_key {key!r} already recorded as a different event", 3)
+        return stored
+    event = {
+        "id": (events[-1]["id"] if events else 0) + 1, "kind": kind, "payload": payload,
+        "payload_version": 1, "item_id": item_id, "idempotency_key": key,
+        "actor": os.environ.get("LEDGER_AGENT") or None, "session": os.environ.get("LEDGER_SESSION") or None,
+    }
+    events.append(event)
+    state["events"] = events
+    return event
+
+
+def events_list(state, args):
+    """``events --kind KIND --since DATE --limit N``: matching kinds, newest first.
+
+    ``--since`` is accepted and ignored: planted test events often have no
+    ``recorded_at``, and the real CLI owns the window. An empty match is
+    ``empty`` (exit 1), as the real verb.
+    """
+
+    values, _positionals = flags(args[1:], ("kind", "since", "until", "item", "actor", "limit"))
+    kind = values.get("kind")
+    raw_limit = values.get("limit")
+    limit = 50 if raw_limit is None else int(raw_limit)
+    matched = [event for event in reversed(state["events"]) if kind is None or event["kind"] == kind]
+    if not matched:
+        raise Refusal("empty", "no matching events", 1)
+    return {"events": matched[:limit], "limit": limit, "truncated": len(matched) > limit}
+
+
+ELECT_FLAGS = (
+    "question", "chosen", "chosen-description", "rejected", "scope",
+    "quote-ref", "quote", "ask", "idempotency-key",
+)
+
+
+def elect(state, args):
+    """``elect ITEM --question --chosen --chosen-description --rejected --scope --quote-ref --quote``."""
+
+    item = None
+    values = {"rejected": [], "quote": []}
+    index = 1
+    while index < len(args):
+        arg = args[index]
+        if not arg.startswith("--"):
+            if item is not None:
+                raise Refusal("usage", "unexpected positional", 2)
+            item = arg
+            index += 1
+            continue
+        name, equals, value = arg[2:].partition("=")
+        if name not in ELECT_FLAGS:
+            raise Refusal("usage", f"unrecognized arguments: {arg}", 2)
+        if not equals:
+            index += 1
+            if index >= len(args):
+                raise Refusal("usage", f"argument --{name}: expected one argument", 2)
+            value = args[index]
+        if name in ("rejected", "quote"):
+            values[name].append(value)
+        else:
+            values[name] = value
+        index += 1
+    required = ("question", "chosen", "chosen-description", "scope", "quote-ref")
+    missing = [name for name in required if name not in values]
+    if item is None or missing or not values["rejected"] or not values["quote"]:
+        raise Refusal("usage", "elect is missing a required flag", 2)
+    try:
+        quote_ref = int(values["quote-ref"])
+    except (TypeError, ValueError):
+        raise Refusal("unresolvable_ref", "quote_ref must be an event id", 3) from None
+    row = next((event for event in state["events"] if event["id"] == quote_ref), None)
+    if row is None or row["kind"] != "utterance.captured":
+        raise Refusal("unresolvable_ref", "quote_ref must resolve to an utterance.captured event", 3)
+    payload = row["payload"]
+    if "omitted_bytes" in payload:
+        raise Refusal("pointer_utterance", f"quote_ref {quote_ref} is a pointer to an omitted prompt body", 3)
+    text = payload.get("text") if type(payload) is dict else None
+    if type(text) is not str:
+        raise Refusal("unresolvable_ref", "quote_ref has no text", 3)
+    for quote in values["quote"]:
+        if quote not in text:
+            raise Refusal("quote_mismatch", f"quote is not a verbatim substring of utterance {quote_ref}", 3)
+    event = store_event(
+        state,
+        "decision.elected",
+        {
+            "question": values["question"],
+            "chosen": values["chosen"],
+            "chosen_description": values["chosen-description"],
+            "rejected": values["rejected"],
+            "scope": values["scope"],
+            "quote_ref": quote_ref,
+            "quotes": values["quote"],
+        },
+        item,
+        values.get("idempotency-key") or secrets.token_hex(16),
+    )
+    return {"item_id": item, "event": event}
+
+
+APPEND_FLAGS = (
+    "kind", "payload", "item", "idempotency-key", "channel", "provenance-class",
+    "payload-version", "expect-revision",
+)
+
+
+def append_one(state, args):
+    """``append --kind KIND --payload JSON [--item ID] [--idempotency-key K]``."""
+
+    values, positionals = flags(args[1:], APPEND_FLAGS)
+    if positionals or "kind" not in values or "payload" not in values:
+        raise Refusal("usage", "append needs --kind and --payload", 2)
+    try:
+        payload = json.loads(values["payload"])
+    except ValueError:
+        raise Refusal("usage", "payload is not JSON", 2) from None
+    if type(payload) is not dict:
+        raise Refusal("usage", "payload must be a JSON object", 2)
+    event = store_event(
+        state,
+        values["kind"],
+        payload,
+        values.get("item"),
+        values.get("idempotency-key") or secrets.token_hex(16),
+    )
+    return {"event": event}
+
+
 def carry_out(state, verb, args, stdin):
     try:
         if verb == "query" and "--item" in args:
@@ -352,6 +489,12 @@ def carry_out(state, verb, args, stdin):
             data = spec_diff(state, args[2:])
         elif verb == "links" and len(args) == 2:
             data = links(state, args[1])
+        elif verb == "events":
+            data = events_list(state, args)
+        elif verb == "elect":
+            data = elect(state, args)
+        elif verb == "append":
+            data = append_one(state, args)
         else:
             raise Refusal("usage", f"the fake does not answer {' '.join(args)!r}", 2)
     except Refusal as refusal:
