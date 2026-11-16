@@ -2,6 +2,20 @@
 
 Release notes for the `sdlc` plugin, newest first.
 
+## Tags and plugin versions
+
+The headings below are plugin versions, the number `claude plugin list` shows for `sdlc@skills`. A repository tag is a different number: tag v1.3.0 installs `sdlc` 0.13.0. This table gives each tag's plugin version, read from `.claude-plugin/plugin.json` at that tag.
+
+| Repository tag | `sdlc` plugin version | Entry below |
+|---|---|---|
+| v0.1.0 to v0.9.2 | none: these tags have no plugin manifest, and install with `install.sh` only | none: this file starts at v1.2.0 |
+| v0.9.3 to v0.9.5 | 0.9.2 | none |
+| v0.10.0 to v1.1.1 | 0.10.0 | none |
+| v1.2.0 | 0.12.0 | 0.12.0 |
+| v1.3.0 | 0.13.0 | 0.13.0 |
+
+Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0.12.0 (tag v1.2.0). Only tags from v1.2.0 on have an entry, because this file did not exist at earlier tags.
+
 ## Unreleased
 
 ### The ticket skill binds a plan go and an outward go to the captured prompt
@@ -13,6 +27,10 @@ session, no matching utterance, a refused elect or append, or the markdown
 store reports `bound=False` and never says a ledger gate opened. The seat
 passes the go words as a span copied from the prompt and reports the bound
 election or the line `go recorded, not bound to a captured utterance`.
+
+### The README and this file map each tag to its plugin version
+
+A repository tag and the plugin version it installs are different numbers: tag v1.3.0 installs `sdlc` 0.13.0, and the changelog's headings are plugin versions. This file now opens with a table that gives each tag's plugin version, and the README's Install says the same where it tells the reader to pick a tag, so a reader comparing `claude plugin list` with a tag is not left to find the mismatch. The README no longer says every tag has a changelog entry: tags before v1.2.0 predate this file. Docs only; no skill, script or setting changed.
 
 ### Setup refuses to pin a ledger in Claude Code's plugin cache, and the README names the no-pin default-tier route
 
