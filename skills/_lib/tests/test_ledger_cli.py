@@ -1112,6 +1112,61 @@ def test_setup_treats_a_path_that_cannot_be_made_absolute_as_not_in_the_cache(ma
     assert pin == str(machine.ledger)
 
 
+def test_setup_clears_a_moved_plugin_cache_pin_and_keeps_other_keys(tmp_path):
+    machine = Machine(tmp_path)
+    dead = (
+        machine.home_dir
+        / ".claude"
+        / "plugins"
+        / "cache"
+        / "skills"
+        / "ledger-hooks"
+        / "0.0.1"
+        / "bin"
+        / "ledger"
+    )
+    path = _put_override(
+        machine.home_dir,
+        json.dumps({"ledger_cli": str(dead), "keep": 1, "topics_dir": "/somewhere"}),
+    )
+    cache_bin = _cache_bin(
+        machine.home_dir, ".claude", "plugins", "cache", "skills", "ledger-hooks", "1.0.0", "bin"
+    )
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == {"keep": 1, "topics_dir": "/somewhere"}
+    assert list(written) == ["keep", "topics_dir"]
+    kept = (
+        f"; the version it replaced is kept at {_previous(machine.home_dir)}; "
+        "remove it once no editor has it open"
+    )
+    assert proc.stdout.splitlines() == [
+        f"stale plugin pin cleared from {path}; the plugin route needs no pin{kept}"
+    ]
+    assert machine.calls() == [], "clearing a stale plugin pin runs no compatibility check"
+    previous = json.loads(_previous(machine.home_dir).read_text(encoding="utf-8"))
+    assert previous["ledger_cli"] == str(dead) and previous["keep"] == 1
+    _no_temp_files(machine.home_dir)
+
+
+def test_setup_refuses_a_moved_non_cache_pin_when_path_ledger_is_in_the_plugin_cache(tmp_path):
+    machine = Machine(tmp_path)
+    dead = tmp_path / "gone" / "ledger"
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(dead), "keep": 1}))
+    before = path.read_bytes()
+    cache_bin = _cache_bin(
+        machine.home_dir, ".claude", "plugins", "cache", "skills", "ledger-hooks", "1.0.0", "bin"
+    )
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    _refusal(proc, "ledger_cli_setup_plugin_command")
+    assert path.read_bytes() == before
+    assert machine.calls() == []
+
+
 def test_setup_takes_no_config_flag_and_the_no_argument_form_is_unchanged(machine, tmp_path):
     proc = machine.run("--config", str(tmp_path / "x.json"), "setup")
     assert proc.returncode == 2 and "setup takes no --config" in proc.stderr

@@ -81,6 +81,11 @@ commit that the residual below describes:
   pinning it would become `ledger_cli_moved` at the next update. The plugin's
   command needs no pin. A path that cannot be made absolute is not treated as
   in the cache. Checked after the path is found, before the compatibility check.
+  One recovery: when the existing `ledger_cli` setting is a moved pin whose
+  path is in that cache, and the `ledger` now on PATH is also in the cache,
+  setup removes that one key, keeps every other key, writes through the same
+  commit path, and prints one line that the stale plugin pin was cleared and
+  the plugin route needs no pin (exit 0).
 - `ledger_cli_setup_incompatible`: the one found fails the compatibility check;
   the line names what failed.
 - `ledger_cli_setup_config_changed`: when setup came to write, the override
@@ -809,6 +814,19 @@ def _in_claude_plugin_cache(path: str) -> bool:
     return False
 
 
+def _stale_plugin_cache_pin(value: Any) -> bool:
+    """True when `value` is a moved pin whose path is in Claude Code's plugin cache."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or not _moved(text):
+        return False
+    absolute = _absolute_path(os.path.expanduser(text))
+    if absolute is None:
+        return False
+    return _in_claude_plugin_cache(absolute)
+
+
 def setup() -> int:
     """Pin the ledger CLI: see the module text, Setup. Exit 0 when written, 1 on a named refusal."""
     override = Path(OVERRIDE_PATH).expanduser()
@@ -876,10 +894,42 @@ def _setup_locked(override: Path, target: Path) -> int:
     if pinned is None:
         pinned = found
     elif _in_claude_plugin_cache(pinned):
-        return _refuse_setup(
-            SETUP_PLUGIN_COMMAND,
-            "the plugin's command needs no pin (its path changes with every plugin update); nothing was written",
-        )
+        if not _stale_plugin_cache_pin(existing):
+            return _refuse_setup(
+                SETUP_PLUGIN_COMMAND,
+                "the plugin's command needs no pin (its path changes with every plugin update); nothing was written",
+            )
+        config.pop(CONFIG_KEY, None)
+        try:
+            kept, edited, left = _commit(target, json.dumps(config, indent=2) + "\n", before)
+        except _Refusal as refusal:
+            return _refuse_setup(refusal.token, refusal.detail)
+        except OSError as exc:
+            return _refuse_setup(
+                SETUP_WRITE_FAILED,
+                f"could not write {target} ({_one_line(exc.strerror or str(exc))}); nothing was written",
+            )
+        if edited:
+            return _refuse_setup(
+                SETUP_CONFIG_CHANGED,
+                f"the stale plugin pin was cleared in {target}, but the version it replaced, kept at {kept}, "
+                "was edited after setup compared it or could not be read: merge any edit in it by hand, "
+                "then remove it",
+            )
+        message = f"stale plugin pin cleared from {target}; the plugin route needs no pin"
+        if left:
+            print(
+                f"{message}; the version it replaced was left at {kept} "
+                f"(it could not be given a {target.name}{PREVIOUS_SUFFIX}.* name): remove it before the next setup run"
+            )
+        elif kept is not None:
+            print(
+                f"{message}; the version it replaced is kept at {kept}; "
+                "remove it once no editor has it open"
+            )
+        else:
+            print(message)
+        return 0
     failure = probe(pinned)
     if failure is not None:
         return _refuse_setup(

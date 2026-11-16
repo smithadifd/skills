@@ -98,7 +98,7 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 
 ## Install
 
-You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables above say so. Without the ledger, the two commands below are the whole install; with it, do the four steps below in order, of which step 4 is the two commands.
+You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables above say so. Without the ledger, the two commands below are the whole install. With it, two routes: the plugin route (default tier) skips the setup step; the terminal route keeps the four steps below in order, of which step 4 is the two commands.
 
 **Using the ledger.** Two routes.
 
