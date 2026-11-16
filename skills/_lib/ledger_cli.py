@@ -75,6 +75,12 @@ commit that the residual below describes:
   setting is never changed and the file stays byte-identical. Null, an empty
   or a blank string count as unset. Checked after that, with no program run.
 - `ledger_cli_setup_not_found`: no `ledger` on `PATH`.
+- `ledger_cli_setup_plugin_command`: the resolved `ledger` path (made absolute)
+  has a `plugins/cache/` folder segment under a `.claude` folder, so it is
+  Claude Code's plugin command. That path changes with every plugin update;
+  pinning it would become `ledger_cli_moved` at the next update. The plugin's
+  command needs no pin. A path that cannot be made absolute is not treated as
+  in the cache. Checked after the path is found, before the compatibility check.
 - `ledger_cli_setup_incompatible`: the one found fails the compatibility check;
   the line names what failed.
 - `ledger_cli_setup_config_changed`: when setup came to write, the override
@@ -231,6 +237,7 @@ SETUP_CONFIG_CHANGED = "ledger_cli_setup_config_changed"
 SETUP_NO_HARDLINKS = "ledger_cli_setup_no_hardlinks"
 SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
 SETUP_LOCK_FAILED = "ledger_cli_setup_lock_failed"
+SETUP_PLUGIN_COMMAND = "ledger_cli_setup_plugin_command"
 # The hard-link probe's name is setup's temp file name plus this suffix, in the override's folder.
 PROBE_SUFFIX = ".link-probe"
 # The lock file sits beside the override and is named by appending this to its name.
@@ -781,6 +788,27 @@ def _take_lock(target: Path) -> int:
     return descriptor
 
 
+def _absolute_path(path: str) -> Optional[str]:
+    """The absolute form of `path`, or None when it cannot be made absolute."""
+    try:
+        return os.path.abspath(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _in_claude_plugin_cache(path: str) -> bool:
+    """True when `path` has a `.claude` segment followed later by consecutive `plugins` then `cache`."""
+    parts = Path(path).parts
+    try:
+        claude_at = parts.index(".claude")
+    except ValueError:
+        return False
+    for i in range(claude_at + 1, len(parts) - 1):
+        if parts[i] == "plugins" and parts[i + 1] == "cache":
+            return True
+    return False
+
+
 def setup() -> int:
     """Pin the ledger CLI: see the module text, Setup. Exit 0 when written, 1 on a named refusal."""
     override = Path(OVERRIDE_PATH).expanduser()
@@ -844,7 +872,14 @@ def _setup_locked(override: Path, target: Path) -> int:
     found = shutil.which(LEDGER_COMMAND)
     if found is None:
         return _refuse_setup(SETUP_NOT_FOUND, f"no {LEDGER_COMMAND} CLI on PATH; nothing was written")
-    pinned = os.path.abspath(found)
+    pinned = _absolute_path(found)
+    if pinned is None:
+        pinned = found
+    elif _in_claude_plugin_cache(pinned):
+        return _refuse_setup(
+            SETUP_PLUGIN_COMMAND,
+            "the plugin's command needs no pin (its path changes with every plugin update); nothing was written",
+        )
     failure = probe(pinned)
     if failure is not None:
         return _refuse_setup(

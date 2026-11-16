@@ -100,7 +100,11 @@ The research agents (`researcher`, `api-contract-tracer`, `dependency-auditor`) 
 
 You need Claude Code, `git` and `bash`; Python 3 and `gh` only where the tables above say so. Without the ledger, the two commands below are the whole install; with it, do the four steps below in order, of which step 4 is the two commands.
 
-**Using the ledger.** Do these four steps in this order; each needs the one before it. The first three are the ledger's: follow its README for their commands rather than copying them from here.
+**Using the ledger.** Two routes.
+
+**Default tier (plugin, no pin).** With the ledger's plugin (`ledger-hooks`) installed and its options set (`ledger_db`, `ledger_operator`, `ledger_harness`), a Claude Code session puts that plugin's `ledger` on PATH and exports `LEDGER_DB`, `LEDGER_OPERATOR` and `LEDGER_HARNESS` for the session's commands. The four ledger-using skills (`topic`, `sharpen`, `shape` and `ticket`) then find `ledger` on PATH and `LEDGER_DB` in the environment with no `ledger_cli` pin. Skip the setup step on this route: `setup` refuses a ledger that lives inside Claude Code's plugin cache (`ledger_cli_setup_plugin_command`), because a pinned versioned cache path turns into `ledger_cli_moved` at the next plugin update. The skills still follow the existing PATH rule: `LEDGER_DB` must name an existing file, so until that file exists they stay off (`not configured`). The ledger plugin does not create the database when a session begins. A person on this route who has not yet made a first write therefore sees `not configured` in normal use. The first write is a ledger CLI write (terminal route step 2 below); the skills will not make it while the file is absent. pipx and the setup pin stay for the terminal route below.
+
+**Terminal route.** Do these four steps in this order; each needs the one before it. The first three are the ledger's: follow its README for their commands rather than copying them from here.
 
 1. Install the ledger CLI at a release tag, following Install in the README of the `ledger` repository, which is under the same GitHub account as this one. Its start-here page, `docs/start-here.md` in that repository, walks steps 1 to 3 in this same order, from nothing.
 2. Set the environment in the shell you run `ledger` from, and in the `env` block of Claude Code's settings. In the shell:
