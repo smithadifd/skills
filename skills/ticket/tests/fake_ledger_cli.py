@@ -29,7 +29,9 @@ its verb with any text (an envelope, garbage, or nothing: a lost response)
 and any exit status, after carrying the call out or without it, and may add a
 line on stderr. A scripted
 ``drop_events`` (with ``commit``) tampers with an ``export-item`` answer: it
-omits the newest N events.
+omits the newest N events. A scripted ``before`` lists events (``kind``,
+``payload``, ``item_id``, ``key``) that land just before the call is carried
+out: another writer racing it.
 """
 
 import difflib
@@ -556,6 +558,8 @@ def main():
     else:
         scripted = state["script"].pop(0) if state["script"] and state["script"][0]["verb"] == verb else None
         status, out = 0, ""
+        for planted in (scripted or {}).get("before", ()):  # another writer lands first
+            store_event(state, planted["kind"], planted["payload"], planted["item_id"], planted["key"])
         if scripted is None or scripted.get("commit"):
             status, out = carry_out(state, verb, args, stdin)
         if scripted is not None:

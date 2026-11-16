@@ -1844,14 +1844,18 @@ class LedgerStore:
         result = subprocess.run([self.cli, "--json", *args], input=stdin, capture_output=True, encoding="utf-8", check=False)
         return _ledger_answer(result.returncode, result.stdout, result.stderr)
 
-    def find_utterance(self, session_id: str, verbatim: str, since: str) -> Mapping[str, Any] | None:
-        """Newest person prompt in ``session_id`` since ``since`` that contains ``verbatim``.
+    def find_utterance(self, session_id: str, verbatim: str, since: str, *, after: int) -> Mapping[str, Any] | None:
+        """Newest person prompt in ``session_id`` written after event ``after`` that contains ``verbatim``.
 
         Reads ``ledger events --kind utterance.captured --since --limit 200``.
-        A match is payload.session_id equal to ``session_id``, origin "person",
-        no omitted_bytes, and payload.text containing ``verbatim`` as a
-        byte-exact substring. Newest first; the first match wins. Any other
-        answer (empty, usage, unreadable) is no match.
+        ``since`` is a coarse prefilter only: it is floored to whole seconds,
+        so a prompt captured just before the pass opened can share its second.
+        Event order decides: a match has an integer event id greater than
+        ``after`` (the pass's claim event), payload.session_id equal to
+        ``session_id``, origin "person", no omitted_bytes, and payload.text
+        containing ``verbatim`` as a byte-exact substring. Newest first; the
+        first match wins. Any other answer (empty, usage, unreadable) is no
+        match.
         """
 
         answer = self._run(
@@ -1862,6 +1866,9 @@ class LedgerStore:
         needle = verbatim.encode("utf-8")
         for event in answer.data["events"]:
             if type(event) is not dict:
+                continue
+            event_id = event.get("id")
+            if type(event_id) is not int or event_id <= after:
                 continue
             payload = event.get("payload")
             if type(payload) is not dict:
@@ -1911,24 +1918,33 @@ class LedgerStore:
         phase: str,
         effect: str,
         started_at: str,
+        token: str,
     ) -> dict[str, Any]:
         """Elect the go against this session's captured prompt, then record it.
 
-        Runs after the ticket-decision note has landed, outside apply's batch.
+        Runs after the ticket-decision note has landed, outside apply's batch;
+        ``token`` is the pass's token after that note (the pre-bind token).
         Fail closed: any miss or refusal writes nothing more and returns
         ``bound=False`` with a reason. Never raises; never claims a ledger gate
-        opened. No fallback when LEDGER_SESSION is unset. ``bound=True`` only
-        when both the election id and the decision id are integers read from
-        the CLI's success payloads. After a write, ``pass_token`` is the item's
-        current revision when that revision is an event this call wrote
-        (returned id or idempotency key); anything else is omitted so a
-        concurrent writer still reads as stale.
+        opened. No fallback when LEDGER_SESSION is unset. The utterance must be
+        newer than this pass's claim event, read from the ledger; an unreadable
+        claim is ``bound=False``. ``bound=True`` only when both the election id
+        and the decision id are integers read from the CLI's success payloads.
+        An elect that did not answer with an event id is looked up by its
+        idempotency key, and a landed election counts as this call's own event
+        (the call then stops before ``append``). ``pass_token`` is returned
+        only when the item's events after ``token`` are exactly the events this
+        call wrote, in order; any other event in that range, or any doubt in
+        reading it, omits it, so the next step reads ``stale``.
         """
 
         session_id = os.environ.get("LEDGER_SESSION")
         if not session_id:
             return {"bound": False, "reason": "LEDGER_SESSION unset"}
-        utterance = self.find_utterance(session_id, verbatim, started_at)
+        claim_id = self._claim_event_id()
+        if claim_id is None:
+            return {"bound": False, "reason": "pass claim not readable"}
+        utterance = self.find_utterance(session_id, verbatim, started_at, after=claim_id)
         if utterance is None:
             return {"bound": False, "reason": "no matching utterance"}
         utterance_id = utterance.get("id")
@@ -1948,17 +1964,21 @@ class LedgerStore:
             "--quote", verbatim,
             "--idempotency-key", elect_key,
         )
-        if not elect.ok:
-            why = elect.code or elect.output or "no envelope"
-            if elect.message:
-                why = f"{why}: {elect.message}" if elect.code else elect.message
-            return {"bound": False, "reason": f"elect refused: {why}"}
-        election_id = self._cli_event_id(elect)
+        election_id = self._cli_event_id(elect) if elect.ok else None
         if election_id is None:
-            return self._binder_result(
-                {"bound": False, "reason": "elect refused: no event id"},
-                (), (elect_key,),
-            )
+            if elect.ok:
+                why = "no event id"
+            else:
+                why = elect.code or elect.output or "no envelope"
+                if elect.message:
+                    why = f"{why}: {elect.message}" if elect.code else elect.message
+            # The answer named no event: the election may still have landed
+            # (a lost or unreadable response). Look it up by its key.
+            landed = self._landed_election(token, elect_key)
+            result: dict[str, Any] = {"bound": False, "reason": f"elect refused: {why}"}
+            if landed is not None:
+                result["election_id"] = landed
+            return self._binder_result(result, token, () if landed is None else (landed,))
         payload = {
             "who": "the person",
             "who_kind": "person",
@@ -1984,13 +2004,13 @@ class LedgerStore:
                 why = f"{why}: {appended.message}" if appended.code else appended.message
             return self._binder_result(
                 {"bound": False, "reason": f"append refused: {why}", "election_id": election_id},
-                (election_id,), (elect_key, decision_key),
+                token, (election_id,),
             )
         decision_id = self._cli_event_id(appended)
         if decision_id is None:
             return self._binder_result(
                 {"bound": False, "reason": "append refused: no event id", "election_id": election_id},
-                (election_id,), (elect_key, decision_key),
+                token, (election_id,),
             )
         return self._binder_result(
             {
@@ -1999,8 +2019,8 @@ class LedgerStore:
                 "election_id": election_id,
                 "decision_id": decision_id,
             },
+            token,
             (election_id, decision_id),
-            (elect_key, decision_key),
         )
 
     def _cli_event_id(self, answer: _Answer) -> int | None:
@@ -2010,45 +2030,90 @@ class LedgerStore:
         eid = event.get("id") if type(event) is dict else None
         return eid if type(eid) is int else None
 
-    def _binder_pass_token(self, ids: tuple[int, ...], keys: tuple[str, ...]) -> str | None:
-        """The item's current revision when it is an event this binder call wrote.
+    def _claim_event_id(self) -> int | None:
+        """The event id of this handle's pass claim, read from the item's export, or None.
 
-        Identified by returned event ids or the call's idempotency keys.
-        A tip that is anything else is left alone so a concurrent write still
-        reads as stale. Never raises.
+        The claim is the one ``session.opened`` keyed
+        ``ticket-pass/K/<pass>/claimed``. No bound pass, an unreadable export,
+        no such event, more than one, or an id that is not an integer is None.
+        Never raises.
         """
 
+        pass_id = self._pass_id
+        if not _is_text(pass_id):
+            return None
         try:
-            row = self._ticket_row()
+            export = self._run("export-item", self.key)
         except Exception:
             return None
-        if row is None:
+        if not export.ok or type(export.data) is not dict or type(export.data.get("events")) is not list:
             return None
-        current = str(row["revision"])
-        ours = {str(eid) for eid in ids}
-        if current in ours:
-            return current
-        if not keys:
+        wanted = f"ticket-pass/{self.key}/{pass_id}/claimed"
+        found = [
+            event.get("id") for event in export.data["events"]
+            if type(event) is dict and event.get("kind") == "session.opened" and event.get("idempotency_key") == wanted
+        ]
+        if len(found) != 1 or type(found[0]) is not int:
             return None
-        export = self._run("export-item", self.key)
+        return found[0]
+
+    def _events_after(self, token: str) -> list[Mapping[str, Any]] | None:
+        """The item's events after revision ``token``, oldest first, or None on any doubt.
+
+        ``query`` gives the revision and ``export-item`` the events; the
+        export's newest event must be that revision, so a write that lands
+        between the two reads is doubt. A closed item is doubt, because its
+        export hides session records. Never raises.
+        """
+
+        if type(token) is not str or not token.isdigit():
+            return None
+        try:
+            row = self._ticket_row()
+            if row is None or row.get("status") == "closed":
+                return None
+            export = self._run("export-item", self.key)
+        except Exception:
+            return None
         if not export.ok or type(export.data) is not dict:
             return None
         events = export.data.get("events")
-        if type(events) is not list or not events:
+        if type(events) is not list or not events or any(type(event) is not dict for event in events):
             return None
-        newest = events[-1]
-        if type(newest) is not dict:
+        ids = [event.get("id") for event in events]
+        if any(type(eid) is not int for eid in ids) or ids != sorted(set(ids)):
             return None
-        if newest.get("idempotency_key") in keys and str(newest.get("id")) == current:
-            return current
-        return None
+        floor = int(token)
+        if str(row.get("revision")) != str(ids[-1]) or floor > ids[-1]:
+            return None
+        return [event for event in events if event["id"] > floor]
 
-    def _binder_result(
-        self, result: dict[str, Any], ids: tuple[int, ...], keys: tuple[str, ...],
-    ) -> dict[str, Any]:
-        token = self._binder_pass_token(ids, keys)
-        if type(token) is str and token.isdigit():
-            result = {**result, "pass_token": token}
+    def _landed_election(self, token: str, key: str) -> int | None:
+        """The id of the one ``decision.elected`` keyed ``key`` written after ``token``, or None."""
+
+        after = self._events_after(token)
+        if after is None:
+            return None
+        found = [
+            event["id"] for event in after
+            if event.get("kind") == "decision.elected" and event.get("idempotency_key") == key
+        ]
+        return found[0] if len(found) == 1 else None
+
+    def _binder_result(self, result: dict[str, Any], token: str, ids: tuple[int, ...]) -> dict[str, Any]:
+        """``result`` with ``pass_token`` when the item's events after ``token`` are exactly ``ids``, in order.
+
+        Those are the events this binder call wrote: the election, then the
+        decision when it landed. Any other event in that range (an outsider's
+        note, a release of this pass) or any doubt in reading the range leaves
+        the token where it was, so the pass's next step reads ``stale``.
+        """
+
+        if not ids:
+            return result
+        after = self._events_after(token)
+        if after is not None and [event["id"] for event in after] == list(ids):
+            result = {**result, "pass_token": str(ids[-1])}
         return result
 
     def _refused(self, what: str, answer: _Answer) -> StoreUnavailable:
@@ -2986,9 +3051,11 @@ class TicketPass:
     def _bind_recorded_go(self, gate: str, revision: int, decision: Mapping[str, Any]) -> dict[str, Any]:
         """Bind the landed go to a captured utterance, or fail closed. Never raises.
 
-        After the binder, the pass token advances only past events this call
-        wrote, so the binder never leaves the pass unable to take its next
-        step because of its own writes. A concurrent write still reads as stale.
+        The binder gets the token held after the note landed. The pass token
+        advances only when the item's events after it are exactly the events
+        the binder wrote, so the binder never leaves the pass unable to take
+        its next step because of its own writes, and any other write in the
+        bind window still reads as stale.
         """
 
         bind = getattr(self.store, "bind_go", None)
@@ -3006,6 +3073,7 @@ class TicketPass:
                 phase=decision["phase"],
                 effect=decision["effect"],
                 started_at=started,
+                token=self._token,
             )
         except Exception:
             return {"bound": False, "reason": "elect refused"}

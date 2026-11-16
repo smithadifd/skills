@@ -2,7 +2,7 @@
 
 H19 and H24 need the ledger's own code: they run when ``LEDGER_CLI`` names
 the ledger CLI (H24 loads ``ledger/schema.py`` from beside it) and are
-skipped otherwise. H39–H44 bind a go to a captured utterance: H39, H40 and H42–H44
+skipped otherwise. H39–H47 bind a go to a captured utterance: H39, H40 and H42–H47
 run against the fake; H41 runs when ``LEDGER_REAL_CLI`` names the ledger CLI
 and is skipped otherwise. Every other row runs against the fake.
 """
@@ -1158,6 +1158,99 @@ def test_H44_bind_ignores_a_prompt_captured_before_the_pass(fake, monkeypatch):
     assert fake.calls("append") == []
 
 
+def _planted(kind, payload, key, item=KEY):
+    return {"kind": kind, "payload": payload, "item_id": item, "key": key}
+
+
+@pytest.mark.parametrize("window", ["outsider note before elect", "outsider note between elect and append",
+                                    "this pass released between elect and append"])
+def test_H45_a_foreign_write_in_the_bind_window_makes_begin_build_stale(fake, monkeypatch, window):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    if window == "outsider note before elect":
+        fake.script("elect", commit=True, before=[_planted("item.note", note("see PR 12"), "outside-note-1")])
+    elif window == "outsider note between elect and append":
+        fake.script("append", commit=True, before=[_planted("item.note", note("see PR 12"), "outside-note-1")])
+    else:
+        release = {"outcome": f"ticket pass {session.pass_id} released", "source": WRITER}
+        fake.script("append", commit=True, before=[
+            _planted("session.closed", release, f"ticket-pass/{KEY}/{session.pass_id}/released"),
+        ])
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    # The chain itself is sound, so the go is bound; only the token stays put.
+    assert result["bound"] is True
+    assert _binder_kinds(fake) == ["decision.elected", "decision.recorded"]
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        session.begin_build()
+    assert refusal(excinfo) == "stale"
+
+
+def test_H45_an_unreadable_range_after_the_bind_leaves_begin_build_stale(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    fake.script("export-item", commit=True)  # the claim read answers as the CLI does
+    fake.script("export-item", stdout="not json\n", status=1)  # the range read after the bind is unreadable
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is True
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        session.begin_build()
+    assert refusal(excinfo) == "stale"
+
+
+@pytest.mark.parametrize("when, bound", [("before the claim", False), ("after the claim", True)])
+def test_H46_bind_takes_only_a_prompt_captured_after_the_claim_event(fake, monkeypatch, when, bound):
+    second = "2026-11-16T10:00:00Z"
+    monkeypatch.setattr(ticket, "_now", lambda: second)
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    if when == "before the claim":
+        _capture(fake, _prompt("sess-this"), recorded_at=second)
+    session = open_ledger(fake, Source())
+    present(session)
+    if when == "after the claim":
+        _capture(fake, _prompt("sess-this"), recorded_at=second)
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    if bound:
+        assert result["bound"] is True
+        assert _binder_kinds(fake) == ["decision.elected", "decision.recorded"]
+    else:
+        assert result == {"bound": False, "reason": "no matching utterance"}
+        assert fake.calls("elect") == [] and fake.calls("append") == []
+        assert _binder_kinds(fake) == []
+
+
+def test_H46_bind_fails_closed_when_the_claim_cannot_be_read(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    fake.script("export-item", stdout="not json\n", status=1)
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result == {"bound": False, "reason": "pass claim not readable"}
+    assert fake.calls("events") == [] and fake.calls("elect") == []
+    assert _binder_kinds(fake) == []
+
+
+def test_H47_a_landed_election_with_no_envelope_leaves_begin_build_unblocked(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    fake.script("elect", commit=True, stdout="", status=0)
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    elected = [event for event in fake.events() if event["kind"] == "decision.elected"]
+    assert len(elected) == 1
+    assert elected[0]["idempotency_key"].endswith("/elect")
+    assert result == {"bound": False, "reason": "elect refused: no envelope"}
+    assert fake.calls("append") == []
+    assert _binder_kinds(fake) == ["decision.elected"]
+    session.begin_build()
+    assert session.phase == "build"
+
+
 @needs_real_cli
 def test_H41_a_bound_go_chains_decision_to_election_to_utterance(tmp_path, monkeypatch):
     cli = LEDGER_REAL_CLI
@@ -1186,6 +1279,10 @@ def test_H41_a_bound_go_chains_decision_to_election_to_utterance(tmp_path, monke
     result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
     assert result["bound"] is True, result
     assert result["utterance_id"] == utterance_id
+    # The real ledger's revision and export agree that the bind window holds
+    # only the binder's two events, so the pass token advanced past them.
+    session.begin_build()
+    assert session.phase == "build"
     listed = subprocess.run(
         [cli, "--json", "decisions", "--item", KEY], text=True, check=True, capture_output=True,
     )
