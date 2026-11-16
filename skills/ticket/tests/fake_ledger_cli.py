@@ -40,6 +40,7 @@ import re
 import secrets
 import sys
 import time
+from datetime import datetime, timezone
 
 EPHEMERAL = ("session.opened", "session.closed", "item.progress")
 # The spec's content fields and its provenance, as ``spec show`` prints them.
@@ -355,19 +356,47 @@ def store_event(state, kind, payload, item_id, key):
     return event
 
 
+def recorded_at_utc(value):
+    """An event's recorded time as aware UTC, or None when missing or unparseable."""
+
+    if type(value) is not str:
+        return None
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
 def events_list(state, args):
     """``events --kind KIND --since DATE --limit N``: matching kinds, newest first.
 
-    ``--since`` is accepted and ignored: planted test events often have no
-    ``recorded_at``, and the real CLI owns the window. An empty match is
-    ``empty`` (exit 1), as the real verb.
+    ``--since`` keeps events whose ``recorded_at`` is at or after the stamp,
+    as the real verb: a missing or unparseable ``recorded_at`` is out of the
+    window. An empty match is ``empty`` (exit 1), as the real verb.
     """
 
     values, _positionals = flags(args[1:], ("kind", "since", "until", "item", "actor", "limit"))
     kind = values.get("kind")
+    since = None
+    if "since" in values:
+        since = recorded_at_utc(values["since"])
+        if since is None:
+            raise Refusal("usage", "invalid --since", 2)
     raw_limit = values.get("limit")
     limit = 50 if raw_limit is None else int(raw_limit)
-    matched = [event for event in reversed(state["events"]) if kind is None or event["kind"] == kind]
+    matched = []
+    for event in reversed(state["events"]):
+        if kind is not None and event["kind"] != kind:
+            continue
+        if since is not None:
+            recorded = recorded_at_utc(event.get("recorded_at"))
+            if recorded is None or recorded < since:
+                continue
+        matched.append(event)
     if not matched:
         raise Refusal("empty", "no matching events", 1)
     return {"events": matched[:limit], "limit": limit, "truncated": len(matched) > limit}

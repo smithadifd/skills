@@ -2,7 +2,7 @@
 
 H19 and H24 need the ledger's own code: they run when ``LEDGER_CLI`` names
 the ledger CLI (H24 loads ``ledger/schema.py`` from beside it) and are
-skipped otherwise. H39–H41 bind a go to a captured utterance: H39 and H40
+skipped otherwise. H39–H44 bind a go to a captured utterance: H39, H40 and H42–H44
 run against the fake; H41 runs when ``LEDGER_REAL_CLI`` names the ledger CLI
 and is skipped otherwise. Every other row runs against the fake.
 """
@@ -13,6 +13,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -970,10 +971,15 @@ def _prompt(session_id, text=GO_WORDS, origin="person", **extra):
     return payload
 
 
-def _capture(fake, payload, key=None):
+def _capture(fake, payload, key=None, recorded_at=None):
     """An item-less utterance.captured event, as ``ledger capture --kind prompt`` writes."""
 
-    fake._append(None, "utterance.captured", payload, key or f"capture:{len(fake.events())}")
+    if recorded_at is None:
+        recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fake._append(
+        None, "utterance.captured", payload, key or f"capture:{len(fake.events())}",
+        recorded_at=recorded_at,
+    )
 
 
 def _binder_kinds(fake):
@@ -1077,6 +1083,79 @@ def test_a_markdown_go_is_not_bound(repo):
     present(session)
     result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
     assert result == {"bound": False, "reason": "no ledger"}
+
+
+def test_H42_a_bound_plan_go_leaves_begin_build_unblocked(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is True
+    session.begin_build()
+    assert session.phase == "build"
+
+
+def test_H42_an_append_refused_bind_leaves_begin_build_unblocked(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    fake.answer("append", "validation")
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is False and result["reason"].startswith("append refused:")
+    session.begin_build()
+    assert session.phase == "build"
+
+
+def test_H42_a_foreign_write_after_the_note_still_makes_begin_build_stale(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is True
+    fake.outside("item.note", note("see PR 12"))
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        session.begin_build()
+    assert refusal(excinfo) == "stale"
+
+
+@pytest.mark.parametrize("verb", ["elect", "append"])
+def test_H43_bind_is_unbound_when_a_success_payload_has_no_event_id(fake, monkeypatch, verb):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    session = open_ledger(fake, Source())
+    present(session)
+    _capture(fake, _prompt("sess-this"))
+    fake.script(
+        verb, commit=True, status=0,
+        stdout=json.dumps({"ok": True, "data": {}}, sort_keys=True) + "\n",
+    )
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result["bound"] is False
+    assert _is_text_reason(result.get("reason"))
+    if verb == "elect":
+        assert result["reason"] == "elect refused: no event id"
+        assert fake.calls("append") == []
+        assert [event["kind"] for event in fake.events() if event["kind"] == "decision.recorded"] == []
+    else:
+        assert result["reason"] == "append refused: no event id"
+
+
+def _is_text_reason(reason):
+    return type(reason) is str and bool(reason.strip())
+
+
+def test_H44_bind_ignores_a_prompt_captured_before_the_pass(fake, monkeypatch):
+    monkeypatch.setenv("LEDGER_SESSION", "sess-this")
+    _capture(fake, _prompt("sess-this"), recorded_at="2000-01-01T00:00:00Z")
+    session = open_ledger(fake, Source())
+    present(session)
+    result = session.record_go("plan", evidence="conversation:plan-go", verbatim=GO_WORDS)
+    assert result == {"bound": False, "reason": "no matching utterance"}
+    assert _binder_kinds(fake) == []
+    assert fake.calls("elect") == []
+    assert fake.calls("append") == []
 
 
 @needs_real_cli

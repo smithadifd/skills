@@ -1917,7 +1917,12 @@ class LedgerStore:
         Runs after the ticket-decision note has landed, outside apply's batch.
         Fail closed: any miss or refusal writes nothing more and returns
         ``bound=False`` with a reason. Never raises; never claims a ledger gate
-        opened. No fallback when LEDGER_SESSION is unset.
+        opened. No fallback when LEDGER_SESSION is unset. ``bound=True`` only
+        when both the election id and the decision id are integers read from
+        the CLI's success payloads. After a write, ``pass_token`` is the item's
+        current revision when that revision is an event this call wrote
+        (returned id or idempotency key); anything else is omitted so a
+        concurrent writer still reads as stale.
         """
 
         session_id = os.environ.get("LEDGER_SESSION")
@@ -1948,10 +1953,12 @@ class LedgerStore:
             if elect.message:
                 why = f"{why}: {elect.message}" if elect.code else elect.message
             return {"bound": False, "reason": f"elect refused: {why}"}
-        event = elect.data.get("event") if type(elect.data) is dict else None
-        election_id = event.get("id") if type(event) is dict else None
-        if type(election_id) is not int:
-            return {"bound": False, "reason": "elect refused: no event id"}
+        election_id = self._cli_event_id(elect)
+        if election_id is None:
+            return self._binder_result(
+                {"bound": False, "reason": "elect refused: no event id"},
+                (), (elect_key,),
+            )
         payload = {
             "who": "the person",
             "who_kind": "person",
@@ -1975,15 +1982,74 @@ class LedgerStore:
             why = appended.code or appended.output or "no envelope"
             if appended.message:
                 why = f"{why}: {appended.message}" if appended.code else appended.message
-            return {"bound": False, "reason": f"append refused: {why}"}
-        recorded = appended.data.get("event") if type(appended.data) is dict else None
-        decision_id = recorded.get("id") if type(recorded) is dict else None
-        return {
-            "bound": True,
-            "utterance_id": utterance_id,
-            "election_id": election_id,
-            "decision_id": decision_id,
-        }
+            return self._binder_result(
+                {"bound": False, "reason": f"append refused: {why}", "election_id": election_id},
+                (election_id,), (elect_key, decision_key),
+            )
+        decision_id = self._cli_event_id(appended)
+        if decision_id is None:
+            return self._binder_result(
+                {"bound": False, "reason": "append refused: no event id", "election_id": election_id},
+                (election_id,), (elect_key, decision_key),
+            )
+        return self._binder_result(
+            {
+                "bound": True,
+                "utterance_id": utterance_id,
+                "election_id": election_id,
+                "decision_id": decision_id,
+            },
+            (election_id, decision_id),
+            (elect_key, decision_key),
+        )
+
+    def _cli_event_id(self, answer: _Answer) -> int | None:
+        """The event id a successful CLI payload named, or None when it did not."""
+
+        event = answer.data.get("event") if type(answer.data) is dict else None
+        eid = event.get("id") if type(event) is dict else None
+        return eid if type(eid) is int else None
+
+    def _binder_pass_token(self, ids: tuple[int, ...], keys: tuple[str, ...]) -> str | None:
+        """The item's current revision when it is an event this binder call wrote.
+
+        Identified by returned event ids or the call's idempotency keys.
+        A tip that is anything else is left alone so a concurrent write still
+        reads as stale. Never raises.
+        """
+
+        try:
+            row = self._ticket_row()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        current = str(row["revision"])
+        ours = {str(eid) for eid in ids}
+        if current in ours:
+            return current
+        if not keys:
+            return None
+        export = self._run("export-item", self.key)
+        if not export.ok or type(export.data) is not dict:
+            return None
+        events = export.data.get("events")
+        if type(events) is not list or not events:
+            return None
+        newest = events[-1]
+        if type(newest) is not dict:
+            return None
+        if newest.get("idempotency_key") in keys and str(newest.get("id")) == current:
+            return current
+        return None
+
+    def _binder_result(
+        self, result: dict[str, Any], ids: tuple[int, ...], keys: tuple[str, ...],
+    ) -> dict[str, Any]:
+        token = self._binder_pass_token(ids, keys)
+        if type(token) is str and token.isdigit():
+            result = {**result, "pass_token": token}
+        return result
 
     def _refused(self, what: str, answer: _Answer) -> StoreUnavailable:
         said = f"{answer.code}: {answer.message}" if answer.code else f"no envelope, exit status {answer.status}: {answer.output}"
@@ -2918,7 +2984,12 @@ class TicketPass:
         self._phase = "plan_go"
 
     def _bind_recorded_go(self, gate: str, revision: int, decision: Mapping[str, Any]) -> dict[str, Any]:
-        """Bind the landed go to a captured utterance, or fail closed. Never raises."""
+        """Bind the landed go to a captured utterance, or fail closed. Never raises.
+
+        After the binder, the pass token advances only past events this call
+        wrote, so the binder never leaves the pass unable to take its next
+        step because of its own writes. A concurrent write still reads as stale.
+        """
 
         bind = getattr(self.store, "bind_go", None)
         if not callable(bind):
@@ -2940,6 +3011,9 @@ class TicketPass:
             return {"bound": False, "reason": "elect refused"}
         if type(result) is not dict:
             return {"bound": False, "reason": "not bound"}
+        token = result.pop("pass_token", None)
+        if type(token) is str and token.isdigit():
+            self._token = token
         if result.get("bound") is True:
             return result
         reason = result.get("reason")
