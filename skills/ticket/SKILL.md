@@ -292,6 +292,7 @@ Where a resume lands:
 | plan go recorded | `build` (do not call `begin_build` again) |
 | a passing final review of the plan | `outward_go` |
 | outward go recorded | `outward_go`, and `approved("outward")` is true |
+| outward go declined | `outward_go`, and `approved("outward")` is false; close with `close_local` (section 6) |
 | three review rounds and no passing one | `stopped` |
 | closed | `closed` |
 
@@ -340,7 +341,8 @@ research, plan, build, review and outward:
   the plan step never skips the plan go.
 - `plan.complete_step(name)` and `plan.add_open_question(text)` record the
   rest. The rendered card derives each step's status from the stored events
-  (design 3.6); a closed card shows every step complete or skipped.
+  (design 3.6); a closed card shows every step complete or skipped, except
+  that a kept-local close (section 6) leaves `outward` pending.
 
 Present assumptions, intended changes and the test plan in prose around the
 card.
@@ -367,7 +369,10 @@ it opens nothing for other criteria or another revision.
 
 1. Give `builder-core` the ticket key, the approved card, the acceptance
    criteria, the repository's conventions, the branch boundary, and the exact
-   verification commands. Outward actions stay forbidden.
+   verification commands. Outward actions stay forbidden. Its report names the
+   worktree it built in; record it with `session.record_tried("builder-core
+   dispatch", outcome="worktree <path>, branch <name>")` and keep the path for
+   the close (section 6).
 2. Give a fresh-context `reviewer` the ticket, the approved card, the diff and
    prior findings. It checks the criteria first and the repository's
    standards second. When the target repository has `scripts/verify.sh`, the
@@ -386,9 +391,20 @@ it opens nothing for other criteria or another revision.
 
 ## 6. Outward go: a hard stop
 
-Show the final diff summary, verification evidence, the evidence for each
-criterion, the decisions, and every proposed outward action. Stop. Nothing
-leaves the machine before the person approves and you record it with
+Before you present it, read the target repository's remotes with
+`route = ticket.outward_route("<target-repo>")`, which runs `git remote` there
+and then.
+
+- `route.propose_push` is true: show the final diff summary, verification
+  evidence, the evidence for each criterion, the decisions, and every proposed
+  outward action. Stop.
+- `route.propose_push` is false: the repository has no remote. Propose no push
+  and no pull request. Read `route.line` to the person, show the same
+  evidence, and offer the kept-local close below. It still needs the person's
+  own words; never close kept local on your own. A remote list that cannot be
+  read counts as a remote, so the outward go stops as usual.
+
+Nothing leaves the machine before the person approves and you record it with
 `session.record_go("outward", evidence=..., verbatim=<exact span copied from their prompt>)`.
 Pass `verbatim` as that exact span, not a paraphrase. Report the bound
 election, or the exact line `go recorded, not bound to a captured utterance`.
@@ -398,8 +414,42 @@ Call `session.require_outward_go()` before each outward action; it reads the
 card fresh and refuses (`GateRequired`, or `stale` if the card changed).
 
 After the listed outward actions, call
-`session.close(point, refs=..., next_skills=...)`. It writes the close stamp
-and the closed status in one write, then ends the pass.
+`session.close(point, refs=..., next_skills=..., worktree=<builder worktree>)`.
+It writes the close stamp and the closed status in one write, then ends the
+pass.
+
+When the person says no to the outward actions, or takes the kept-local close,
+record their words with
+`session.record_outward_declined(evidence=..., verbatim=<exact span copied from their prompt>)`.
+The no is a ticket decision of its own, bound to the captured utterance the
+way a go is. Report the bound election, or the exact line
+`declined go recorded, not bound to a captured utterance`. The binding never
+gates the close. From then on nothing leaves the machine:
+`require_outward_go()` refuses, `approved("outward")` is false, and a later
+`record_go("outward")` is refused. Then call
+`session.close_local(refs=..., next_skills=..., worktree=<builder worktree>)`.
+It writes the kept-local close stamp, `Closed kept local: the person declined
+the outward go for plan revision <N>, so nothing was pushed or opened.`, and
+the closed status in one write, then ends the pass. It refuses
+(`GateRequired`) without the recorded no. Close the ticket only through
+`close` or `close_local`: never a ledger status written by hand, and never a
+note in place of the person's words. A resume that finds the no already
+recorded lands at `outward_go`; call `close_local` (a second no is refused).
+
+Both closes take the builder's worktree, the path `builder-core` reported
+(section 5). The worktree is named and kept: the close never removes, moves
+or writes anything there. After the close the line names the path, says when
+it sits under the target repository's `.claude/worktrees`, names its branch
+(a builder agent's `worktree-agent-*` too) as left in place, not deleted, and
+says what `git status --porcelain --ignored --untracked-files=all` listed
+there: nothing, a short summary, or that it could not be read. It ends with
+the command the person may run, `git worktree remove <path>`, with the given
+path shell-quoted and never `--force`. Whether to run it is the person's
+call; the line never says removal is safe. A path that goes through a
+symbolic link is named with the link and no command. Until the person runs
+the command, a worktree under `.claude/worktrees/<name>` stays in the
+repository as an untracked folder. The close returns that one line for the
+close output; `ticket.tidy_worktree(<path>)` reads it again later.
 
 ## More-information exits
 
@@ -432,6 +482,13 @@ more-information exit, the review cap or close the pass has ended and released
 its claim: the next open takes a new claim and needs no id, and the line says
 that instead. Either way the `Pass:` line stays, even when the plan card
 already showed the id.
+
+After a close, say how the ticket closed: through the outward actions, or kept
+local with nothing pushed. Give the worktree line the close returned (the
+path, its branch, what `git status` listed, and the `git worktree remove`
+command for the person to run), so no builder worktree is left in the
+repository unnamed. A worktree under `.claude/worktrees/<name>` stays until
+the person runs that command.
 
 ## Records
 

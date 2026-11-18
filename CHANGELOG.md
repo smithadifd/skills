@@ -19,6 +19,10 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 
 ## Unreleased
 
+### The ticket skill closes kept local on a declined outward go
+
+When the person says no at the outward go, `/ticket` records their words as a ticket decision of its own (`record_outward_declined`), bound to the captured prompt the way a go is, and `close_local` closes the ticket kept local with nothing pushed. After the no, no outward step is allowed. Before the outward go the skill reads the repository's remotes (`outward_route`): with none it proposes no push or pull request and offers the kept-local close instead. Both closes take the `builder-core` worktree and name it in the close output without removing, moving or writing anything: the path, its branch (left in place, not deleted), what `git status` listed there, and the command `git worktree remove <path>` for the person to run, shell-quoted and never forced. A path that goes through a symbolic link is named with no command. A worktree under `.claude/worktrees/<name>` stays in the repository until the person runs that command. `builder-core` now reports the worktree it built in.
+
 ### README: one `LEDGER_HARNESS` convention, and when the database is created
 
 The terminal route's settings examples no longer set `LEDGER_HARNESS`, matching the ledger's docs: leave it out of Claude Code's settings, because the ledger's plugin sets `claude-code` when it is unset; the shell block keeps `export LEDGER_HARNESS=cli`. The default-tier paragraph and step 2 now say that the first submitted prompt the ledger plugin's prompt capture does not skip creates the database when `LEDGER_DB` names a missing file, not only a ledger CLI write. Docs only; no skill, script or setting changed.

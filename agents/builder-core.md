@@ -71,6 +71,7 @@ A passing suite is only evidence if it would fail without your change.
 Return, faithfully, in your final reply:
 
 - What shipped: the branch, the commits, and the draft PR link (or the drafted PR text if you stopped before pushing).
+- The worktree you built in (`git rev-parse --show-toplevel`) and whether `git status --porcelain` is empty there, so whoever dispatched you can remove it or name it.
 - What you ran and the results, including anything that failed, with the output.
 - The revert-and-fail table from **Evidence**.
 - Every ambiguity you had to interpret, and every place the brief overrode the repo's conventions or a conflict with the floors that you refused.
