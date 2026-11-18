@@ -338,15 +338,39 @@ identity of its `and`/`or`.
 | I25 | `test_completing_a_skipped_plan_step_clears_its_diff` | a plan card with the plan step skipped for a one-sentence diff, then `complete_step("plan")` | `diff_statement` is `None`, absent from the snapshot, the render has no `Diff:` line, the stored plan has none; completing another step keeps the diff | `complete_step` keeps the diff (and, alone, clears it for any step) |
 | I26 | `test_a_diff_statement_on_a_plan_step_that_is_not_skipped_is_not_persisted[pending | complete]` | a snapshot with `diff_statement` and the plan step pending / complete, presented | `TicketError`; nothing written; the pass stays live (the read-time form is C18) | `_validate_steps` drops the unskipped-diff check `(shared with C18)` |
 
+## K. A declined outward go, no remote, and the builder's worktree
+
+`test_ticket_kept_local.py`. A *decline* is `record_outward_declined(evidence, verbatim)`: a ticket
+decision with `declined: outward` and the plan's identity, never a `gate` key, so no reader counts it
+as a go. The *kept-local close* is `close_local(...)`: one write of the stamp
+`Closed kept local: the person declined the outward go for plan revision <N>, so nothing was pushed or opened.`
+(phase `close`, marked as the close) and the closed status, then the pass ends. A worktree is made
+where `builder-core` gets one, under the repository's `.claude/worktrees`.
+
+| ID | Test name | Setup | Expected | Mutation |
+|---|---|---|---|---|
+| K1 | `test_K1_a_declined_outward_go_is_bound_to_the_captured_utterance_and_closes_kept_local` | the fake ledger, `LEDGER_SESSION` set; a captured prompt holds the plan go words; plan go, build, a passing round; a second captured prompt holds the no; `record_outward_declined`; `close_local` | the decline binds to the second prompt: one `decision.elected` choosing `no go` over `go`, quoting the no, keyed `ticket-bind/K/outward-declined/1/<id>/elect`; two `decision.recorded`, one per go, each quoting the person's words; the ticket-decision note has `declined: outward` and no `gate`; before the close `require_outward_go` raises `GateRequired` and `approved("outward")` is false; after it the last stop is the kept-local point at phase `close`, the item is `closed`, and a resume is `closed` and refuses every outward step | the binder elects `go` for the decline / the decline is not bound / its keys are a go's / `declined` is not passed to the binder / the closed check refuses a close that stands on a decline |
+| K2 | `test_K2_a_declined_go_with_no_matching_utterance_closes_and_reports_not_bound`, `test_K2_a_markdown_decline_is_not_bound_and_closes_kept_local` | as K1, but the only prompt after the claim does not hold the no / the markdown store | `{"bound": False, "reason": "no matching utterance"}` (ledger), `{"bound": False, "reason": "no ledger"}` (markdown); no election; the decline is on the card; `close_local` closes; a resume is `closed` | the decline is written only when it bound (binding gates the close) |
+| K3a | `test_K3_a_kept_local_close_needs_the_persons_decline_and_no_go[none yet \| a go beside the decline]` | S3[1] / S4[1] with a decline added by hand, resumed | `GateRequired` (`a kept-local close requires the person's declined outward go and no outward go`); nothing written; the pass stays live | `close_local` drops the decline test / drops the no-go test |
+| K3b | `test_K3_a_decline_is_refused_once_the_outward_gate_holds_an_answer[an outward go \| a decline]` | S4[1] / S3[1] after a decline | `TicketError` naming the answer already held; nothing written | `record_outward_declined` drops the go test / the decline test |
+| K3c | `test_K3_no_outward_go_is_recorded_after_a_decline` | S3[1] after a decline; `record_go("outward")` | `TicketError`; nothing written; no outward action allowed | `record_go` drops the decline test |
+| K3d | `test_K3_a_decline_needs_evidence_and_the_persons_words[evidence \| verbatim]` | S3[1]; an empty evidence / a blank verbatim | `TicketError` (`a declined go record requires evidence and the person's verbatim words`); nothing written | each operand of the test alone |
+| K3e | `test_K3_a_decline_on_the_card_shuts_the_outward_gate_even_beside_a_go[settled \| lean]` | S4[1]; a decline (settled / only a lean) added beside the go by hand; resumed | `require_outward_go` and `close` raise `GateRequired`; `approved("outward")` false | `_outward_open` ignores declines / counts only a settled one; `require_outward_go`, `close` or `approved` reads `_has_go` instead (one mutation each) |
+| K3f | `test_K3_the_decision_validator_reads_a_decline_strictly[other gate \| both \| revision \| criteria]` | a recorded decline with `declined: plan` / a `gate` too / `plan_revision: 0` / `criteria: []` | `TicketError` naming the fault | each check of `_validate_decision`'s decline block alone |
+| K4 | `test_K4_each_kept_local_check_alone_refuses_a_closed_card[point changed \| an outward go added \| decline dropped \| decline only a lean]` | a kept-local closed card with that one edit | resume raises `close_invalid`; nothing written | `_closed_problems` drops that one check (four mutations) |
+| K5 | `test_K5_a_repository_with_no_remote_offers_the_local_close_and_closes_through_it`, `test_K5_a_repository_with_a_remote_proposes_the_push`, `test_K5_an_unreadable_remote_list_counts_as_a_remote` | a repository with no remote / with `origin` / a path that is no repository | `outward_route`: no remote is `propose_push` false with `NO_REMOTE_LINE`, and the pass closes kept local with the plan go and the decline on the card, each in the person's words; `origin` is `propose_push` true; an unreadable list is `propose_push` true and names why | `propose_push` reads an unreadable list as no remote / is always true; a failed `git remote` reads as no remote; the no-remote line dropped |
+| K6 | `test_K6_*` (eight tests) | a clean worktree on a branch; one beside other files in `.claude`; one with an untracked file; one not on a branch; a directory no git reads; a locked worktree; none and a missing path; `close_local` and `close` given a worktree | removed with its branch kept and the empty `.claude/worktrees` and `.claude` removed; removed and `.claude` named as left; each of the next four kept and named with its reason, nothing removed; `None` / `not found`; each close returns the line | `tidy_worktree` drops that one check (the changes, the branch, the unreadable state, git's refusal, the `.claude` tidy, the `.claude` naming, the missing path); `close` / `close_local` drop the tidy |
+| K7 | `test_K7_skill_md_describes_the_declined_path_the_no_remote_path_and_the_worktree` | SKILL.md | section 6 calls `outward_route`, `record_outward_declined`, `close_local` and passes `worktree=`, quotes the not-bound line and says a worktree is never forced; the final message says kept local and gives the worktree line | that text dropped from SKILL.md |
+
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 8, G 31,
-  H 38, I 26. Total 239 rows. Eight carry no test with a mutation of their own in this release:
+  H 38, I 26, K 13. Total 252 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 231 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 244 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports.
 - Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's

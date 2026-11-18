@@ -78,6 +78,11 @@ _REF_TARGET = re.compile(
 PLAN_GO_POINT = "Waiting at plan go for plan revision {revision}."
 OUTWARD_GO_POINT = "Waiting at outward go after review round {round}."
 CAP_POINT = "Review did not converge after round three."
+# The close point of a pass the person ended at the outward go with a no: the work stays local.
+KEPT_LOCAL_POINT = (
+    "Closed kept local: the person declined the outward go for plan revision {revision}, "
+    "so nothing was pushed or opened."
+)
 
 
 def release_command(key: str, pass_id: str) -> str:
@@ -511,6 +516,14 @@ def _validate_decision(decision: Any) -> None:
             raise TicketError(f"unknown gate: {decision['gate']!r}")
         _whole(decision.get("plan_revision"), "a go decision's plan_revision")
         _criteria_texts(decision.get("criteria"), "a go decision's criteria")
+    if "declined" in decision:
+        # A declined go carries no `gate` key, so no reader, this one or an older one, counts it as a go.
+        if decision["declined"] != "outward":
+            raise TicketError("a declined decision names only the outward gate")
+        if "gate" in decision:
+            raise TicketError("a decision is either a go or a declined go, not both")
+        _whole(decision.get("plan_revision"), "a declined decision's plan_revision")
+        _criteria_texts(decision.get("criteria"), "a declined decision's criteria")
     if "pass" in decision:
         _text(decision["pass"], "a decision's pass")
 
@@ -818,6 +831,40 @@ def _has_go(card: Mapping[str, Any], gate: str, identity: tuple[int, tuple[str, 
     )
 
 
+def _declines(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]]) -> list[Mapping[str, Any]]:
+    """Every declined outward go that covers the card's plan, whoever recorded it."""
+
+    return [
+        decision for decision in card["decisions"]
+        if decision.get("declined") == "outward" and _covers(decision, identity)
+    ]
+
+
+def _has_declined(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]], key: str) -> bool:
+    """The person's settled no at the outward go of the card's plan: what a kept-local close stands on."""
+
+    return any(
+        decision.get("who_kind") == "person"
+        and decision.get("standing") == "settled"
+        and type(decision.get("source")) is dict and decision["source"].get("what") == "ratification"
+        and {"type": "ticket", "id": key} in _items(decision.get("tags"))
+        for decision in _declines(card, identity)
+    )
+
+
+def _outward_open(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]], key: str) -> bool:
+    """The outward go covers the plan and no decline does: a declined go never allows an outward action."""
+
+    return _has_go(card, "outward", identity, key) and not _declines(card, identity)
+
+
+def _answered(revision: int) -> str:
+    return (
+        f"the outward gate of plan revision {revision} already holds the person's answer, so nothing more is "
+        "recorded: close() after a go, close_local() after a declined go"
+    )
+
+
 def _passing_final(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]]) -> Mapping[str, Any] | None:
     """The card's last review when it passes, covers the plan, lists every
     criterion and carries its evidence; otherwise None."""
@@ -998,7 +1045,11 @@ def _closed_problems(card: Mapping[str, Any], identity: tuple[int, tuple[str, ..
     problems = []
     if not _has_go(card, "plan", identity, key):
         problems.append("no plan go covers the card's plan")
-    if not _has_go(card, "outward", identity, key):
+    went_out = _has_go(card, "outward", identity, key)
+    kept_local = _has_declined(card, identity, key)
+    if went_out and _declines(card, identity):
+        problems.append("an outward go and a declined outward go both cover the card's plan")
+    elif not went_out and not kept_local:
         problems.append("no outward go covers the card's plan")
     if _passing_final(card, identity) is None:
         problems.append("the last review round is not a passing round of the card's plan")
@@ -1012,6 +1063,8 @@ def _closed_problems(card: Mapping[str, Any], identity: tuple[int, tuple[str, ..
         problems.append("the last stamp is not at the close phase")
     if last.get("close") is not True:
         problems.append("no stamp is marked as the close")
+    if kept_local and not went_out and last.get("point") != KEPT_LOCAL_POINT.format(revision=identity[0]):
+        problems.append("a kept-local close does not carry the kept-local point")
     try:
         _validate_stamp({**last, "phase": "close", "close": True})
     except TicketError as exc:
@@ -1891,9 +1944,16 @@ class LedgerStore:
             return event
         return None
 
-    def _go_election(self, gate: str, revision: int) -> tuple[str, str, str, str]:
-        """Question, chosen description, rejected label and scope for a bound go."""
+    def _go_election(self, gate: str, revision: int, declined: bool = False) -> tuple[str, str, str, str]:
+        """Question, chosen description, rejected label and scope for a bound go, or for a declined outward go."""
 
+        if declined:
+            return (
+                f"Approve outward actions for {self.key} (revision {revision})?",
+                "Keep the work local: nothing is pushed or opened.",
+                "go",
+                f"the outward gate of {self.key} revision {revision}",
+            )
         if gate == "plan":
             return (
                 f"Approve the plan for {self.key} (revision {revision})?",
@@ -1919,8 +1979,12 @@ class LedgerStore:
         effect: str,
         started_at: str,
         token: str,
+        declined: bool = False,
     ) -> dict[str, Any]:
         """Elect the go against this session's captured prompt, then record it.
+
+        With ``declined`` the election chooses ``no go`` over ``go`` and its
+        keys name ``<gate>-declined``; everything else is the same.
 
         Runs after the ticket-decision note has landed, outside apply's batch;
         ``token`` is the pass's token after that note (the pre-bind token).
@@ -1950,13 +2014,14 @@ class LedgerStore:
         utterance_id = utterance.get("id")
         if type(utterance_id) is not int:
             return {"bound": False, "reason": "no matching utterance"}
-        question, chosen_description, rejected, scope = self._go_election(gate, revision)
-        elect_key = f"ticket-bind/{self.key}/{gate}/{revision}/{utterance_id}/elect"
-        decision_key = f"ticket-bind/{self.key}/{gate}/{revision}/{utterance_id}/decision"
+        question, chosen_description, rejected, scope = self._go_election(gate, revision, declined)
+        answer = f"{gate}-declined" if declined else gate
+        elect_key = f"ticket-bind/{self.key}/{answer}/{revision}/{utterance_id}/elect"
+        decision_key = f"ticket-bind/{self.key}/{answer}/{revision}/{utterance_id}/decision"
         elect = self._run(
             "elect", self.key,
             "--question", question,
-            "--chosen", "go",
+            "--chosen", "no go" if declined else "go",
             "--chosen-description", chosen_description,
             "--rejected", rejected,
             "--scope", scope,
@@ -3048,7 +3113,9 @@ class TicketPass:
         self._sync_steps()
         self._phase = "plan_go"
 
-    def _bind_recorded_go(self, gate: str, revision: int, decision: Mapping[str, Any]) -> dict[str, Any]:
+    def _bind_recorded_go(
+        self, gate: str, revision: int, decision: Mapping[str, Any], *, declined: bool = False,
+    ) -> dict[str, Any]:
         """Bind the landed go to a captured utterance, or fail closed. Never raises.
 
         The binder gets the token held after the note landed. The pass token
@@ -3074,6 +3141,7 @@ class TicketPass:
                 effect=decision["effect"],
                 started_at=started,
                 token=self._token,
+                **({"declined": True} if declined else {}),
             )
         except Exception:
             return {"bound": False, "reason": "elect refused"}
@@ -3095,6 +3163,8 @@ class TicketPass:
         if not _is_text(evidence) or not _is_text(verbatim):
             raise TicketError("a go record requires evidence and the person's verbatim words")
         revision, criteria = self._identity
+        if gate == "outward" and _declines(self._card, self._identity):
+            raise TicketError(_answered(revision))
         decision = {
             "who": "the person",
             "who_kind": "person",
@@ -3124,7 +3194,11 @@ class TicketPass:
             # F4: once a change sends the pass back to plan, the outward go of
             # the stored plan authorizes nothing.
             return False
-        return self._identity is not None and _has_go(card, gate, self._identity, self.key)
+        if self._identity is None:
+            return False
+        if gate == "outward":
+            return _outward_open(card, self._identity, self.key)
+        return _has_go(card, gate, self._identity, self.key)
 
     @_ends_on_failure
     def begin_build(self) -> None:
@@ -3182,17 +3256,80 @@ class TicketPass:
 
         self._require("outward_go")
         card = self._fresh()
-        if not _has_go(card, "outward", self._identity, self.key):
+        if not _outward_open(card, self._identity, self.key):
             raise GateRequired("an outward go is required before any outward action")
 
     @_ends_on_failure
-    def close(self, point: str, *, refs: Sequence[str] = (), next_skills: Sequence[str] = ()) -> None:
+    def close(
+        self, point: str, *, refs: Sequence[str] = (), next_skills: Sequence[str] = (),
+        worktree: str | Path | None = None,
+    ) -> str | None:
+        """Close after the outward actions: the close stamp and the closed status in one write, then the pass ends.
+
+        Then the builder's ``worktree``, when given, is removed or named
+        (``tidy_worktree``); the line it returns is for the close output.
+        """
+
         self._require("outward_go")
-        if not _has_go(self._card, "outward", self._identity, self.key):
+        if not _outward_open(self._card, self._identity, self.key):
             raise GateRequired("an outward go is required before close")
         self._write([self._stamp(point, next_skills, refs, phase="close", close=True), ("closed", None)])
         self._phase = "closed"
         self.end()
+        return tidy_worktree(worktree)
+
+    @_ends_on_failure
+    def record_outward_declined(self, *, evidence: str, verbatim: str) -> dict[str, Any]:
+        """Record the person's no at the outward go, in their own words, then bind it as a go is bound.
+
+        The decline is a ticket decision of its own (``declined: outward``,
+        never a ``gate``), so no reader counts it as a go, and once it covers
+        the plan no outward action is allowed. Binding never gates: the result
+        says whether it bound, as ``record_go``'s does.
+        """
+
+        self._require("outward_go")
+        if not _is_text(evidence) or not _is_text(verbatim):
+            raise TicketError("a declined go record requires evidence and the person's verbatim words")
+        revision, criteria = self._identity
+        if _has_go(self._card, "outward", self._identity, self.key) or _declines(self._card, self._identity):
+            raise TicketError(_answered(revision))
+        decision = {
+            "who": "the person",
+            "who_kind": "person",
+            "standing": "settled",
+            "source": {"what": "ratification", "ref": evidence.strip()},
+            "effect": f"The outward gate is declined for plan revision {revision}; the work stays local.",
+            "tags": [{"type": "ticket", "id": self.key}],
+            "verbatim": verbatim.strip(),
+            "phase": _STORE_PHASE[self._phase],
+            "evidence": evidence.strip(),
+            "declined": "outward",
+            "plan_revision": revision,
+            "criteria": list(criteria),
+        }
+        self._write([("decision", decision)])
+        return self._bind_recorded_go("outward", revision, decision, declined=True)
+
+    @_ends_on_failure
+    def close_local(
+        self, *, refs: Sequence[str] = (), next_skills: Sequence[str] = (), worktree: str | Path | None = None,
+    ) -> str | None:
+        """Close kept local after the person declined the outward go: nothing was pushed or opened.
+
+        One write holds the kept-local close stamp (``KEPT_LOCAL_POINT``) and
+        the closed status; then the pass ends and the builder's ``worktree``
+        is removed or named, as ``close`` does.
+        """
+
+        self._require("outward_go")
+        if not _has_declined(self._card, self._identity, self.key) or _has_go(self._card, "outward", self._identity, self.key):
+            raise GateRequired("a kept-local close requires the person's declined outward go and no outward go")
+        point = KEPT_LOCAL_POINT.format(revision=self._identity[0])
+        self._write([self._stamp(point, next_skills, refs, phase="close", close=True), ("closed", None)])
+        self._phase = "closed"
+        self.end()
+        return tidy_worktree(worktree)
 
     @_ends_on_failure
     def record_tried(self, what: str, *, outcome: str | None = None, evidence: str | None = None) -> None:
@@ -3224,6 +3361,118 @@ class TicketPass:
         self._write([self._stamp(waiting, ("ticket",), refs)])
         self.end()
         return MoreInfoExit(destination, waiting, drafted)
+
+
+# --- What the outward go may propose, and the builder's worktree at close ---
+
+NO_REMOTE_LINE = (
+    "the repository has no remote, so nothing can be pushed and no pull request opened; "
+    "offer to close the pass kept local, which needs the person's own words"
+)
+
+
+@dataclass(frozen=True)
+class OutwardRoute:
+    """The repository's remotes as ``git remote`` listed them at the outward go.
+
+    ``remotes`` is the names, or None when the list could not be read. Only a
+    list read as empty is no remote: an unreadable list counts as remotes
+    present, so the outward go stops as usual and nothing closes kept local
+    on its own.
+    """
+
+    remotes: tuple[str, ...] | None
+    detail: str = ""
+
+    @property
+    def propose_push(self) -> bool:
+        return self.remotes != ()
+
+    @property
+    def line(self) -> str:
+        if self.remotes == ():
+            return NO_REMOTE_LINE
+        if self.remotes is None:
+            return (
+                f"the repository's remotes could not be read ({self.detail}), so it counts as having one "
+                "and the outward go stops as usual"
+            )
+        return f"remotes: {', '.join(self.remotes)}"
+
+
+def outward_route(repo: str | Path) -> OutwardRoute:
+    """Read the repository's remotes live, before the outward go is presented."""
+
+    try:
+        result = subprocess.run(["git", "-C", str(repo), "remote"], capture_output=True, text=True, check=False)
+    except (OSError, ValueError) as exc:
+        return OutwardRoute(None, _one_line(exc))
+    if result.returncode != 0:
+        return OutwardRoute(None, _one_line(result.stderr) or f"git remote exited {result.returncode}")
+    return OutwardRoute(tuple(line.strip() for line in result.stdout.splitlines() if line.strip()))
+
+
+def _git_line(path: str, *args: str) -> tuple[int, str, str]:
+    result = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, check=False)
+    return result.returncode, result.stdout, _one_line(result.stderr)
+
+
+def _tidy_claude(claude: Path) -> str:
+    """Remove the empty ``.claude/worktrees`` and then an empty ``.claude``; name what stays."""
+
+    for directory in (claude / "worktrees", claude):
+        try:
+            os.rmdir(directory)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            why = "it is not empty" if exc.errno in (errno.ENOTEMPTY, errno.EEXIST) else _one_line(exc.strerror or exc)
+            return f"; {directory} is left in place: {why}"
+    return f"; the empty {claude / 'worktrees'} and {claude} were removed"
+
+
+def tidy_worktree(path: str | Path | None) -> str | None:
+    """Remove the builder's worktree when it is clean and on a branch, or name it; the line for the close output.
+
+    Never forces and never raises. ``git worktree remove`` takes the working
+    tree only, so the branch and its commits stay. A worktree with changes,
+    one not on a branch, one whose state cannot be read, or one git refuses to
+    remove is kept and named with the reason. A worktree under the
+    repository's ``.claude/worktrees`` is said to be there; after its removal
+    an empty ``.claude/worktrees`` and then an empty ``.claude`` are removed,
+    and either one that still holds anything is named. None when no worktree
+    was given.
+    """
+
+    if path is None:
+        return None
+    shown = str(path)
+    where = Path(os.path.abspath(shown))
+    under = where.parent.name == "worktrees" and where.parent.parent.name == ".claude"
+    place = " (under the repository's .claude/worktrees)" if under else ""
+
+    def kept(why: str) -> str:
+        return f"builder worktree {shown}{place} was kept: {why}; nothing was removed"
+
+    try:
+        if not where.is_dir():
+            return f"builder worktree {shown}{place} was not found; nothing was removed"
+        status, changes, said = _git_line(shown, "status", "--porcelain")
+        if status != 0:
+            return kept(f"its state could not be read ({said or 'git status failed'})")
+        if changes.strip():
+            return kept("it has uncommitted or untracked changes")
+        status, branch, _ = _git_line(shown, "symbolic-ref", "-q", "--short", "HEAD")
+        branch = branch.strip()
+        if status != 0 or not branch:
+            return kept("it is not on a branch, so removing it could lose its commits")
+        status, _, said = _git_line(shown, "worktree", "remove", shown)
+        if status != 0:
+            return kept(f"git refused to remove it ({said or 'git worktree remove failed'})")
+    except (OSError, ValueError) as exc:
+        return kept(f"its state could not be read ({_one_line(exc)})")
+    line = f"builder worktree {shown} was removed; its branch {branch} is kept"
+    return line + _tidy_claude(where.parent.parent) if under else line
 
 
 # --- Importing markdown cards into the ledger (design 6.4) ------------------
