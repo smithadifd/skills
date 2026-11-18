@@ -1567,7 +1567,13 @@ def _render_card(card: Mapping[str, Any]) -> str:
     lines.extend(("", "## Decisions"))
     for decision in card["decisions"]:
         gate = decision.get("gate")
-        label = f"{gate} go, plan revision {_inline(decision.get('plan_revision'))}" if gate else _inline(decision.get("standing"))
+        if gate:
+            label = f"{gate} go, plan revision {_inline(decision.get('plan_revision'))}"
+        elif decision.get("declined") == "outward":
+            # The ledger elects `no go` over `go` for the same answer; say it here too.
+            label = f"declined outward go (no go), plan revision {_inline(decision.get('plan_revision'))}"
+        else:
+            label = _inline(decision.get("standing"))
         lines.append(f"- {label}, {_inline(decision.get('who'))}: {_inline(decision.get('verbatim'))}")
     lines.extend(("", "## Review rounds"))
     for review in card["reviews"]:
@@ -3431,13 +3437,33 @@ def _tidy_claude(claude: Path) -> str:
     return f"; the empty {claude / 'worktrees'} and {claude} were removed"
 
 
+def _symlink_in(path: str) -> str | None:
+    """The first component of ``path`` that is a symbolic link, or None when none is.
+
+    Read component by component on the path as given, made absolute with its
+    ``..`` kept, so no lexical collapse skips a link.
+    """
+
+    parts = Path(os.path.join(os.getcwd(), path)).parts
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current = current / part
+        if os.path.islink(current):
+            return str(current)
+    return None
+
+
 def tidy_worktree(path: str | Path | None) -> str | None:
     """Remove the builder's worktree when it is clean and on a branch, or name it; the line for the close output.
 
     Never forces and never raises. ``git worktree remove`` takes the working
-    tree only, so the branch and its commits stay. A worktree with changes,
-    one not on a branch, one whose state cannot be read, or one git refuses to
-    remove is kept and named with the reason. A worktree under the
+    tree only, so the branch and its commits stay, and the line names the
+    branch as left in place. A path that goes through a symbolic link is
+    refused before any git call, since the link could name a different
+    worktree. A worktree with changes, one holding untracked or ignored files
+    (``git worktree remove`` would delete them), one not on a branch, one
+    whose state cannot be read, or one git refuses to remove is kept and named
+    with the reason. A worktree under the
     repository's ``.claude/worktrees`` is said to be there; after its removal
     an empty ``.claude/worktrees`` and then an empty ``.claude`` are removed,
     and either one that still holds anything is named. None when no worktree
@@ -3455,13 +3481,21 @@ def tidy_worktree(path: str | Path | None) -> str | None:
         return f"builder worktree {shown}{place} was kept: {why}; nothing was removed"
 
     try:
+        link = _symlink_in(shown)
+        if link is not None:
+            return kept(f"its path goes through a symbolic link ({link}), which could name a different worktree")
         if not where.is_dir():
             return f"builder worktree {shown}{place} was not found; nothing was removed"
-        status, changes, said = _git_line(shown, "status", "--porcelain")
+        # Every untracked and every ignored file shows, whatever the repository's
+        # status settings: `git worktree remove` deletes ignored files too.
+        status, changes, said = _git_line(shown, "status", "--porcelain", "--ignored", "--untracked-files=all")
         if status != 0:
             return kept(f"its state could not be read ({said or 'git status failed'})")
-        if changes.strip():
+        entries = [entry for entry in changes.splitlines() if entry.strip()]
+        if any(not entry.startswith("!! ") for entry in entries):
             return kept("it has uncommitted or untracked changes")
+        if entries:
+            return kept("it holds ignored files, which removing it would delete")
         status, branch, _ = _git_line(shown, "symbolic-ref", "-q", "--short", "HEAD")
         branch = branch.strip()
         if status != 0 or not branch:
@@ -3471,7 +3505,7 @@ def tidy_worktree(path: str | Path | None) -> str | None:
             return kept(f"git refused to remove it ({said or 'git worktree remove failed'})")
     except (OSError, ValueError) as exc:
         return kept(f"its state could not be read ({_one_line(exc)})")
-    line = f"builder worktree {shown} was removed; its branch {branch} is kept"
+    line = f"builder worktree {shown} was removed; its branch {branch} is left in place, not deleted"
     return line + _tidy_claude(where.parent.parent) if under else line
 
 

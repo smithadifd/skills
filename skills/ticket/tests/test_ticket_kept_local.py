@@ -320,13 +320,13 @@ def _git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
 
 
-def _builder_worktree(repo, name="agent-1", *, detached=False):
+def _builder_worktree(repo, name="agent-1", *, detached=False, branch=None):
     """A worktree where `builder-core` gets one: under the repository's `.claude/worktrees`."""
 
     if not _git("-C", str(repo), "rev-list", "--all"):
         _git("-C", str(repo), "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
     path = repo / ".claude" / "worktrees" / name
-    branch = ["--detach"] if detached else ["-b", f"ticket/{name}"]
+    branch = ["--detach"] if detached else ["-b", branch or f"ticket/{name}"]
     _git("-C", str(repo), "worktree", "add", "-q", *branch, str(path))
     return path
 
@@ -335,7 +335,7 @@ def test_K6_a_clean_worktree_is_removed_its_branch_kept_and_the_empty_claude_fol
     path = _builder_worktree(repo)
     line = ticket.tidy_worktree(path)
     assert line == (
-        f"builder worktree {path} was removed; its branch ticket/agent-1 is kept; "
+        f"builder worktree {path} was removed; its branch ticket/agent-1 is left in place, not deleted; "
         f"the empty {repo / '.claude' / 'worktrees'} and {repo / '.claude'} were removed"
     )
     assert not path.exists() and not (repo / ".claude").exists()
@@ -360,6 +360,59 @@ def test_K6_a_dirty_worktree_is_named_and_kept(repo):
         "it has uncommitted or untracked changes; nothing was removed"
     )
     assert (path / "notes.txt").exists()
+
+
+def test_K6_a_worktree_holding_only_an_ignored_file_is_named_and_kept(repo):
+    path = _builder_worktree(repo)
+    with open(repo / ".git" / "info" / "exclude", "a", encoding="utf-8") as exclude:
+        exclude.write("precious.cache\n")
+    (path / "precious.cache").write_text("cannot be rebuilt\n", encoding="utf-8")
+    assert _git("-C", str(path), "status", "--porcelain") == ""
+    line = ticket.tidy_worktree(path)
+    assert line == (
+        f"builder worktree {path} (under the repository's .claude/worktrees) was kept: "
+        "it holds ignored files, which removing it would delete; nothing was removed"
+    )
+    assert (path / "precious.cache").read_text(encoding="utf-8") == "cannot be rebuilt\n"
+
+
+def test_K6_an_untracked_file_hidden_by_the_status_settings_keeps_the_worktree(repo):
+    path = _builder_worktree(repo)
+    _git("-C", str(repo), "config", "status.showUntrackedFiles", "no")
+    (path / "notes.txt").write_text("unsaved\n", encoding="utf-8")
+    assert _git("-C", str(path), "status", "--porcelain") == ""
+    line = ticket.tidy_worktree(path)
+    assert line.endswith("was kept: it has uncommitted or untracked changes; nothing was removed")
+    assert (path / "notes.txt").exists()
+
+
+@pytest.mark.parametrize("through", ["the worktree itself", "a parent"])
+def test_K6_a_path_through_a_symlink_is_named_and_nothing_is_removed(repo, tmp_path, through):
+    path = _builder_worktree(repo)
+    if through == "the worktree itself":
+        link = tmp_path / "link-to-worktree"
+        link.symlink_to(path, target_is_directory=True)
+        given = link
+    else:
+        link = tmp_path / "alias"
+        link.symlink_to(repo, target_is_directory=True)
+        given = link / ".claude" / "worktrees" / "agent-1"
+    line = ticket.tidy_worktree(given)
+    assert line.startswith(f"builder worktree {given}")
+    assert f"was kept: its path goes through a symbolic link ({link}), which could name a different worktree" in line
+    assert line.endswith("; nothing was removed")
+    assert path.is_dir() and link.is_symlink()
+    assert str(path) in _git("-C", str(repo), "worktree", "list")
+
+
+def test_K6_the_builder_agents_branch_is_named_as_left_in_place(repo):
+    path = _builder_worktree(repo, "agent-a1b2c3", branch="worktree-agent-a1b2c3")
+    line = ticket.tidy_worktree(path)
+    assert line.startswith(
+        f"builder worktree {path} was removed; its branch worktree-agent-a1b2c3 is left in place, not deleted; "
+    )
+    assert not path.exists()
+    assert _git("-C", str(repo), "branch", "--list", "worktree-agent-a1b2c3").strip() == "worktree-agent-a1b2c3"
 
 
 def test_K6_a_worktree_not_on_a_branch_is_named_and_kept(repo):
@@ -408,6 +461,20 @@ def test_K6_both_closes_tidy_the_builders_worktree(repo, tmp_path):
     session = build(other, Source(), "S4", 1)
     assert session.close("Done.", refs=("example/repo#14",), worktree=dirty).startswith(f"builder worktree {dirty} (under")
     assert read_card(other)["status"] == "closed"
+
+
+# --- K8: the readable card says a declined outward go is a decline ---------------------------------------
+
+
+def test_K8_the_readable_card_shows_a_declined_outward_go_as_a_decline(repo):
+    session = build(repo, Source(), "S3", 1)
+    decline(session)
+    text = card_bytes(repo).decode("utf-8")
+    decisions = text.split("\n## Decisions\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert decisions == [
+        f"- plan go, plan revision 1, the person: {GO_WORDS}",
+        f"- declined outward go (no go), plan revision 1, the person: {NO_WORDS}",
+    ]
 
 
 # --- K7: SKILL.md carries the declined path, the no-remote path and the worktree line --------------------

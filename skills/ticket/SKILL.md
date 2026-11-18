@@ -438,11 +438,15 @@ recorded lands at `outward_go`; call `close_local` (a second no is refused).
 
 Both closes take the builder's worktree, the path `builder-core` reported
 (section 5). After the close they remove it when it is clean and on a branch;
-the branch and its commits stay. Under the target repository's
-`.claude/worktrees`, an empty `.claude/worktrees` and then an empty `.claude`
-are removed too, and one that still holds anything is named. A worktree with
-changes, one not on a branch, one whose state cannot be read, or one git
-refuses to remove is kept and named with the reason, never forced. The close
+the branch and its commits stay, and the line names the branch (a builder
+agent's `worktree-agent-*` too) as left in place, not deleted. Under the
+target repository's `.claude/worktrees`, an empty `.claude/worktrees` and then
+an empty `.claude` are removed too, and one that still holds anything is
+named. A path that goes through a symbolic link is named and nothing is
+removed. A worktree with changes, one holding untracked or ignored files
+(removing it would delete them), one not on a branch, one whose state cannot
+be read, or one git refuses to remove is kept and named with the reason,
+never forced. The close
 returns that one line for the close output; `ticket.tidy_worktree(<path>)`
 runs the same step again later.
 
