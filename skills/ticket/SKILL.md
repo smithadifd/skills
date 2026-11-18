@@ -437,18 +437,19 @@ note in place of the person's words. A resume that finds the no already
 recorded lands at `outward_go`; call `close_local` (a second no is refused).
 
 Both closes take the builder's worktree, the path `builder-core` reported
-(section 5). After the close they remove it when it is clean and on a branch;
-the branch and its commits stay, and the line names the branch (a builder
-agent's `worktree-agent-*` too) as left in place, not deleted. Under the
-target repository's `.claude/worktrees`, an empty `.claude/worktrees` and then
-an empty `.claude` are removed too, and one that still holds anything is
-named. A path that goes through a symbolic link is named and nothing is
-removed. A worktree with changes, one holding untracked or ignored files
-(removing it would delete them), one not on a branch, one whose state cannot
-be read, or one git refuses to remove is kept and named with the reason,
-never forced. The close
-returns that one line for the close output; `ticket.tidy_worktree(<path>)`
-runs the same step again later.
+(section 5). The worktree is named and kept: the close never removes, moves
+or writes anything there. After the close the line names the path, says when
+it sits under the target repository's `.claude/worktrees`, names its branch
+(a builder agent's `worktree-agent-*` too) as left in place, not deleted, and
+says what `git status --porcelain --ignored --untracked-files=all` listed
+there: nothing, a short summary, or that it could not be read. It ends with
+the command the person may run, `git worktree remove <path>`, with the given
+path shell-quoted and never `--force`. Whether to run it is the person's
+call; the line never says removal is safe. A path that goes through a
+symbolic link is named with the link and no command. Until the person runs
+the command, a worktree under `.claude/worktrees/<name>` stays in the
+repository as an untracked folder. The close returns that one line for the
+close output; `ticket.tidy_worktree(<path>)` reads it again later.
 
 ## More-information exits
 
@@ -483,9 +484,11 @@ that instead. Either way the `Pass:` line stays, even when the plan card
 already showed the id.
 
 After a close, say how the ticket closed: through the outward actions, or kept
-local with nothing pushed. Give the worktree line the close returned (removed,
-or kept and why), so no builder worktree or empty `.claude/` folder is left
-in the repository unnamed.
+local with nothing pushed. Give the worktree line the close returned (the
+path, its branch, what `git status` listed, and the `git worktree remove`
+command for the person to run), so no builder worktree is left in the
+repository unnamed. A worktree under `.claude/worktrees/<name>` stays until
+the person runs that command.
 
 ## Records
 

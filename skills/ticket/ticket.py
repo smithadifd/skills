@@ -3272,7 +3272,7 @@ class TicketPass:
     ) -> str | None:
         """Close after the outward actions: the close stamp and the closed status in one write, then the pass ends.
 
-        Then the builder's ``worktree``, when given, is removed or named
+        Then the builder's ``worktree``, when given, is named and kept
         (``tidy_worktree``); the line it returns is for the close output.
         """
 
@@ -3325,7 +3325,7 @@ class TicketPass:
 
         One write holds the kept-local close stamp (``KEPT_LOCAL_POINT``) and
         the closed status; then the pass ends and the builder's ``worktree``
-        is removed or named, as ``close`` does.
+        is named and kept, as ``close`` does.
         """
 
         self._require("outward_go")
@@ -3423,20 +3423,6 @@ def _git_line(path: str, *args: str) -> tuple[int, str, str]:
     return result.returncode, result.stdout, _one_line(result.stderr)
 
 
-def _tidy_claude(claude: Path) -> str:
-    """Remove the empty ``.claude/worktrees`` and then an empty ``.claude``; name what stays."""
-
-    for directory in (claude / "worktrees", claude):
-        try:
-            os.rmdir(directory)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            why = "it is not empty" if exc.errno in (errno.ENOTEMPTY, errno.EEXIST) else _one_line(exc.strerror or exc)
-            return f"; {directory} is left in place: {why}"
-    return f"; the empty {claude / 'worktrees'} and {claude} were removed"
-
-
 def _symlink_in(path: str) -> str | None:
     """The first component of ``path`` that is a symbolic link, or None when none is.
 
@@ -3453,60 +3439,84 @@ def _symlink_in(path: str) -> str | None:
     return None
 
 
-def tidy_worktree(path: str | Path | None) -> str | None:
-    """Remove the builder's worktree when it is clean and on a branch, or name it; the line for the close output.
+def worktree_remove_command(path: str | Path) -> str:
+    """The command the person may run to remove a worktree: every argv element shell-quoted, never forced."""
+    return shlex.join(["git", "worktree", "remove", str(path)])
 
-    Never forces and never raises. ``git worktree remove`` takes the working
-    tree only, so the branch and its commits stay, and the line names the
-    branch as left in place. A path that goes through a symbolic link is
-    refused before any git call, since the link could name a different
-    worktree. A worktree with changes, one holding untracked or ignored files
-    (``git worktree remove`` would delete them), one not on a branch, one
-    whose state cannot be read, or one git refuses to remove is kept and named
-    with the reason. A worktree under the
-    repository's ``.claude/worktrees`` is said to be there; after its removal
-    an empty ``.claude/worktrees`` and then an empty ``.claude`` are removed,
-    and either one that still holds anything is named. None when no worktree
-    was given.
+
+def _status_listing(changes: str) -> str:
+    """What ``git status --porcelain --ignored --untracked-files=all`` listed, in one short clause."""
+
+    entries = [entry for entry in changes.splitlines() if entry.strip()]
+    if not entries:
+        return "git status listed nothing"
+    untracked = sum(entry.startswith("?? ") for entry in entries)
+    ignored = sum(entry.startswith("!! ") for entry in entries)
+    changed = len(entries) - untracked - ignored
+    shown = "; ".join(entries[:3]) + ("; ..." if len(entries) > 3 else "")
+    noun = "entry" if len(entries) == 1 else "entries"
+    return (
+        f"git status listed {len(entries)} {noun} ({changed} changed, {untracked} untracked, "
+        f"{ignored} ignored): {shown}"
+    )
+
+
+def tidy_worktree(path: str | Path | None) -> str | None:
+    """Name the builder's worktree for the close output; never remove, move or write anything.
+
+    Never raises. The line names the path as given, whether it sits under the
+    repository's ``.claude/worktrees``, its branch (left in place, not
+    deleted), and what ``git status --porcelain --ignored
+    --untracked-files=all`` listed there, read with ``--no-optional-locks`` so
+    git does not refresh the worktree's index. It ends with the command the
+    person may run, ``git worktree remove <path>`` with the given path
+    shell-quoted and never ``--force``; whether to run it is the person's
+    call. A path that goes through a symbolic link is named with the link and
+    no command, since the link could name a different worktree; so is a path
+    whose links could not be checked. A missing path is named as not found.
+    None when no worktree was given.
     """
 
     if path is None:
         return None
     shown = str(path)
-    where = Path(os.path.abspath(shown))
-    under = where.parent.name == "worktrees" and where.parent.parent.name == ".claude"
-    place = " (under the repository's .claude/worktrees)" if under else ""
-
-    def kept(why: str) -> str:
-        return f"builder worktree {shown}{place} was kept: {why}; nothing was removed"
-
+    command = f"to remove it, run `{worktree_remove_command(shown)}`"
+    place = ""
     try:
+        where = Path(os.path.abspath(shown))
+        if where.parent.name == "worktrees" and where.parent.parent.name == ".claude":
+            place = " (under the repository's .claude/worktrees)"
         link = _symlink_in(shown)
-        if link is not None:
-            return kept(f"its path goes through a symbolic link ({link}), which could name a different worktree")
-        if not where.is_dir():
-            return f"builder worktree {shown}{place} was not found; nothing was removed"
-        # Every untracked and every ignored file shows, whatever the repository's
-        # status settings: `git worktree remove` deletes ignored files too.
-        status, changes, said = _git_line(shown, "status", "--porcelain", "--ignored", "--untracked-files=all")
-        if status != 0:
-            return kept(f"its state could not be read ({said or 'git status failed'})")
-        entries = [entry for entry in changes.splitlines() if entry.strip()]
-        if any(not entry.startswith("!! ") for entry in entries):
-            return kept("it has uncommitted or untracked changes")
-        if entries:
-            return kept("it holds ignored files, which removing it would delete")
-        status, branch, _ = _git_line(shown, "symbolic-ref", "-q", "--short", "HEAD")
-        branch = branch.strip()
-        if status != 0 or not branch:
-            return kept("it is not on a branch, so removing it could lose its commits")
-        status, _, said = _git_line(shown, "worktree", "remove", shown)
-        if status != 0:
-            return kept(f"git refused to remove it ({said or 'git worktree remove failed'})")
     except (OSError, ValueError) as exc:
-        return kept(f"its state could not be read ({_one_line(exc)})")
-    line = f"builder worktree {shown} was removed; its branch {branch} is left in place, not deleted"
-    return line + _tidy_claude(where.parent.parent) if under else line
+        return (
+            f"builder worktree {shown} is kept: its path could not be checked ({_one_line(exc)}), "
+            "so no removal command is given; nothing was removed"
+        )
+    head = f"builder worktree {shown}{place}"
+    if link is not None:
+        return (
+            f"{head} is kept: its path goes through a symbolic link ({link}), which could name a different "
+            "worktree, so no removal command is given; nothing was removed"
+        )
+    try:
+        if not where.is_dir():
+            return f"{head} was not found; nothing was removed"
+        status, branch, _ = _git_line(shown, "--no-optional-locks", "symbolic-ref", "-q", "--short", "HEAD")
+        branch = branch.strip()
+        if status == 0 and branch:
+            branch_part = f"its branch {branch} is left in place, not deleted"
+        elif status == 1:
+            branch_part = "it is not on a branch"
+        else:
+            branch_part = "its branch could not be read"
+        # Every untracked and every ignored file shows, whatever the repository's status settings.
+        status, changes, said = _git_line(
+            shown, "--no-optional-locks", "status", "--porcelain", "--ignored", "--untracked-files=all",
+        )
+        listed = _status_listing(changes) if status == 0 else f"git status could not be read ({said or 'git status failed'})"
+    except (OSError, ValueError) as exc:
+        branch_part, listed = "its branch could not be read", f"git status could not be read ({_one_line(exc)})"
+    return f"{head} is kept; {branch_part}; {listed}; nothing was removed; {command}"
 
 
 # --- Importing markdown cards into the ledger (design 6.4) ------------------

@@ -1,6 +1,8 @@
 """Matrix section K: a declined outward go, a repository with no remote, and the builder's worktree at close."""
 
 import json
+import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -331,63 +333,113 @@ def _builder_worktree(repo, name="agent-1", *, detached=False, branch=None):
     return path
 
 
-def test_K6_a_clean_worktree_is_removed_its_branch_kept_and_the_empty_claude_folder_removed(repo):
-    path = _builder_worktree(repo)
-    line = ticket.tidy_worktree(path)
-    assert line == (
-        f"builder worktree {path} was removed; its branch ticket/agent-1 is left in place, not deleted; "
-        f"the empty {repo / '.claude' / 'worktrees'} and {repo / '.claude'} were removed"
+def _kept_line(path, place, branch, listed, command=None):
+    command = command or shlex.join(["git", "worktree", "remove", str(path)])
+    return (
+        f"builder worktree {path}{place} is kept; its branch {branch} is left in place, not deleted; "
+        f"{listed}; nothing was removed; to remove it, run `{command}`"
     )
-    assert not path.exists() and not (repo / ".claude").exists()
-    assert _git("-C", str(repo), "branch", "--list", "ticket/agent-1").strip() == "ticket/agent-1"
-    assert ".claude" not in _git("-C", str(repo), "status", "--porcelain")
 
 
-def test_K6_a_claude_folder_that_holds_more_is_named_and_left(repo):
+UNDER = " (under the repository's .claude/worktrees)"
+
+
+def _still_there(repo, path, branch):
+    assert path.is_dir() and (repo / ".claude" / "worktrees").is_dir() and (repo / ".claude").is_dir()
+    assert str(path) in _git("-C", str(repo), "worktree", "list")
+    assert _git("-C", str(repo), "branch", "--list", "--format=%(refname:short)", branch).strip() == branch
+
+
+def test_K6_a_clean_worktree_under_claude_survives_both_closes(repo, tmp_path):
     path = _builder_worktree(repo)
-    (repo / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+    session = build(repo, Source(), "S3", 1)
+    decline(session)
+    line = session.close_local(worktree=path)
+    assert line == _kept_line(path, UNDER, "ticket/agent-1", "git status listed nothing")
+    _still_there(repo, path, "ticket/agent-1")
+    assert read_card(repo)["status"] == "closed"
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    (other / ".gitignore").write_text(".ticket/\n", encoding="utf-8")
+    _git("-C", str(other), "add", ".gitignore")
+    clean = _builder_worktree(other)
+    session = build(other, Source(), "S4", 1)
+    line = session.close("Done.", refs=("example/repo#14",), worktree=clean)
+    assert line == _kept_line(clean, UNDER, "ticket/agent-1", "git status listed nothing")
+    _still_there(other, clean, "ticket/agent-1")
+    assert read_card(other)["status"] == "closed"
+
+
+def test_K6_the_printed_command_is_shell_quoted_for_the_given_path_and_never_forced(repo, monkeypatch):
+    path = _builder_worktree(repo, "agent one", branch="ticket/agent-one")
+    quoted = shlex.quote(str(path))
+    assert quoted != str(path)
     line = ticket.tidy_worktree(path)
-    assert line.endswith(f"; {repo / '.claude'} is left in place: it is not empty")
-    assert not path.exists() and (repo / ".claude" / "settings.json").exists()
+    assert line.endswith(f"; to remove it, run `git worktree remove {quoted}`")
+    assert shlex.split(line.rsplit("run `", 1)[1].rstrip("`")) == ["git", "worktree", "remove", str(path)]
+    assert "--force" not in line and " -f" not in line
+    monkeypatch.chdir(repo)
+    given = ".claude/worktrees/agent one"
+    line = ticket.tidy_worktree(given)
+    assert line.startswith(f"builder worktree {given}{UNDER} is kept; ")
+    assert line.endswith(f"; to remove it, run `git worktree remove '{given}'`")
+    assert path.is_dir()
 
 
-def test_K6_a_dirty_worktree_is_named_and_kept(repo):
+def test_K6_a_dirty_worktree_with_an_ignored_file_names_what_status_listed(repo):
     path = _builder_worktree(repo)
+    with open(repo / ".git" / "info" / "exclude", "a", encoding="utf-8") as exclude:
+        exclude.write("precious.cache\n")
+    (path / "precious.cache").write_text("cannot be rebuilt\n", encoding="utf-8")
     (path / "notes.txt").write_text("unsaved\n", encoding="utf-8")
     line = ticket.tidy_worktree(path)
-    assert line == (
-        f"builder worktree {path} (under the repository's .claude/worktrees) was kept: "
-        "it has uncommitted or untracked changes; nothing was removed"
+    assert line == _kept_line(
+        path, UNDER, "ticket/agent-1",
+        "git status listed 2 entries (0 changed, 1 untracked, 1 ignored): ?? notes.txt; !! precious.cache",
     )
+    assert (path / "precious.cache").read_text(encoding="utf-8") == "cannot be rebuilt\n"
     assert (path / "notes.txt").exists()
 
 
-def test_K6_a_worktree_holding_only_an_ignored_file_is_named_and_kept(repo):
+def test_K6_a_worktree_holding_only_an_ignored_file_names_it(repo):
     path = _builder_worktree(repo)
     with open(repo / ".git" / "info" / "exclude", "a", encoding="utf-8") as exclude:
         exclude.write("precious.cache\n")
     (path / "precious.cache").write_text("cannot be rebuilt\n", encoding="utf-8")
     assert _git("-C", str(path), "status", "--porcelain") == ""
     line = ticket.tidy_worktree(path)
-    assert line == (
-        f"builder worktree {path} (under the repository's .claude/worktrees) was kept: "
-        "it holds ignored files, which removing it would delete; nothing was removed"
-    )
-    assert (path / "precious.cache").read_text(encoding="utf-8") == "cannot be rebuilt\n"
+    assert "; git status listed 1 entry (0 changed, 0 untracked, 1 ignored): !! precious.cache; " in line
+    assert (path / "precious.cache").exists()
 
 
-def test_K6_an_untracked_file_hidden_by_the_status_settings_keeps_the_worktree(repo):
+def test_K6_an_untracked_file_hidden_by_the_status_settings_is_still_listed(repo):
     path = _builder_worktree(repo)
     _git("-C", str(repo), "config", "status.showUntrackedFiles", "no")
-    (path / "notes.txt").write_text("unsaved\n", encoding="utf-8")
+    (path / "deep").mkdir()
+    (path / "deep" / "notes.txt").write_text("unsaved\n", encoding="utf-8")
     assert _git("-C", str(path), "status", "--porcelain") == ""
     line = ticket.tidy_worktree(path)
-    assert line.endswith("was kept: it has uncommitted or untracked changes; nothing was removed")
-    assert (path / "notes.txt").exists()
+    assert "; git status listed 1 entry (0 changed, 1 untracked, 0 ignored): ?? deep/notes.txt; " in line
+    assert (path / "deep" / "notes.txt").exists()
+
+
+def test_K6_reading_the_worktree_writes_nothing_to_its_index(repo):
+    (repo / "tracked.txt").write_text("a\n", encoding="utf-8")
+    _git("-C", str(repo), "add", "tracked.txt")
+    _git("-C", str(repo), "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+    path = _builder_worktree(repo)
+    index = Path(_git("-C", str(path), "rev-parse", "--path-format=absolute", "--git-path", "index").strip())
+    stamp = (index.stat().st_mtime_ns, index.read_bytes())
+    later = time.time() + 5
+    os.utime(path / "tracked.txt", (later, later))
+    line = ticket.tidy_worktree(path)
+    assert line == _kept_line(path, UNDER, "ticket/agent-1", "git status listed nothing")
+    assert (index.stat().st_mtime_ns, index.read_bytes()) == stamp
 
 
 @pytest.mark.parametrize("through", ["the worktree itself", "a parent"])
-def test_K6_a_path_through_a_symlink_is_named_and_nothing_is_removed(repo, tmp_path, through):
+def test_K6_a_path_through_a_symlink_is_named_with_no_command_and_nothing_is_removed(repo, tmp_path, through):
     path = _builder_worktree(repo)
     if through == "the worktree itself":
         link = tmp_path / "link-to-worktree"
@@ -399,8 +451,11 @@ def test_K6_a_path_through_a_symlink_is_named_and_nothing_is_removed(repo, tmp_p
         given = link / ".claude" / "worktrees" / "agent-1"
     line = ticket.tidy_worktree(given)
     assert line.startswith(f"builder worktree {given}")
-    assert f"was kept: its path goes through a symbolic link ({link}), which could name a different worktree" in line
-    assert line.endswith("; nothing was removed")
+    assert (
+        f" is kept: its path goes through a symbolic link ({link}), which could name a different worktree, "
+        "so no removal command is given; nothing was removed"
+    ) in line
+    assert "git worktree remove" not in line
     assert path.is_dir() and link.is_symlink()
     assert str(path) in _git("-C", str(repo), "worktree", "list")
 
@@ -408,17 +463,14 @@ def test_K6_a_path_through_a_symlink_is_named_and_nothing_is_removed(repo, tmp_p
 def test_K6_the_builder_agents_branch_is_named_as_left_in_place(repo):
     path = _builder_worktree(repo, "agent-a1b2c3", branch="worktree-agent-a1b2c3")
     line = ticket.tidy_worktree(path)
-    assert line.startswith(
-        f"builder worktree {path} was removed; its branch worktree-agent-a1b2c3 is left in place, not deleted; "
-    )
-    assert not path.exists()
-    assert _git("-C", str(repo), "branch", "--list", "worktree-agent-a1b2c3").strip() == "worktree-agent-a1b2c3"
+    assert line == _kept_line(path, UNDER, "worktree-agent-a1b2c3", "git status listed nothing")
+    _still_there(repo, path, "worktree-agent-a1b2c3")
 
 
 def test_K6_a_worktree_not_on_a_branch_is_named_and_kept(repo):
     path = _builder_worktree(repo, detached=True)
     line = ticket.tidy_worktree(path)
-    assert "was kept: it is not on a branch, so removing it could lose its commits" in line
+    assert line.startswith(f"builder worktree {path}{UNDER} is kept; it is not on a branch; git status listed nothing; ")
     assert path.exists()
 
 
@@ -427,40 +479,15 @@ def test_K6_a_worktree_whose_state_cannot_be_read_is_named_and_kept(tmp_path):
     path.mkdir(parents=True)
     (path / "work.txt").write_text("x\n", encoding="utf-8")
     line = ticket.tidy_worktree(path)
-    assert line.startswith(f"builder worktree {path} was kept: its state could not be read (")
+    assert line.startswith(f"builder worktree {path} is kept; its branch could not be read; git status could not be read (")
+    assert line.endswith(f"; nothing was removed; to remove it, run `git worktree remove {shlex.quote(str(path))}`")
     assert (path / "work.txt").exists()
-
-
-def test_K6_a_worktree_git_will_not_remove_is_named_and_kept(repo):
-    path = _builder_worktree(repo)
-    _git("-C", str(repo), "worktree", "lock", str(path))
-    line = ticket.tidy_worktree(path)
-    assert line.startswith(
-        f"builder worktree {path} (under the repository's .claude/worktrees) was kept: git refused to remove it ("
-    )
-    assert path.exists()
 
 
 def test_K6_no_worktree_says_nothing_and_a_missing_one_is_named(tmp_path):
     assert ticket.tidy_worktree(None) is None
     gone = tmp_path / "gone"
     assert ticket.tidy_worktree(gone) == f"builder worktree {gone} was not found; nothing was removed"
-
-
-def test_K6_both_closes_tidy_the_builders_worktree(repo, tmp_path):
-    path = _builder_worktree(repo)
-    session = build(repo, Source(), "S3", 1)
-    decline(session)
-    assert session.close_local(worktree=path).startswith(f"builder worktree {path} was removed")
-    other = tmp_path / "other"
-    other.mkdir()
-    subprocess.run(["git", "init", "-q", str(other)], check=True)
-    (other / ".gitignore").write_text(".ticket/\n", encoding="utf-8")
-    dirty = _builder_worktree(other)
-    (dirty / "notes.txt").write_text("unsaved\n", encoding="utf-8")
-    session = build(other, Source(), "S4", 1)
-    assert session.close("Done.", refs=("example/repo#14",), worktree=dirty).startswith(f"builder worktree {dirty} (under")
-    assert read_card(other)["status"] == "closed"
 
 
 # --- K8: the readable card says a declined outward go is a decline ---------------------------------------
@@ -492,8 +519,9 @@ def test_K7_skill_md_describes_the_declined_path_the_no_remote_path_and_the_work
     for needle in (
         "ticket.outward_route(", "session.record_outward_declined(evidence=",
         "`declined go recorded, not bound to a captured utterance`", "session.close_local(",
-        "worktree=", "never forced",
+        "worktree=", "named and kept", "`git worktree remove <path>`", "never `--force`",
+        "`.claude/worktrees/<name>`",
     ):
         assert needle in outward, needle
     final = _skill_section("The final message")
-    assert "kept local" in final and "worktree" in final
+    assert "kept local" in final and "`git worktree remove`" in final and "`.claude/worktrees/<name>`" in final
