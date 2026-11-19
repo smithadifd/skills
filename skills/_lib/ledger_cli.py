@@ -122,11 +122,12 @@ every refusal above (no `ledger` on `PATH`, a ledger in the plugin cache, an inc
 one, an unreadable or changed file), so any refusal leaves the file byte-identical. It
 keeps every other key and prints one line with the old and the new path:
 `ledger_cli replaced in <file>: <old> -> <new>`. When the old pin already names the new
-path, nothing is written and the line says so (exit 0). With no pin to replace (the key
-absent, null, empty or blank), `--replace` pins exactly as plain `setup` does. The
-stale-plugin-pin recovery above is unchanged: it clears a moved pin whose path is in the
-cache, only when the `ledger` now on `PATH` is also in the cache. Plain `setup` behaves as
-it always has.
+path, spelled the same after `~` expansion (a spelling that reaches it through a `..`
+segment is replaced), nothing is written and the line says so (exit 0). With no pin to
+replace (the key absent, null, empty or blank), `--replace` pins exactly as plain `setup`
+does. The stale-plugin-pin recovery above is unchanged: it clears a moved pin whose path
+is in the cache, only when the `ledger` now on `PATH` is also in the cache. Plain `setup`
+behaves as it always has.
 
 How setup writes. Setup never removes or overwrites a version of the override
 file it did not read. It commits only by (1) creating the file when absent, or
@@ -988,7 +989,9 @@ def _setup_locked(override: Path, target: Path, replace: bool = False) -> int:
         return _refuse_setup(
             SETUP_INCOMPATIBLE, f"{pinned} fails the compatibility check ({failure}); nothing was written"
         )
-    if replace and replaced is not None and _absolute_path(os.path.expanduser(replaced)) == pinned:
+    # A no-op only when the stored text, after `~` expansion and nothing else, is the new path: a spelling
+    # that reaches it through a `..` segment may name a directory that is gone, so it is replaced.
+    if replace and replaced is not None and os.path.expanduser(replaced) == pinned:
         print(f"{CONFIG_KEY} in {target} already names {pinned}; nothing was changed")
         return 0
     if replace and replaced is not None:

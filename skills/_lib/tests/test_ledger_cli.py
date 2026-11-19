@@ -980,6 +980,20 @@ def test_setup_replace_with_the_pin_already_naming_the_new_ledger_changes_nothin
     assert machine.calls() == [["append-many", "--help"]] * 2, "the new ledger is still checked first"
 
 
+def test_setup_replace_rewrites_a_pin_spelled_through_a_removed_directory_and_a_parent_segment(machine):
+    # The stored spelling `<dir>/removed/../ledger` normalizes to the new path, but it names a directory
+    # that no longer exists, so the pin is unusable as written: replace it, never call it a no-op.
+    spelled = f"{machine.ledger.parent}/removed/../{machine.ledger.name}"
+    assert not os.path.exists(spelled) and os.path.abspath(spelled) == str(machine.ledger)
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": spelled, "keep": 1}))
+    proc = machine.run("setup", "--replace")
+    assert proc.returncode == 0 and proc.stderr == ""
+    assert "already names" not in proc.stdout
+    assert proc.stdout.startswith(f"ledger_cli replaced in {path}: {spelled} -> {machine.ledger}")
+    assert json.loads(path.read_text(encoding="utf-8")) == {"ledger_cli": str(machine.ledger), "keep": 1}
+    assert len(_kept(machine.home_dir)) == 1, "the displaced version is kept"
+
+
 def test_setup_replace_that_meets_a_concurrent_edit_leaves_the_editors_file(machine, tmp_path, monkeypatch, capsys):
     module = _load()
     machine.use(monkeypatch)
