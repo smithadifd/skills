@@ -18,6 +18,20 @@ The headings below are plugin versions, the number `claude plugin list` shows fo
 
 Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0.12.0 (tag v1.2.0). Only tags from v1.2.0 on have an entry, because this file did not exist at earlier tags.
 
+## Unreleased
+
+### `setup --replace` moves a pin to a new install of the ledger
+
+`python3 ledger_cli.py setup --replace` replaces an existing `ledger_cli` that is an absolute path even when that path still runs, the case of a machine that moved from one install of the ledger to another (plain `setup` refuses it as `ledger_cli_setup_exists`, which now names `--replace`, and the manual workaround was to copy `topic.json` aside and clear the key). It resolves the new `ledger` and runs the compatibility check first, then replaces the value under the same lock, keeping every other key, and prints the old and the new path. A `ledger_cli` of `none` or a bare command name is a deliberate setting: `--replace` refuses it as `ledger_cli_setup_replace_not_path` and the file stays byte-identical, as it does for an incompatible `ledger`, one in Claude Code's plugin cache, or none on `PATH`. Plain `setup` is unchanged. The README's setup step and the `topic` skill describe it.
+
+### README: `LEDGER_HARNESS` is set in Claude Code's settings
+
+The convention changes from 0.15.0: Claude Code's settings `env` block carries `LEDGER_HARNESS=claude-code`, the shell profile keeps `export LEDGER_HARNESS=cli`, and nothing is cleared from the shell before Claude Code starts. The settings value wins over a `cli` inherited from the shell, as measured with Claude Code 2.1.328. The terminal route's two settings examples now include the key, and the uninstall list names it with the other environment keys. Docs only.
+
+### README: the marketplace remove is only for an existing install
+
+The tag route's `claude plugin marketplace remove skills` exits 1 with `Marketplace 'skills' not found` on a machine that never added the marketplace; the README now says the remove is only for an existing install. Docs only.
+
 ## 0.15.0
 
 This is the release tagged v1.5.0 in the repository. It mainly carries the `ticket` skill closing kept local when the person declines the outward go, and the README's single `LEDGER_HARNESS` convention with its note on when the database is created. The sections below list every change.

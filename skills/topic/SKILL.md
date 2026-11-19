@@ -75,8 +75,15 @@ there is no `ledger` (`ledger_cli_setup_not_found`), it is incompatible
 (`ledger_cli_setup_config_unreadable`) or changed meanwhile
 (`ledger_cli_setup_config_changed`), cannot be written
 (`ledger_cli_setup_write_failed`), or `ledger_cli` is already set
-(`ledger_cli_setup_exists`). A value naming an absolute path that no longer exists
-is the one setting it replaces.
+(`ledger_cli_setup_exists`, whose line names `--replace`). A value naming an
+absolute path that no longer exists is the one setting it replaces. For a machine
+that moved to a new install of the ledger while the old path still runs,
+`python3 ${CLAUDE_SKILL_DIR}/../_lib/ledger_cli.py setup --replace` checks the new
+`ledger` first and then also replaces a value naming an absolute path that still
+runs, printing the old and the new path and keeping the other keys. `none` and a
+bare command name are deliberate settings: `--replace` refuses them by name
+(`ledger_cli_setup_replace_not_path`) and leaves the file as it was, as it does
+for an incompatible `ledger` or one in Claude Code's plugin cache.
 
 A value that is not a string is an error. When the route is on,
 a thread is a ledger item of type `topic` with the id `topic-<slug>`, this skill

@@ -3,6 +3,7 @@
 
     python3 ledger_cli.py [--config <path>]
     python3 ledger_cli.py setup
+    python3 ledger_cli.py setup --replace
 
 With no subcommand it prints one JSON object and exits 0:
 
@@ -74,6 +75,15 @@ commit that the residual below describes:
   longer an executable file, which is the moved case and is replaced. A live
   setting is never changed and the file stays byte-identical. Null, an empty
   or a blank string count as unset. Checked after that, with no program run.
+  The line names `--replace`: for a live absolute path it gives the command that
+  replaces it, and for `none`, a bare name or a non-string value it says
+  `--replace` refuses those too.
+- `ledger_cli_setup_replace_not_path` (only with `--replace`): `ledger_cli` holds a
+  value that is not an absolute path (after `~` expansion): `none` in any case, a
+  bare command name, or a non-string value other than null. These are deliberate
+  settings, so `--replace` refuses them by name and the file stays byte-identical:
+  edit or remove the key by hand. Checked at the same place as
+  `ledger_cli_setup_exists`, with no program run.
 - `ledger_cli_setup_not_found`: no `ledger` on `PATH`.
 - `ledger_cli_setup_plugin_command`: the resolved `ledger` path (made absolute)
   has a `plugins/cache/` folder segment under a `.claude` folder, so it is
@@ -101,6 +111,23 @@ commit that the residual below describes:
   link probe's file could not be removed (the line names it, and nothing was moved), or a
   moved-aside version could not be linked back (the line names where it is kept; move it
   back by hand when a rerun cannot link it).
+
+`python3 ledger_cli.py setup --replace` also replaces a pin that still runs. This is the
+case of a machine that moved from one install of the ledger to another while the old path
+still works. It replaces only an existing `ledger_cli` that is an absolute path (after `~`
+expansion), live or dead; a value that is not an absolute path is refused by name
+(`ledger_cli_setup_replace_not_path`, above). It resolves the new `ledger`, runs the
+compatibility check on it, and only then replaces the value, under the same lock and with
+every refusal above (no `ledger` on `PATH`, a ledger in the plugin cache, an incompatible
+one, an unreadable or changed file), so any refusal leaves the file byte-identical. It
+keeps every other key and prints one line with the old and the new path:
+`ledger_cli replaced in <file>: <old> -> <new>`. When the old pin already names the new
+path, spelled the same after `~` expansion (a spelling that reaches it through a `..`
+segment is replaced), nothing is written and the line says so (exit 0). With no pin to
+replace (the key absent, null, empty or blank), `--replace` pins exactly as plain `setup`
+does. The stale-plugin-pin recovery above is unchanged: it clears a moved pin whose path
+is in the cache, only when the `ledger` now on `PATH` is also in the cache. Plain `setup`
+behaves as it always has.
 
 How setup writes. Setup never removes or overwrites a version of the override
 file it did not read. It commits only by (1) creating the file when absent, or
@@ -243,6 +270,7 @@ SETUP_NO_HARDLINKS = "ledger_cli_setup_no_hardlinks"
 SETUP_WRITE_FAILED = "ledger_cli_setup_write_failed"
 SETUP_LOCK_FAILED = "ledger_cli_setup_lock_failed"
 SETUP_PLUGIN_COMMAND = "ledger_cli_setup_plugin_command"
+SETUP_REPLACE_NOT_PATH = "ledger_cli_setup_replace_not_path"
 # The hard-link probe's name is setup's temp file name plus this suffix, in the override's folder.
 PROBE_SUFFIX = ".link-probe"
 # The lock file sits beside the override and is named by appending this to its name.
@@ -549,6 +577,28 @@ def _refuse_setup(token: str, detail: str) -> int:
     return 1
 
 
+def _refuse_existing(override: Path, shown: str, absolute: bool, replace: bool) -> int:
+    """Refuse an existing `ledger_cli` setting that setup leaves alone; the file is not touched.
+
+    `absolute` is True for a live absolute path, the one kind `--replace` can change.
+    """
+    if replace:
+        return _refuse_setup(
+            SETUP_REPLACE_NOT_PATH,
+            f"{CONFIG_KEY} in {override} is {shown}, which is not an absolute path; `setup --replace` "
+            "replaces only an absolute path, so this setting is left as it is: edit or remove it by hand; "
+            "nothing was written",
+        )
+    if absolute:
+        tail = (
+            "setup does not change it; to replace a pin that is an absolute path, "
+            f"rerun with `{setup_command()} --replace`"
+        )
+    else:
+        tail = "setup does not change it, and `setup --replace` refuses it too: edit or remove the key by hand"
+    return _refuse_setup(SETUP_EXISTS, f"{CONFIG_KEY} in {override} is already set to {shown}; {tail}")
+
+
 def _current_bytes(path: Path) -> Optional[bytes]:
     """The file's bytes, or None when it is absent."""
     try:
@@ -827,8 +877,11 @@ def _stale_plugin_cache_pin(value: Any) -> bool:
     return _in_claude_plugin_cache(absolute)
 
 
-def setup() -> int:
-    """Pin the ledger CLI: see the module text, Setup. Exit 0 when written, 1 on a named refusal."""
+def setup(replace: bool = False) -> int:
+    """Pin the ledger CLI: see the module text, Setup. Exit 0 when written, 1 on a named refusal.
+
+    With `replace`, an existing pin that is an absolute path is replaced; see `--replace` there.
+    """
     override = Path(OVERRIDE_PATH).expanduser()
     # Follow a symlinked override so the link itself is kept and its target is rewritten.
     target = Path(os.path.realpath(override))
@@ -846,12 +899,12 @@ def setup() -> int:
             f"could not lock {target.name + LOCK_SUFFIX} beside {target} ({_one_line(exc.strerror or str(exc))}); nothing was written",
         )
     try:
-        return _setup_locked(override, target)
+        return _setup_locked(override, target, replace)
     finally:
         os.close(lock)
 
 
-def _setup_locked(override: Path, target: Path) -> int:
+def _setup_locked(override: Path, target: Path, replace: bool = False) -> int:
     """Setup's read, checks and write, run with the lock held."""
     try:
         _recover(target)
@@ -875,18 +928,19 @@ def _setup_locked(override: Path, target: Path) -> int:
             )
         config = data
     existing = config.get(CONFIG_KEY)
+    replaced: Optional[str] = None  # the old pin's text, when `--replace` is replacing an absolute path
     if existing is not None:
         if not isinstance(existing, str):
-            return _refuse_setup(
-                SETUP_EXISTS,
-                f"{CONFIG_KEY} in {override} is already set to {json.dumps(existing)}; setup does not change it",
-            )
+            return _refuse_existing(override, json.dumps(existing), False, replace)
         text = existing.strip()
-        if text and not _moved(text):
-            return _refuse_setup(
-                SETUP_EXISTS,
-                f"{CONFIG_KEY} in {override} is already set to {text}; setup does not change it",
-            )
+        if text:
+            absolute = os.path.isabs(os.path.expanduser(text))
+            if not absolute:
+                # `none` and a bare name are deliberate settings: never changed, with or without --replace.
+                return _refuse_existing(override, text, False, replace)
+            if not _moved(text) and not replace:
+                return _refuse_existing(override, text, True, replace)
+            replaced = text
     found = shutil.which(LEDGER_COMMAND)
     if found is None:
         return _refuse_setup(SETUP_NOT_FOUND, f"no {LEDGER_COMMAND} CLI on PATH; nothing was written")
@@ -935,6 +989,15 @@ def _setup_locked(override: Path, target: Path) -> int:
         return _refuse_setup(
             SETUP_INCOMPATIBLE, f"{pinned} fails the compatibility check ({failure}); nothing was written"
         )
+    # A no-op only when the stored text, after `~` expansion and nothing else, is the new path: a spelling
+    # that reaches it through a `..` segment may name a directory that is gone, so it is replaced.
+    if replace and replaced is not None and os.path.expanduser(replaced) == pinned:
+        print(f"{CONFIG_KEY} in {target} already names {pinned}; nothing was changed")
+        return 0
+    if replace and replaced is not None:
+        lead = f"{CONFIG_KEY} replaced in {target}: {replaced} -> {pinned}"
+    else:
+        lead = f"{CONFIG_KEY} set to {pinned} in {target}"
     config[CONFIG_KEY] = pinned
     try:
         kept, edited, left = _commit(target, json.dumps(config, indent=2) + "\n", before)
@@ -953,16 +1016,16 @@ def _setup_locked(override: Path, target: Path) -> int:
         )
     if left:
         print(
-            f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced was left at {kept} "
+            f"{lead}; the version it replaced was left at {kept} "
             f"(it could not be given a {target.name}{PREVIOUS_SUFFIX}.* name): remove it before the next setup run"
         )
     elif kept is not None:
         print(
-            f"{CONFIG_KEY} set to {pinned} in {target}; the version it replaced is kept at {kept}; "
+            f"{lead}; the version it replaced is kept at {kept}; "
             "remove it once no editor has it open"
         )
     else:
-        print(f"{CONFIG_KEY} set to {pinned} in {target}")
+        print(lead)
     return 0
 
 
@@ -970,12 +1033,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=None)
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("setup", help="pin the ledger CLI's absolute path in the topic config override")
+    setup_parser = commands.add_parser(
+        "setup", help="pin the ledger CLI's absolute path in the topic config override"
+    )
+    setup_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="also replace an existing pin that is an absolute path and still runs; "
+        "`none` and a bare name are refused",
+    )
     args = parser.parse_args(argv)
     if args.command == "setup":
         if args.config is not None:
             parser.error("setup takes no --config: it writes ~/.claude/skill-config/topic.json")
-        return setup()
+        return setup(replace=args.replace)
     try:
         decision = decide(args.config)
     except Exception as exc:  # the contract: report, never raise
