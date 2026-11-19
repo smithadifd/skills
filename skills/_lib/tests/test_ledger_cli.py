@@ -500,6 +500,7 @@ SETUP_TOKENS = (
     "ledger_cli_setup_write_failed",
     "ledger_cli_setup_lock_failed",
     "ledger_cli_setup_plugin_command",
+    "ledger_cli_setup_replace_not_path",
 )
 
 
@@ -769,6 +770,7 @@ def test_setup_leaves_an_existing_setting_alone(machine, tmp_path, value):
     line = _refusal(proc, "ledger_cli_setup_exists")
     shown = {"LIVE": str(live), "true": "true", "[1]": "[1]", '{"a": 1}': '{"a": 1}'}.get(value, value.strip())
     assert f"already set to {shown};" in line, line
+    assert "--replace" in line, line
     assert path.read_bytes() == before, "the file is byte-identical"
     assert machine.calls() == [], "a refusal on an existing setting runs no program"
     _no_temp_files(machine.home_dir)
@@ -792,6 +794,231 @@ def test_setup_replaces_a_dead_absolute_path_only(machine, tmp_path):
     assert len(kept) == 2 and first_kept in kept and first_kept.read_bytes() == first_bytes
     assert [p for p in kept if p != first_kept and json.loads(p.read_text(encoding="utf-8")) == {"ledger_cli": "~/.claude/gone/ledger"}]
     assert _override_file(machine.home_dir).read_text(encoding="utf-8").count(str(machine.ledger)) == 1
+
+
+# --- Setup --replace: a live absolute pin is replaced; every other setting is refused ------
+
+
+def _old_install(machine, tmp_path, name="wrapped"):
+    """A second ledger that still runs: the install a machine moved off."""
+    old = tmp_path / name / "ledger"
+    old.parent.mkdir(parents=True)
+    shutil.copy(machine.ledger, old)
+    old.chmod(0o755)
+    return old
+
+
+def _plugin_cache_bin(machine, version="1.0.0"):
+    return _cache_bin(
+        machine.home_dir, ".claude", "plugins", "cache", "skills", "ledger-hooks", version, "bin"
+    )
+
+
+def test_setup_replace_swaps_a_live_absolute_pin_after_the_check_and_prints_old_and_new(machine, tmp_path):
+    old = _old_install(machine, tmp_path)
+    path = _put_override(
+        machine.home_dir,
+        json.dumps({"topics_dir": "/somewhere", "ledger_cli": str(old), "extra": [1, {"a": "b"}]}),
+    )
+    path.chmod(0o600)
+    proc = machine.run("setup", "--replace")
+    assert proc.returncode == 0 and proc.stderr == ""
+    kept = _previous(machine.home_dir)
+    assert proc.stdout.splitlines() == [
+        f"ledger_cli replaced in {path}: {old} -> {machine.ledger}; the version it replaced is kept at {kept}; "
+        "remove it once no editor has it open"
+    ]
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == {"topics_dir": "/somewhere", "ledger_cli": str(machine.ledger), "extra": [1, {"a": "b"}]}
+    assert list(written) == ["topics_dir", "ledger_cli", "extra"], "the key order is kept"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert machine.calls() == [["append-many", "--help"]], "the one run is the new ledger's compatibility check"
+    assert json.loads(kept.read_text(encoding="utf-8"))["ledger_cli"] == str(old)
+    _no_temp_files(machine.home_dir)
+    out = _out(machine.run())
+    assert (out["ledger_cli"], out["rule"]) == (str(machine.ledger), EXPLICIT)
+
+
+@pytest.mark.parametrize("kind", ["tilde-live", "dead"])
+def test_setup_replace_also_replaces_a_tilde_pin_that_runs_and_a_dead_pin(machine, tmp_path, kind):
+    if kind == "tilde-live":
+        live = machine.home_dir / ".claude" / "bin" / "ledger"
+        live.parent.mkdir(parents=True)
+        shutil.copy(machine.ledger, live)
+        live.chmod(0o755)
+        old = "~/.claude/bin/ledger"
+    else:
+        old = str(tmp_path / "gone" / "ledger")
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": old, "keep": 1}))
+    proc = machine.run("setup", "--replace")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith(f"ledger_cli replaced in {path}: {old} -> {machine.ledger}")
+    assert json.loads(path.read_text(encoding="utf-8")) == {"ledger_cli": str(machine.ledger), "keep": 1}
+
+
+@pytest.mark.parametrize(
+    "before",
+    [None, {}, {"ledger_cli": None, "z": 1}, {"ledger_cli": "  ", "z": 1}],
+    ids=["no-file", "empty-object", "null", "blank"],
+)
+def test_setup_replace_with_no_pin_to_replace_pins_exactly_as_plain_setup_does(machine, before):
+    if before is not None:
+        _put_override(machine.home_dir, json.dumps(before))
+    proc = machine.run("setup", "--replace")
+    assert proc.returncode == 0 and proc.stderr == ""
+    path = _override_file(machine.home_dir)
+    assert proc.stdout.startswith(f"ledger_cli set to {machine.ledger} in {path}")
+    assert json.loads(path.read_text(encoding="utf-8"))["ledger_cli"] == str(machine.ledger)
+
+
+def test_plain_setup_still_refuses_a_live_absolute_pin_and_names_replace(machine, tmp_path):
+    old = _old_install(machine, tmp_path)
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(old), "keep": 1}))
+    before = path.read_bytes()
+    line = _refusal(machine.run("setup"), "ledger_cli_setup_exists")
+    assert f"already set to {old};" in line
+    assert "setup --replace" in line, line
+    assert path.read_bytes() == before
+    assert machine.calls() == []
+    _no_temp_files(machine.home_dir)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["none", "NONE", " None ", "ledger", "./ledger", "5", "true", "false", "[1]", '{"a": 1}', "0"],
+)
+def test_setup_replace_refuses_none_a_bare_name_and_a_non_string_by_name(machine, value):
+    if value in ("5", "true", "false", "[1]", '{"a": 1}', "0"):
+        raw = f'{{"ledger_cli": {value}, "keep": 1}}'
+    else:
+        raw = json.dumps({"ledger_cli": value, "keep": 1})
+    path = _put_override(machine.home_dir, raw)
+    before = path.read_bytes()
+    line = _refusal(machine.run("setup", "--replace"), "ledger_cli_setup_replace_not_path")
+    shown = {"true": "true", "false": "false", "[1]": "[1]", '{"a": 1}': '{"a": 1}'}.get(value, value.strip())
+    assert f"ledger_cli in {path} is {shown}, which is not an absolute path" in line, line
+    assert path.read_bytes() == before, "the file is byte-identical"
+    assert machine.calls() == [], "a refusal on a deliberate setting runs no program"
+    _no_temp_files(machine.home_dir)
+
+
+@pytest.mark.parametrize("mode", ["exit2", "noflag", "nonutf8"])
+def test_setup_replace_with_an_incompatible_ledger_leaves_the_live_pin_and_the_file_alone(tmp_path, mode):
+    machine = Machine(tmp_path, mode)
+    old = _old_install(machine, tmp_path)
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(old), "keep": 1}))
+    before = path.read_bytes()
+    line = _refusal(machine.run("setup", "--replace"), "ledger_cli_setup_incompatible")
+    assert str(machine.ledger) in line and "append-many --help exited" in line
+    assert path.read_bytes() == before
+    assert machine.calls() == [["append-many", "--help"]], "the new ledger was checked, the old one never run"
+    _no_temp_files(machine.home_dir)
+
+
+def test_setup_replace_with_no_ledger_on_path_leaves_the_live_pin_alone(machine, tmp_path):
+    old = _old_install(machine, tmp_path)
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(old), "keep": 1}))
+    before = path.read_bytes()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _refusal(machine.run("setup", "--replace", PATH=str(empty)), "ledger_cli_setup_not_found")
+    assert path.read_bytes() == before
+    assert machine.calls() == []
+
+
+def test_setup_replace_refuses_a_ledger_in_the_plugin_cache_and_leaves_a_live_pin_alone(tmp_path):
+    machine = Machine(tmp_path)
+    old = _old_install(machine, tmp_path)
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(old), "keep": 1}))
+    before = path.read_bytes()
+    cache_bin = _plugin_cache_bin(machine)
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", "--replace", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    line = _refusal(proc, "ledger_cli_setup_plugin_command")
+    assert "needs no pin" in line
+    assert path.read_bytes() == before
+    assert machine.calls() == [], "the plugin-cache refusal runs no compatibility check"
+    _no_temp_files(machine.home_dir)
+
+
+def test_setup_replace_never_clears_a_live_pin_that_is_itself_in_the_plugin_cache(tmp_path):
+    # The stale-pin recovery is for a moved pin only: a cache pin that still runs is a live setting.
+    machine = Machine(tmp_path)
+    live = _copy_ledger(machine.ledger, _plugin_cache_bin(machine, "0.9.0"))
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(live), "keep": 1}))
+    before = path.read_bytes()
+    cache_bin = _plugin_cache_bin(machine)
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", "--replace", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    _refusal(proc, "ledger_cli_setup_plugin_command")
+    assert path.read_bytes() == before
+    assert machine.calls() == []
+
+
+def test_setup_replace_keeps_the_stale_plugin_pin_recovery(tmp_path):
+    machine = Machine(tmp_path)
+    dead = machine.home_dir / ".claude" / "plugins" / "cache" / "skills" / "ledger-hooks" / "0.0.1" / "bin" / "ledger"
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(dead), "keep": 1}))
+    cache_bin = _plugin_cache_bin(machine)
+    _copy_ledger(machine.ledger, cache_bin)
+    proc = machine.run("setup", "--replace", PATH=f"{cache_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith(f"stale plugin pin cleared from {path}; the plugin route needs no pin")
+    assert json.loads(path.read_text(encoding="utf-8")) == {"keep": 1}
+    assert machine.calls() == []
+
+
+def test_setup_replace_with_the_pin_already_naming_the_new_ledger_changes_nothing(machine):
+    _pin(machine)
+    path = _override_file(machine.home_dir)
+    before = path.read_bytes()
+    proc = machine.run("setup", "--replace")
+    assert proc.returncode == 0 and proc.stderr == ""
+    assert proc.stdout.splitlines() == [f"ledger_cli in {path} already names {machine.ledger}; nothing was changed"]
+    assert path.read_bytes() == before
+    assert _kept(machine.home_dir) == [], "nothing was displaced"
+    assert machine.calls() == [["append-many", "--help"]] * 2, "the new ledger is still checked first"
+
+
+def test_setup_replace_that_meets_a_concurrent_edit_leaves_the_editors_file(machine, tmp_path, monkeypatch, capsys):
+    module = _load()
+    machine.use(monkeypatch)
+    old = _old_install(machine, tmp_path)
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(old), "keep": 1}))
+    editor = json.dumps({"ledger_cli": str(old), "keep": 1, "saved_by": "editor"}).encode("utf-8")
+    _edit_during_probe(module, monkeypatch, path, editor)
+    result = module.setup(replace=True)
+    captured = capsys.readouterr()
+    assert result == 1, captured.err
+    assert captured.out == "" and captured.err.startswith("ledger_cli_setup_config_changed: ")
+    assert path.read_bytes() == editor, "the editor's file is the one at the path"
+    _no_temp_files(machine.home_dir)
+
+
+def test_setup_replace_that_cannot_take_the_lock_runs_no_program(machine, tmp_path, monkeypatch, capsys):
+    module = _load()
+    machine.use(monkeypatch)
+    old = _old_install(machine, tmp_path)
+    path = _put_override(machine.home_dir, json.dumps({"ledger_cli": str(old)}))
+    before = path.read_bytes()
+
+    def refuse_to_lock(descriptor, operation):
+        raise OSError(35, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(module.fcntl, "flock", refuse_to_lock)
+    assert module.setup(replace=True) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.startswith("ledger_cli_setup_lock_failed: ")
+    assert path.read_bytes() == before
+    assert machine.calls() == []
+
+
+def test_replace_is_an_option_of_setup_only(machine, tmp_path):
+    proc = machine.run("--replace")
+    assert proc.returncode == 2 and "--replace" in proc.stderr
+    proc = machine.run("--config", str(tmp_path / "x.json"), "setup", "--replace")
+    assert proc.returncode == 2 and "setup takes no --config" in proc.stderr
+    assert not (machine.home_dir / ".claude").exists()
 
 
 def test_a_second_setup_after_success_refuses_and_changes_nothing(machine):
@@ -1015,6 +1242,7 @@ def test_every_setup_refusal_token_is_a_distinct_fixed_name():
         module.SETUP_WRITE_FAILED,
         module.SETUP_LOCK_FAILED,
         module.SETUP_PLUGIN_COMMAND,
+        module.SETUP_REPLACE_NOT_PATH,
     ) == SETUP_TOKENS
     assert module.MOVED_TOKEN == "ledger_cli_moved:"
 
