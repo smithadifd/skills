@@ -410,7 +410,12 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `item_unreadable` | an answer of `query`, `spec show` or `links` for a ledger-item source, or of the `spec show` that confirms a recorded ticket's spec (6.6), is not the shape 6.5 reads (a version that is not a whole number of at least 1, a content hash that is not a SHA-256 hex digest, a body or acceptance that is not text, a row with no title or status, a link with no relation or end) | never answered from an earlier read |
 | `spec_set_failed` | on the ledger store, the `spec set` that records a tracker or JSON-file ticket (6.6) was refused, could not run, gave no envelope or a lost answer, or answered what cannot be read; the card was not read and nothing else was written | the message names the command (its source, with the title, body and criteria as placeholders) and what the CLI said, with its stderr; never retried, and the content is never altered to fit |
 | `spec_diff_failed` | spec version N was recorded (6.6), but its `spec diff` from N-1 was refused or answered what cannot be read; the card was not read | the message names the diff command to run; the next open records nothing and prints no diff |
-| `source_store_mismatch` | a ledger-item source was opened with a store that is not the ledger store of the same item through the same CLI; nothing was read or written | raised by `open` before `source.pull` |
+| `source_store_mismatch` | a ledger-item source was opened with a store that is not the ledger store of the same item through the same CLI, or an ad-hoc ask was opened with the store of another item (6.7); nothing was read or written | raised by `open` before `source.pull` |
+| `ask_empty` | the ad-hoc ask is not text or is blank (6.7); nothing was read or written | raised when the source is built, before any store call |
+| `ask_not_utf8` | the ad-hoc ask's text cannot be encoded as UTF-8, so it has no identity (6.7) | raised when the source is built |
+| `ask_draft_invalid` | the draft of an ad-hoc ask has no one-line title, no body, no criterion, or a criterion that is not one line of text (6.7); nothing was read or written | raised when the source is built |
+| `ask_item_not_ticket` | the item an ad-hoc ask lands on exists and is not a ticket (6.7); nothing was written | raised by the spec record, before it writes anything |
+| `url_link_conflict` | the item already has a `url` link to another address than the ticket's, and none to the ticket's (6.7); nothing was written | raised by the spec record, before the item, the link or the spec is written |
 | `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
@@ -1054,6 +1059,52 @@ set` makes it in 6.5. That open is then refused `held` and prints no diff; `ledg
 
 **Versions.** The tests' fake ledger answers `spec set` and `spec diff` as ledger 0.1.22 does. Ledger
 0.2.0 adds `--expect-revision` to `spec set`; the intake does not send it.
+
+### 6.7 Intake adapters: an ad-hoc ask, and the tracker's address as a link
+
+**The invariant.** Every source leaves exactly one ticket item with a current spec that has acceptance
+criteria, its links, and one claim held for this pass (the lease, 5.1). An ad-hoc ask with the same text
+always lands on the same item, and a ticket with a `url` carries exactly one `url` link to that address.
+(The one-item skill design, section 4.) A ledger id and a JSON-file ticket behave as before, apart from
+the link a ticket with a `url` now gets.
+
+**Observable inputs.** The ask's text, hashed with SHA-256 (the first 12 hex digits); the ticket's key and
+`url` as its source pulled them; and the ledger's `query`, `links` and `export-item` for the item, at the
+revision the write is checked against. Never the environment, and never an item id the caller names for an
+ask.
+
+**The grammar.**
+
+| Input | What the open does |
+|---|---|
+| `AskTicketSource(ask, title=, description=, acceptance=)` | the item is `ask-<12 hex>`, the spec's source is `ask:<12 hex>` and nothing else; the pass is the ledger store's or the markdown store's, as for any non-ledger ticket (6.6) |
+| the same ask text again | the same key and source, so the same item: its creation replays, and an unchanged draft writes no spec version |
+| the same ask with a redrafted body or criteria | the next spec version, printed as a diff (6.6); a changed criterion sends a stored plan back to `plan` (4.2), so a draft binds only through a plan go recorded against it |
+| an empty or blank ask; an ask that cannot be encoded | `ask_empty`; `ask_not_utf8` |
+| a draft with no one-line title, no body, no criterion, or a criterion of more than one line | `ask_draft_invalid` |
+| the item `ask-<12 hex>` exists and is not a ticket | `ask_item_not_ticket`, before anything is written |
+| a store of another item than the ask's | `source_store_mismatch`, before the source is pulled |
+| a ticket with a `url`, ledger store, no item | one `append-many K --expect-revision none` with the creation and one `item.linked {rel: url, target: <url>}` keyed `ticket-link/K/url/<16 hex of the url's SHA-256>` |
+| the same, the item exists with no `url` link | `links K`, then one `append-many K --expect-revision <the row's revision>` with the link |
+| the same, the item has a `url` link to that address | `links K`; nothing is written |
+| the same, the item has a `url` link to another address and none to that one | `url_link_conflict`; nothing is written, not the creation, the link or the spec |
+| a ticket with no `url`, and a ledger-item source | no `links` call, no link |
+
+The plan card of an ask's ticket marks the criteria `Drafted from the ad-hoc ask <source>`; the stored plan
+snapshot is unchanged, and a resumed pass marks the card again from the ticket it pulled. The marker is
+not part of the plan's identity: only the criteria are.
+
+**Failure path.** The creation and the link are one batch, so a stop leaves both or neither; the spec set
+that follows is as in 6.6. A stop after the batch leaves an item with its link and no spec; the rerun
+finds the item and the link, writes neither, and records the spec. A link write whose answer was lost is
+looked up by its key, as any batch is (6.2.4); a rerun replays it.
+
+**Concurrent writers.** The link is checked and written against one revision: the row's `revision` that
+`query` gave before `links` was read. A writer that lands between the read and the write moves the
+revision, and the write is `stale` and writes nothing; the next open reads the links again. Two opens of
+the same ask race on the creation under `--expect-revision none`, which one wins and the other replays or
+is `stale`, and then on the lease as any two opens do (5.1). A person's `ledger link` that lands first is
+read as an existing link: the same address needs no write, another address is `url_link_conflict`.
 
 ## 7. Non-goals
 

@@ -245,6 +245,9 @@ class Ticket:
     spec: SpecVersion | None = None
     # The ticket's own address on its tracker, when the source gives one; the recorded spec's source names it (design 6.6).
     url: str | None = None
+    # ``ask:<12 hex>`` when the ticket was drafted from an ad-hoc ask, else None: the recorded spec's whole source, and
+    # the mark the plan card shows on criteria that bind only through the plan go (one-item skill design, section 4).
+    ask_source: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "Ticket":
@@ -307,6 +310,95 @@ class FileTicketSource:
         return ticket
 
 
+# --- The ad-hoc ask source (one-item skill design, section 4) ----------------
+
+
+def _ask_digest(ask: Any) -> str:
+    """The first 12 hex digits of the SHA-256 of the ask's text, exactly as given (no trimming, no case folding).
+
+    An ask that is not text, or is blank, is refused ``ask_empty``; one that cannot be encoded as UTF-8 is refused
+    ``ask_not_utf8``. Nothing has been read or written at that point.
+    """
+
+    if type(ask) is not str or not ask.strip():
+        raise StoreUnavailable(
+            "the ad-hoc ask is empty, so there is no ticket to take it for. Nothing was read or written; "
+            "give the ask as text.",
+            code="ask_empty",
+        )
+    try:
+        return hashlib.sha256(ask.encode("utf-8")).hexdigest()[:12]
+    except UnicodeEncodeError as exc:
+        raise StoreUnavailable(
+            "the ad-hoc ask is not text that encodes as UTF-8, so it has no identity. Nothing was read or written.",
+            code="ask_not_utf8",
+        ) from exc
+
+
+def ask_spec_source(ask: str) -> str:
+    """The spec source of an ad-hoc ask: ``ask:`` and 12 lowercase hex digits taken from the ask's text alone."""
+
+    return f"ask:{_ask_digest(ask)}"
+
+
+def ask_key(ask: str) -> str:
+    """The id of the item an ad-hoc ask lands on: ``ask-`` and the same 12 hex digits, so a retry finds the same item.
+
+    It comes from the ask's text and from nothing else, never from the environment or from an id the caller names.
+    """
+
+    return f"ask-{_ask_digest(ask)}"
+
+
+class AskTicketSource:
+    """A ticket drafted from an ad-hoc ask: the person's own words, with a title, body and acceptance criteria written
+    for them. The same ask text always names the same item (``key``) and the same spec source (``ask_source``).
+
+    The criteria are a draft. They reach the plan card marked as drafted from the ask, and bind only through the plan
+    go, which is recorded against the plan's criteria as for any ticket. A draft with no usable title, body or
+    criterion, or a criterion that runs over more than one line (the acceptance grammar is one ``- `` bullet per
+    line), is refused ``ask_draft_invalid`` before anything is read or written. Pulling it by another key is refused,
+    so the item id is never the caller's to name.
+    """
+
+    def __init__(self, ask: str, *, title: str, description: str, acceptance: Sequence[str]):
+        self.ask_source = ask_spec_source(ask)
+        self.key = ask_key(ask)
+        self._ticket = self._draft(title, description, acceptance)
+
+    def _draft(self, title: Any, description: Any, acceptance: Any) -> Ticket:
+        def invalid(why: str) -> StoreUnavailable:
+            return StoreUnavailable(
+                f"the draft of ad-hoc ask {self.ask_source} cannot be a ticket: {why}. Nothing was read or "
+                "written; draft it again.",
+                code="ask_draft_invalid",
+            )
+
+        if not _is_text(title) or "\n" in title or "\r" in title:
+            raise invalid("its title is not one line of text")
+        if not _is_text(description):
+            raise invalid("its body is not text")
+        if type(acceptance) not in (list, tuple) or not acceptance:
+            raise invalid("it has no acceptance criteria")
+        for index, text in enumerate(acceptance, 1):
+            if not _is_text(text):
+                raise invalid(f"acceptance criterion {index} is not text")
+            if "\n" in text or "\r" in text:
+                raise invalid(f"acceptance criterion {index} runs over more than one line")
+        drafted = Ticket.from_mapping(
+            {
+                "key": self.key, "title": title, "status": "open", "description": description,
+                "acceptance_criteria": list(acceptance),
+            }
+        )
+        return dataclasses.replace(drafted, ask_source=self.ask_source)
+
+    def pull(self, key: str) -> Ticket:
+        if key != self.key:
+            raise TicketError(f"the ad-hoc ask {self.ask_source} is item {self.key}, not {key!r}")
+        return self._ticket
+
+
 # --- The plan card -----------------------------------------------------------
 
 
@@ -363,6 +455,8 @@ class PlanCard:
         # None until the plan is stored: an unsynchronized plan renders as its author set it.
         self.reached: frozenset[str] | None = None
         self.claim: Mapping[str, Any] | None = None
+        # The ask the criteria were drafted from, when the ticket is an ad-hoc ask: ``render`` marks them as a draft.
+        self.ask_source = ticket.ask_source
 
     @property
     def acceptance_criteria(self) -> tuple[str, ...]:
@@ -436,6 +530,7 @@ class PlanCard:
         # A stored plan: nothing is proven until the pass sets the steps its card's events reach.
         plan.reached = frozenset()
         plan.claim = None
+        plan.ask_source = None
         return plan
 
     def rendered_status(self, step: PlanStep) -> str:
@@ -454,6 +549,10 @@ class PlanCard:
         if self.claim is not None:
             lines.extend((f"Claim: {claim_line(self.claim)}", ""))
         lines.append("## Acceptance criteria")
+        if self.ask_source is not None:
+            lines.append(
+                f"Drafted from the ad-hoc ask {self.ask_source}: these criteria are a draft and bind only once the plan go approves them."
+            )
         for index, text in enumerate(self._criteria):
             passes = passing is not None and index in passing["passed"]
             line = f"- [{'x' if passes else ' '}] passes: {str(passes).lower()} - {text}"
@@ -1929,9 +2028,12 @@ def intake_source(ticket: Ticket) -> str:
 
     It is built from the key and the url alone, which the source refuses with
     whitespace in them, so the same ticket gives the same bytes on every open
-    and an unchanged ticket never writes a version for its source.
+    and an unchanged ticket never writes a version for its source. A ticket
+    drafted from an ad-hoc ask has the ask's source alone, ``ask:<12 hex>``.
     """
 
+    if ticket.ask_source is not None:
+        return ticket.ask_source
     return f"ticket:{ticket.key}" + (f" {ticket.url}" if ticket.url is not None else "")
 
 
@@ -2369,11 +2471,12 @@ class LedgerStore:
             self._card, self._item, self._row, self._live, self._read_token = card, item, row, live, token
             return copy.deepcopy(card), token
 
-    def _ticket_row(self) -> Mapping[str, Any] | None:
+    def _ticket_row(self, ask: str | None = None) -> Mapping[str, Any] | None:
         """The item's ``query --item`` row, or None when the ledger holds no such item.
 
         An item of another type is refused ``ledger_refused`` before anything
-        is written to it.
+        is written to it; for the item of an ad-hoc ask (``ask`` is its
+        source), ``ask_item_not_ticket``.
         """
 
         answer = self._run("query", "--item", self.key)
@@ -2382,12 +2485,62 @@ class LedgerStore:
         row = next(row for row in self._data(answer, "read")["items"] if row["item_id"] == self.key)
         if row.get("type") != "ticket":
             found = repr(row["type"]) if "type" in row else "none"
+            if ask is not None:
+                raise StoreUnavailable(
+                    f"ledger item {self.key} is where ad-hoc ask {ask} lands, but it is not a ticket (its type is "
+                    f"{found}), so the pass will not claim or write to it. Nothing was written; a person resolves "
+                    "the key.",
+                    code="ask_item_not_ticket",
+                )
             raise StoreUnavailable(
                 f"ledger item {self.key} is not a ticket (its type is {found}), so the pass will not claim or "
                 "write to it. Nothing was written; a person resolves the key.",
                 code="ledger_refused",
             )
         return row
+
+    def _url_link_targets(self) -> list[str]:
+        """The targets of the item's outgoing ``url`` links, read now (``links``); none when no link names the item."""
+
+        answer = self._run("links", self.key)
+        if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+            return []
+        data = self._data(answer, "read the links of")
+        outgoing = data.get("outgoing") if type(data) is dict else None
+        if type(outgoing) is not list:
+            raise _item_unreadable(self.key, "links", "it does not list outgoing links")
+        targets = []
+        for row in outgoing:
+            if type(row) is not dict or not _is_text(row.get("rel")) or not _is_text(row.get("target")):
+                raise _item_unreadable(self.key, "links", "an outgoing link does not name its relation and target")
+            if row["rel"] == "url":
+                targets.append(row["target"])
+        return targets
+
+    def _url_link_missing(self, url: str) -> bool:
+        """Whether the item still needs its ``url`` link to ``url``: True when it has no ``url`` link, False when it has one to ``url``.
+
+        A ``url`` link to another address, and none to ``url``, is ``url_link_conflict`` and writes nothing: the
+        tracker's address is never added beside another, and never replaces one.
+        """
+
+        targets = self._url_link_targets()
+        if url in targets:
+            return False
+        if targets:
+            raise StoreUnavailable(
+                f"ledger item {self.key} already has a url link to {targets[0]}, not to the tracker address {url}, "
+                "so the pass does not add a second one. Nothing was written. A person decides which address the "
+                "item keeps, then opens the ticket again.",
+                code="url_link_conflict",
+            )
+        return True
+
+    def _url_link(self, url: str) -> dict[str, Any]:
+        """The ``url`` link of the item to ``url``, keyed by the address so a rerun replays it and writes nothing."""
+
+        digest = hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return self._element("item.linked", {"rel": "url", "target": url}, f"ticket-link/{self.key}/url/{digest}")
 
     def record_spec(self, ticket: Ticket) -> tuple[SpecVersion, tuple[str, ...]]:
         """Record the pulled ``ticket`` as the item's spec; return the spec it left current and the lines the open prints (design 6.6).
@@ -2401,7 +2554,14 @@ class LedgerStore:
         nothing here writes a status or a claim. An item that does not exist
         yet is created first with the claim's own ``item.created`` event and
         key, under ``--expect-revision none``; an item of another type is
-        refused before anything is written. A ``spec set`` that fails or
+        refused before anything is written. A ticket with a ``url`` also gets
+        one ``url`` link to it on the item, in that same write (under the
+        revision of the row read, so a writer racing it is ``stale``), unless
+        the item already links that address; a ``url`` link to another address
+        is ``url_link_conflict``, refused before anything is written. A
+        ticket drafted from an ad-hoc ask records the ask's source
+        (``intake_source``) and refuses an item that is not a ticket as
+        ``ask_item_not_ticket``. A ``spec set`` that fails or
         answers what cannot be read is ``spec_set_failed``, a ``spec diff``
         that does is ``spec_diff_failed``; neither is retried. The spec it
         returns is the version and content hash ``spec set`` reported, a new
@@ -2410,8 +2570,12 @@ class LedgerStore:
         """
 
         with self._threads:
-            if self._ticket_row() is None:
-                self._send([self._created()], NO_TOKEN)
+            row = self._ticket_row(ticket.ask_source)
+            batch = [self._created()] if row is None else []
+            if ticket.url is not None and (row is None or self._url_link_missing(ticket.url)):
+                batch.append(self._url_link(ticket.url))
+            if batch:
+                self._send(batch, NO_TOKEN if row is None else str(row["revision"]))
             recorded, written = self._spec_set(ticket)
             if not written or recorded.version == 1:
                 return recorded, ()
@@ -3120,8 +3284,19 @@ def ledger_item_source(key: str) -> LedgerItemSource | None:
 
 
 def _check_item_store(key: str, source: Any, store: Any) -> None:
-    """A ledger item's card lives on that same item: refuse any other store before anything is read (design 6.5)."""
+    """A ledger item's card lives on that same item: refuse any other store before anything is read (design 6.5).
 
+    An ad-hoc ask has one item, the one its text names, so the store must be that item's too.
+    """
+
+    if isinstance(source, AskTicketSource):
+        if store.key != key:
+            raise StoreUnavailable(
+                f"ad-hoc ask {source.ask_source} is item {source.key}, but this open was given the store of item "
+                f"{store.key}. Nothing was read or written; open it with the store choose_store gives for {source.key}.",
+                code="source_store_mismatch",
+            )
+        return
     if not isinstance(source, LedgerItemSource):
         return
     if isinstance(store, LedgerStore) and store.key == key and store.cli == source.cli:
@@ -3267,6 +3442,7 @@ class TicketPass:
         )
         if session._identity is not None:
             session._plan = PlanCard.from_snapshot(card["plan"])
+            session._plan.ask_source = ticket.ask_source
             session._plan.review = _passing_final(card, session._identity) if state in ("outward_go", "closed") else None
             session._sync_steps()
         if state in ("stopped", "closed"):

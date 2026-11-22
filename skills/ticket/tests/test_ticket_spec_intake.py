@@ -189,7 +189,8 @@ def test_a_ledger_item_source_records_no_spec_of_its_own(repo, fake):
 def test_an_item_a_person_filed_is_not_created_again(repo, fake, path):
     fake.new_item()
     session = open_ticket(repo, write_ticket(path))
-    assert [[element["kind"] for element in call.batch] for call in fake.appends()] == [["item.state", "item.note"]]
+    # The item exists, so it is not created again: its url link, then the claim.
+    assert [[element["kind"] for element in call.batch] for call in fake.appends()] == [["item.linked"], ["item.state", "item.note"]]
     assert versions(fake) == [1] and session.live is True
 
 
