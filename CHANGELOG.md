@@ -20,6 +20,10 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 
 ## Unreleased
 
+### The ticket skill names its build, review and outward seams
+
+`ticket.py` now names the three seams of a ticket pass and the default implementation of each: `ticket.SEAMS` maps `build` to `builder-core`, `review` to `reviewer` and `outward` to `push-and-open-draft`, and `ticket.seam_set(card, *names)` returns the set for a card (an unknown seam name raises `TicketError` naming it). A card carries no seam record yet and a default pass writes none, so card bytes, the card token, ledger events, refusal codes and the resume output are unchanged; SKILL.md section 5 gains one paragraph that names the seams. Three new tests pin concurrent stops against the close: a stop landed before the close is refused `stale` on both stores, and a stop that arrives while the close is being saved is refused `stale` and leaves the close whole. Each is shown red under a mutation of the store's token or lock check. No plugin or skill version changes.
+
 ### `setup --replace` moves a pin to a new install of the ledger
 
 `python3 ledger_cli.py setup --replace` replaces an existing `ledger_cli` that is an absolute path even when that path still runs, the case of a machine that moved from one install of the ledger to another (plain `setup` refuses it as `ledger_cli_setup_exists`, which now names `--replace`, and the manual workaround was to copy `topic.json` aside and clear the key). It resolves the new `ledger` and runs the compatibility check first, then replaces the value under the same lock, keeping every other key, and prints the old and the new path. A `ledger_cli` of `none` or a bare command name is a deliberate setting: `--replace` refuses it as `ledger_cli_setup_replace_not_path` and the file stays byte-identical, as it does for an incompatible `ledger`, one in Claude Code's plugin cache, or none on `PATH`. Plain `setup` is unchanged. The README's setup step and the `topic` skill describe it.

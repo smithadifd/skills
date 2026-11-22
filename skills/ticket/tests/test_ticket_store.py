@@ -19,8 +19,8 @@ import pytest
 import ticket
 from ledger_support import FakeLedger, build_ledger, machine
 from ticket_support import (
-    A, B, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, open_pass, read_card,
-    refusal, store,
+    A, B, KEY, TITLE, Source, bound_to_a_cleared_pass, build, card_bytes, card_path, go_outward, go_plan, open_pass,
+    passing, present, read_card, refusal, store,
 )
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -138,6 +138,49 @@ def test_G3_two_threads_on_one_store_handle_lose_no_write(repo):
         thread.join(timeout=30)
     assert errors == []
     assert sorted(item["what"] for item in read_card(repo)["tried"]) == ["thread 0", "thread 1"]
+
+
+def test_G32_a_stop_writer_arriving_during_the_close_save_is_refused_stale_and_the_close_stays_whole(repo):
+    src = Source()
+    armed, entered = threading.Event(), threading.Event()
+
+    class PausingSave(ticket.MarkdownStore):
+        def _save(self, card, directory):
+            if armed.is_set() and not entered.is_set():
+                entered.set()  # the close holds the lock and has loaded the card; its write has not landed
+                time.sleep(0.5)
+            super()._save(card, directory)
+
+    session = open_pass(repo, src, handle=PausingSave(repo, KEY, TITLE))
+    present(session)
+    go_plan(session)
+    session.begin_build()
+    passing(session)
+    go_outward(session)
+    other = open_pass(repo, src, pass_id=session.pass_id)  # joined before the close, holds the pre-close token
+    outcome = []
+
+    def stop():
+        entered.wait(timeout=30)
+        try:
+            other.more_info("person", "Which branch does this land on?")
+            outcome.append(None)
+        except Exception as exc:  # reported to the main thread
+            outcome.append(exc)
+
+    thread = threading.Thread(target=stop)
+    thread.start()
+    armed.set()
+    session.close("Ticket pass complete.", refs=("example/repo#14",))
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+    (error,) = outcome
+    assert isinstance(error, ticket.StoreUnavailable) and error.code == "stale"
+    card = read_card(repo)
+    assert card["status"] == "closed"
+    assert card["stamps"][-1]["close"] is True
+    assert card["stamps"][-1]["point"] == "Ticket pass complete."
+    assert [stamp for stamp in card["stamps"] if stamp["point"].startswith("waiting on")] == []
 
 
 def test_G4_markdown_store_refuses_a_lock_path_that_is_a_symlink(repo, tmp_path):

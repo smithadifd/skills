@@ -206,6 +206,7 @@ bind (design section 5).
 | F6 | `test_a_closed_ticket_never_reopens_on_a_later_resume` | S6; resumed twice, the second time with `pass_id` of the closing pass | `closed` both times; no claim either time; the join of an ended pass reports `closed`, not `held` | `open` with a `pass_id` runs `join` before `_derive` on a closed card (raises `held`/`pass_ended` instead of reporting `closed`) |
 | F7 | `test_close_validates_its_point_refs_and_next_skills` | S4[1] | `close("", ...)`, a 601-char point, 21 refs, a bad ref target, 13 next skills each raise `TicketError`; nothing written | `_validate_stamp` is not called by `close` |
 | F8 | `test_a_closed_card_takes_no_claim_on_the_ledger_and_the_markdown_store` | S6 on both stores | after resume the markdown `pass` is `None`; the ledger has no new `session.opened` | the ledger store appends the claim before `_derive` `(shared with H15)` |
+| F9 | `test_F9_a_stop_landed_by_another_handle_before_close_is_refused_stale_and_resumes_at_outward_go` | S4[1]; a second handle joined to the pass lands a stop (`more_info`: a `waiting on person` stamp, then the release) after the pass read and before `close` | `close` raises `StoreUnavailable` code `stale`; the card equals the outsider's, `status open`, the last stamp is the `waiting on person` stamp and not a close; a new open resumes at `outward_go` with the go intact, never `closed` | the token compare in `MarkdownStore.apply` never fires (`if current != token:` becomes `if False:`) |
 
 ## G. The markdown store
 
@@ -242,6 +243,7 @@ bind (design section 5).
 | G29 | `test_G29_an_open_that_fails_as_on_a_socket_is_refused_from_the_error_alone[ENOTSUP \| ENXIO \| EOPNOTSUPP \| ELOOP]` | a card with one record; `os.open` wrapped so that the card's descriptor-relative open removes the card and raises `OSError` with that errno (a no-follow open of a socket gives `EOPNOTSUPP` (102) on Darwin, where `ENOTSUP` (45) is a distinct value, and `ENXIO` on Linux; a vanished link gives `ELOOP`), so no second `stat` can see a node; `read` and `apply`, the card put back between them; no socket is bound | `card_not_regular` both ways, the refusal's cause carrying that errno; the card is gone and `.ticket/` holds only the lock; no temporary file | the open-failure map back to the second `stat` alone (any one errno removed from the map, or a non-regular node still there): the raw `OSError` escapes |
 | G30 | `test_G30_a_card_swapped_for_a_fifo_or_a_directory_at_the_open_is_refused_unread[fifo \| directory]` | a card with one record; `os.open` wrapped so that the card's descriptor-relative open finds a FIFO / a directory where the pre-open check saw the regular card (both open, where a socket does not); `read` and `apply`, the card put back between them | `card_not_regular` both ways; the FIFO or the directory is what stays at the card's path, the only `.md` there beside the lock; no temporary file | the post-open `fstat` check replaced with `pass` (the FIFO reads as empty and is `card_unreadable`; the directory raises `IsADirectoryError`) |
 | G31 | `test_G31_two_opens_on_one_handle_that_both_read_before_either_claims_get_handle_used` | fresh H whose `read` pauses: the first `open` on H after its read until the second has read, the second after its read until the first's `apply` has returned; both opens read the blank card (token `none`) before either claims (E11r's race with the second read moved ahead of the first claim) | the first claims; the second is refused `handle_used` naming the first's pass and the fresh-handle fix, never `held` (no `TicketHeld`, no release command in the message); the card holds exactly the first's pass; the first writes and ends | the token check moved back ahead of the used-handle check in `apply`: the second's claim is `stale`, and the lost-claim handler reports `held` naming the first's pass |
+| G32 | `test_G32_a_stop_writer_arriving_during_the_close_save_is_refused_stale_and_the_close_stays_whole` | a pass at S4[1] on a handle whose `_save` pauses once after the close has loaded the card under the lock; a second handle joined before the close, on a thread, lands a stop (`more_info`) while the close is paused | the stop is refused `stale` (it waits on the lock, then reads the closed card); the card is `closed`, the last stamp is the close, no `waiting on` stamp is on the card | delete the `flock` in `_locked`; and, separately, hoist the card load in `apply` above the lock |
 
 ## H. The ledger store (concurrent writers)
 
@@ -301,6 +303,7 @@ the exit status design 6.2.4 lists for it, unless the row pairs them otherwise.
 | H45 | `test_H45_a_foreign_write_in_the_bind_window_makes_begin_build_stale[outsider note before elect \| outsider note between elect and append \| this pass released between elect and append]`, `test_H45_an_unreadable_range_after_the_bind_leaves_begin_build_stale` | S1 live; `LEDGER_SESSION` set; matching utterance; the fake lands an outsider `item.note` just before `elect` / just before `append`, or this pass's own `session.closed` (`ticket-pass/K/P/released`) just before `append`; or the binder's `export-item` read of the range after the bind answers no envelope | both binder events land; the pass token does not advance, so `begin_build` is `stale` | the token advances when the tip is merely one of the binder's event ids (the range after the pre-bind token is not compared) / an unreadable range advances the token |
 | H46 | `test_H46_bind_takes_only_a_prompt_captured_after_the_claim_event[before the claim \| after the claim]`, `test_H46_bind_fails_closed_when_the_claim_cannot_be_read` | the pass opens at a fixed second; a person prompt with the go words and the same `recorded_at` second is captured before / after the claim event; or the binder's `export-item` read of the claim answers no envelope | before: `bound=False`, `no matching utterance`, no `elect` / `append`; after: `bound=True`; unreadable claim: `bound=False`, `pass claim not readable`, no `events` / `elect` | `find_utterance` drops the event-id comparison against the claim event (the before case binds) / an unreadable claim reads as id 0 (it binds) |
 | H47 | `test_H47_a_landed_election_with_no_envelope_leaves_begin_build_unblocked` | S1 live; matching utterance; the fake commits `elect` and answers nothing | `bound=False`, `elect refused: no envelope`; the one binder event is the landed election, keyed `ticket-bind/K/plan/1/<id>/elect`, which the binder finds by that key; no `append`; `begin_build` succeeds | skip the key lookup after an elect that named no event (`begin_build` is `stale`) |
+| H48 | `test_H48_an_outside_stop_before_close_is_refused_and_only_the_release_lands` | S4[1]; an outside `item.stopped` (phase `review`) lands after the pass read and before `close` | `append-many` answers `stale_revision`; `stale` naming the outsider's actor and session; only the release is appended: no `item.state`, no close `item.stopped`; a new open resumes at `outward_go` with the go intact and the outsider's stop as the last stamp | `_send` drops the `--expect-revision` argument |
 
 ## I. Validators
 
@@ -363,16 +366,30 @@ where `builder-core` gets one, under the repository's `.claude/worktrees`.
 | K8 | `test_K8_the_readable_card_shows_a_declined_outward_go_as_a_decline` | S3[1]; a decline | the card's Decisions section reads `plan go, plan revision 1` for the go and `declined outward go (no go), plan revision 1` for the no, each with the person's words | `_render_card` drops the decline label (the decline renders as its standing) |
 | K7 | `test_K7_skill_md_describes_the_declined_path_the_no_remote_path_and_the_worktree` | SKILL.md | section 6 calls `outward_route`, `record_outward_declined`, `close_local` and passes `worktree=`, quotes the not-bound line, says the worktree is named and kept with `git worktree remove <path>` printed, never `--force`, and that `.claude/worktrees/<name>` stays until the person runs it; the final message says kept local and gives the command and the folder that stays | that text dropped from SKILL.md |
 
+## L. The seams
+
+`test_ticket_seams.py`. A *seam* is one of three names, `build`, `review` and `outward`, each with the
+name of its default implementation: `builder-core`, `reviewer` and `push-and-open-draft` (TL4 one-item skill
+design, section 3). `ticket.SEAMS` holds the table and `ticket.seam_set(card, *names)` is the lookup. Absent
+means default: a card carries no seam record, a default pass writes none, and nothing else in the pass reads
+the table.
+
+| ID | Test name | Setup | Expected | Mutation |
+|---|---|---|---|---|
+| L1 | `test_L1_a_card_with_no_seam_record_resolves_to_the_three_defaults` | a blank card read through the markdown store | `seam_set(card)` is exactly `build: builder-core`, `review: reviewer`, `outward: push-and-open-draft`, in that order; with one name it returns only that seam; `SEAMS` holds the same three | the lookup returns another name for a seam |
+| L2 | `test_L2_a_default_pass_writes_no_seam_record_on_either_store` | S6 on the markdown store and on the fake ledger, the host, the clock and every random id held fixed | no stored byte or event names a seam; the card's sha256 and token and the ledger events' sha256 equal the values measured on the code before the seams were named | the default path writes a seam record: `_blank_card` gains a `seams` key / the `session.opened` payload gains one (two mutations) |
+| L3 | `test_L3_an_unknown_seam_name_is_refused_by_name[<name>]` (six names: empty, wrong case, trailing space, `outward_go`, `close`, `merge`) | `seam_set(card, "review", <name>)` | `TicketError` whose message is `unknown seam` and the quoted name; never a default for it | the `if name not in SEAMS` check removed (and, separately, with the lookup defaulting an unknown name to `build`) |
+
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
-- Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 8, G 31,
-  H 38, I 26, K 14. Total 253 rows. Eight carry no test with a mutation of their own in this release:
+- Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
+  H 39, I 26, K 14, L 3. Total 259 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 245 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 251 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports.
-- Mutations named: 1 per row; the `_source_differences` four and the `_has_go` criteria mutation are
+- Mutations named: 1 per row (G32 and L3 name two, L2 two sites of one); the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's
   `ended` half (E11j, E11k) and E11q's step-(a) drop (E11q, E11r).
