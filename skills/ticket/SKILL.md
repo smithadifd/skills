@@ -8,8 +8,9 @@ description: >
   an outward go before anything leaves the machine, then close, with a resume
   card that a later session continues from. Use when the person says "work
   this ticket", "take <key> through to a pull request", or "resume the
-  ticket". NOT for a change that has no ticket (use /tdd or /debug), and NOT
-  for a session resume note (use /handoff).
+  ticket", or asks for a change that has no ticket yet: the pass drafts one
+  from the ask. NOT for a throwaway question (answer it outside this skill),
+  and NOT for a session resume note (use /handoff).
 ---
 
 # Ticket
@@ -37,6 +38,9 @@ store = ticket.choose_store("<target-repo>", "<KEY>", "<title>")      # another 
 session = ticket.TicketPass.open("<KEY>", source, store, pass_id=P)   # the same pass, later
 ```
 
+Whatever the source, an open leaves one ticket item with a current spec that
+has acceptance criteria, its links, and one claim held for this pass.
+
 ## The ticket source
 
 `source.pull(key)` returns the current ticket: key, title, status,
@@ -62,6 +66,35 @@ ticket, `ticket.FileTicketSource(path)` implements the same call, and reads
 3. a ledger item with that id: `source = ticket.ledger_item_source("<KEY>")`.
    It returns `None` when the store rule below leaves the ledger off or the
    ledger holds no such item. Then the key names no ticket: say so and stop.
+
+A request for a change with no key and no ticket is a fourth source, an
+ad-hoc ask (below).
+
+### An ad-hoc ask as the ticket
+
+A change that has no ticket is an ad-hoc ask: the person's words, drafted
+into a ticket and run through the same phases and stops. A throwaway question,
+one that asks for no change, still belongs outside this skill.
+
+```python
+src = ticket.AskTicketSource("<the ask, exactly as given>", title="<one line>",
+                             description="<the body>", acceptance=["<one line per criterion>"])
+store = ticket.choose_store("<target-repo>", src.key, "<title>")
+session = ticket.TicketPass.open(src.key, src, store)
+```
+
+- The item is `ask-<12 hex>` and its spec's source is `ask:<12 hex>`: the first
+  12 hex digits of the SHA-256 of the ask's text as written, so the same ask
+  lands on the same item on every try. Never name the item yourself: the
+  source is pulled only under `src.key`, and another item's store is refused
+  `source_store_mismatch`.
+- Draft only what the ask says and what makes it testable. The plan card marks
+  the criteria `Drafted from the ad-hoc ask`; they bind only through the plan
+  go, and a later draft with other criteria sends the pass back to `plan`.
+- Refused by name, with nothing written: an empty ask (`ask_empty`, or
+  `ask_not_utf8`), a draft with no title, body or criterion, or a criterion
+  over more than one line (`ask_draft_invalid`), and an item with that id that
+  is not a ticket (`ask_item_not_ticket`). Design note 6.7 has the rest.
 
 ### A ledger item as the ticket
 
@@ -102,8 +135,8 @@ and a resume alike, records the ticket it pulled as the item's spec before it
 reads the card. It runs one `ledger spec set <KEY>` with the ticket's title as
 `--title`, its description as `--body` and its criteria as `--acceptance`, one
 `- ` bullet each in order, and `--source=ticket:<KEY> <url>` (`ticket:<KEY>`
-when the ticket has no `url`). The ledger writes a new version only when that
-content or the source changed.
+when the ticket has no `url`; `ask:<12 hex>` for an ad-hoc ask). The ledger
+writes a new version only when that content or the source changed.
 
 - An unchanged ticket writes nothing, and the open prints nothing more.
 - A first version prints nothing. A later version N adds the output of
@@ -113,9 +146,17 @@ content or the source changed.
 - The tracker's status, update time and links are not part of the spec. A
   status change alone writes no version, and nothing the open writes carries
   the tracker's status.
+- A ticket with a `url` also gets that address as a `url` link on the item
+  (`item.linked`, relation `url`), so a reader finds the ticket without parsing
+  the spec's source. The open reads the item's links first, then writes the
+  link in the item's creation write, or alone under the revision it read. An
+  item that already links the address gets no second link, and a `url` link to
+  another address is refused `url_link_conflict` before anything is written.
+  A ticket with no `url`, and a ledger item as the ticket, write none.
 - When the ledger has no item for the key, the open creates it first, with the
   same `item.created` event a claim sends. An item of another type is refused
-  `ledger_refused` before anything is written.
+  `ledger_refused` before anything is written (`ask_item_not_ticket` for an
+  ad-hoc ask's item).
 - A `spec set` that fails, or answers what cannot be read, stops the open as
   `spec_set_failed`. The refusal names the command and the ledger's answer and
   stderr. The card is not read, so the pass never plans from a ticket the
@@ -196,12 +237,13 @@ prints one JSON envelope, `{"ok": true, "data": ...}` or
   `acceptance`, where `no_spec` means the item has no spec. `links <item>` gives
   `data.outgoing` rows with `rel` and `target` and `data.incoming` rows with
   `rel` and `source`, where `empty` means no link names the item.
-- For a tracker or JSON-file ticket: `spec set <item> --title=<t> --body=<b>
+- For a tracker, JSON-file or ad-hoc ask ticket: `spec set <item> --title=<t> --body=<b>
   --acceptance=<a> --source=<s>` gives `data` with `item_id`, `version`,
   `unchanged` and `event` (whose `payload` holds that `version` and its
   `content_hash`), and writes a version only when the content or the source
   changed; `spec diff <item> <from> <to>` gives `data.fields` rows with `field`
-  and `diff` lines. Ledger 0.1.22 has both.
+  and `diff` lines. Ledger 0.1.22 has both. A ticket with a `url` also needs
+  `links <item>` (as above) and one `item.linked` event through `append-many`.
 - `usage` is an unknown command or flag. Codes such as `validation` and
   `integrity` are permanent refusals.
 
@@ -241,7 +283,8 @@ Never run the import against a repository you were not asked to work in.
 ## One live pass
 
 A ticket has at most one live pass. `open` claims the ticket with the pass's
-id, host and start time. Read `session.pass_id`, keep it in the conversation,
+id, host and start time, whatever the source; a second pass on the same ad-hoc
+ask is `held` like any other. Read `session.pass_id`, keep it in the conversation,
 and report it at every stop: each later step, in a new process, continues the
 same pass with `open(..., pass_id=<id>)`. Never take a pass id from the card or
 from a refusal to continue a pass you did not start. The last message of a
