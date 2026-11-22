@@ -395,7 +395,7 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
 | `handle_used` | the store handle is bound to a pass, or a pass it held has ended, and a binding event (`claim` or `join`) or an `open` reached it; nothing was written | a refusal (`StoreUnavailable`) raised by `apply` under the store's lock on a `claim` or `join` (the guard), ahead of the card read and the token check, so it wins over `stale` and over every card refusal, and by `open` before `source.pull` (the early report), for a new pass and for a join alike; the message names the used pass and the fix (open each pass with a fresh store handle); the lost-claim handler re-raises it unchanged. The rule it enforces is section 5's one handle per pass |
 | `lease_held` | on the ledger, another holder's live lease is on the item, or a claim that names no holder, so a new pass does not open and a resume does not continue (section 5.1); nothing was written | a lease whose expiry stamp the ledger cannot read counts as live; the lost-claim handler re-raises it unchanged |
-| `holder_invalid` | the lease holder `open` was given is not a name: empty, not text, over 200 characters, or holding whitespace or a control character; nothing was read or written | raised by `open` before anything else, and by the ledger store's `hold` |
+| `holder_invalid` | the lease holder `open` was given is not a name: empty, not text, over 200 characters, or holding whitespace or a control character; nothing was read or written | raised by `open` before anything else, and by the ledger store's `apply` for the holder a claim or join carries |
 | `holder_mismatch` | a resume named a holder that is not the one its pass record names (section 5.1); nothing was written | |
 | `item_not_claimable` | on the ledger, the item's recorded status is `blocked` or `closed`, so the pass takes no lease on it; nothing was written | the lost-claim handler re-raises it unchanged |
 | `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
@@ -531,7 +531,9 @@ stays supported: they take turns on its thread lock.
 On the ledger store the claim is also the item's lease, the ledger's own claim: an `item.state`
 `{status: "claimed", owner: H, claim: H, expires_at, prior_holder?}`. `H` is the *holder*: the name
 `open(..., holder=H)` gives, or `ticket-pass/<pass id>` when it gives none, so two opens that name no holder
-are two holders; never the ledger's actor and never an environment default. `expires_at` is the ledger's
+are two holders; never the ledger's actor and never an environment default. The holder travels with that
+open's own claim or join (`apply(..., holder=H)`) and is never kept on the store handle, so two opens racing
+on one handle each claim as the holder they named. `expires_at` is the ledger's
 UTC millisecond stamp, four hours after the claim (the ledger's default lease), and nothing renews it while
 the pass works; a pass idle past it is resumed by its id. The pass never calls the ledger's `claim` verb,
 which takes no `--expect-revision`, claims a closed item, and sets the owner from the ledger's actor.
@@ -554,17 +556,20 @@ which takes no `--expect-revision`, claims a closed item, and sets the owner fro
   markdown pass), takes no lease when it resumes, and is `lease_held` while the item is claimed by anyone
   but the holder the open names; its claim is not released. A live claim of either shape holds the ticket
   against every new pass, so an old claim and a lease never both authorize writers on one item.
-- **The end.** The pass-end (`session.closed` keyed `ticket-pass/K/P/released`) always lands. When the pass
-  took the lease, a fresh read decides: while that read shows the pass still live, its record saying
-  `taken` as `H`, and the row still claimed by `H`, the pass-end and `item.state {status: "open"}` (key
+- **The end.** The pass-end (`session.closed` keyed `ticket-pass/K/P/released`) always lands. A pass took
+  the lease when its record says `taken`, or when it wrote the lease since (a joined pass whose resume
+  took the lease again after its holder released it or it expired). When the pass took the lease, a fresh
+  read decides: while that read shows the pass still live, having taken the lease as `H`, and the row still
+  claimed by `H`, the pass-end and `item.state {status: "open"}` (key
   `ticket-lease/K/P/<R>/released`) travel in one batch under that read's revision R; otherwise, or when
   that batch does not land, the pass-end is sent alone with no `--expect-revision` and the lease is left
   to its expiry. A joined lease is never released. `ticket.py release` follows the same rule. At close the
   closed state replaces the lease and carries its `owner` and `claim`.
 - **The fold.** A pass record or an old-shape claim makes its pass the card's `pass`; the matching
   `session.closed` clears it, and so does a closed state: the export hides session records before a close,
-  but a pass record stays visible, so a closed item never reads a live pass. A pass record its validator
-  refuses is `card_unreadable`.
+  but a pass record stays visible, so a closed item never reads a live pass. A lease of the record's holder
+  keyed `ticket-lease/K/P/<R>`, written after the live pass's record, makes that pass one that took the
+  lease. A pass record its validator refuses is `card_unreadable`.
 
 ## 6. Both stores behind one interface
 
@@ -682,7 +687,7 @@ version lives inside the note text, where the skill, not the ledger, reads it.
 | `item.state.status` | enum `open claimed blocked closed` | `"claimed"` (the lease), `"open"` (its release), `"closed"` | M1, H13, H8 |
 | `item.state.owner`, `item.state.claim` | optional text ≥ 1 | the holder, on the lease; on the close, the values `query` reported or the lease's, when non-empty | M1, H8 |
 | `item.state.expires_at` | a UTC millisecond stamp that is a real date and time | four hours after the claim (5.1) | M1, H24 |
-| `item.state.prior_holder` | optional text ≥ 1 | the expired holder the lease replaces | M9 |
+| `item.state.prior_holder` | optional text ≥ 1 | the expired holder the lease replaces | M14 |
 | `item.state.blocked_by` | optional list of text ≥ 1 | the latest `item.state`'s list, when present | H8, H10 |
 | every `source` | optional text ≥ 1 | `W`, never empty | H24 |
 

@@ -406,18 +406,21 @@ real ledger CLI when `LEDGER_REAL_CLI` names one. M2 and M13 are H1's and L2's t
 | M11 | `test_M11_a_capped_closed_or_blocked_item_takes_no_lease[S5 \| S6 \| blocked]` | S5 / S6 / S2[0] ended, then an outside `state blocked`; a new open | `stopped` / `closed`, nothing written / `item_not_claimable` naming `blocked`, nothing written | `open` claims before the stopped-or-closed return / `_lease_decision` drops the blocked-or-closed refusal |
 | M12 | `test_M12_a_closed_item_reads_no_pass_though_its_pass_record_is_there` (real) | S6 | the closing pass's record is in the item's events; `read` gives `closed` and `pass` None | the fold keeps the pass on a closed state |
 | M13 | `test_L2_a_default_pass_writes_no_seam_record_on_either_store` | as L2 | the markdown digest and token unchanged; the ledger digest measured again once | as L2 |
+| M14 | `test_M14_a_pass_that_takes_over_an_expired_lease_names_its_prior_holder[default holder \| named holder]` (real) | the item leased to `seat-b` with an expiry long past (`query` reads it `open`, `expired_holder` `seat-b`); a new open naming no holder / `seat-a` | the lease (`owner` and `claim` the holder) names `prior_holder` `seat-b`; the pass record says `taken`; the row is claimed by the holder | `_lease_decision` drops the prior holder of an expired lease |
+| M15 | `test_M15_a_resumed_joined_pass_that_takes_the_lease_again_releases_it_at_its_end[end \| release command]` (real) | `seat-h`'s live lease in the loop's take shape; a pass joins it as `seat-h`; `seat-h` releases it (outside `state open`); the pass is resumed by its id; `end()` / `ticket.py release K P` | the resume writes one lease for `seat-h`; the end writes the pass-end and `item.state {status: open}`; the row reads `open`; a new open as `seat-z` then takes the lease | `_join` keeps the record's `joined` after it wrote the lease / the fold ignores a lease the live pass wrote after its record |
+| M16 | `test_M16_two_opens_racing_on_one_handle_each_claim_as_the_holder_they_named[no lease \| seat-b holds a live lease]` | one handle shared by two opens, as `seat-a` and `seat-b`; `seat-a`'s card read waits until `seat-b`'s open has read too, and `seat-b`'s waits until `seat-a`'s open is over; no lease / `seat-b`'s live lease | `seat-a` takes the lease as `seat-a` and `seat-b` is `handle_used` / `seat-a` is `lease_held` naming `seat-b` and `seat-b` joins its own lease; one pass record | the holder an open names is kept on the shared handle at the open's start and read back at the claim |
 
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
-  H 39, I 26, K 14, L 3, M 13 (M2 and M13 name H1's and L2's tests). Total 272 rows. Eight carry no test with a mutation of their own in this release:
+  H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests). Total 275 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 251 each have a test and a named mutation; H24's runs only
-  when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7 and M12 run on the
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 254 each have a test and a named mutation; H24's runs only
+  when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7, M12, M14 and M15 run on the
   fake CLI and also on a real ledger CLI when `LEDGER_REAL_CLI` names one.
-- Mutations named: 1 per row (G32, L3, M3, M5, M9 and M11 name two, L2 two sites of one); the `_source_differences` four and the `_has_go` criteria mutation are
+- Mutations named: 1 per row (G32, L3, M3, M5, M9, M11 and M15 name two, L2 and M16 two sites of one); the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's
   `ended` half (E11j, E11k) and E11q's step-(a) drop (E11q, E11r).

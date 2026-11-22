@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 
 import pytest
@@ -342,3 +343,119 @@ def test_M12_a_closed_item_reads_no_pass_though_its_pass_record_is_there(backend
     assert [record_of(event)["id"] for event in records] == [session.pass_id]
     card, _ = ticket.LedgerStore(backend.path, KEY, TITLE).read()
     assert (card["status"], card["pass"]) == ("closed", None)
+
+
+# --- M14: a pass that takes over another holder's expired lease names that holder ----------------------------
+
+
+@pytest.mark.parametrize("named", [None, "seat-a"], ids=["default holder", "named holder"])
+def test_M14_a_pass_that_takes_over_an_expired_lease_names_its_prior_holder(backend, named):
+    backend.new_item()
+    backend.write("item.state", lease("seat-b", expires=PAST))
+    assert (row(backend)["status"], row(backend).get("expired_holder")) == ("open", "seat-b")
+    before = len(backend.events())
+    session = open_ledger(backend.path, Source(), holder=named)
+    holder = named or holder_of(session)
+    (taken,) = states(backend.events()[before:])
+    assert (taken["status"], taken["owner"], taken["claim"]) == ("claimed", holder, holder)
+    assert taken["prior_holder"] == "seat-b"
+    (record,) = [record_of(event) for event in pass_records(backend.events()[before:])]
+    assert (record["holder"], record["lease"]) == (holder, "taken")
+    current = row(backend)
+    assert (current["status"], current.get("owner")) == ("claimed", holder)
+
+
+# --- M15: a joined pass whose resume takes the lease again releases it at its end ------------------------
+
+
+@pytest.mark.parametrize("how", ["end", "release command"])
+def test_M15_a_resumed_joined_pass_that_takes_the_lease_again_releases_it_at_its_end(backend, monkeypatch, how):
+    src = Source()
+    backend.new_item()
+    backend.write("item.state", lease("seat-h", owner=False))
+    first = open_ledger(backend.path, src, holder="seat-h")
+    (record,) = [record_of(event) for event in pass_records(backend.events())]
+    assert (record["holder"], record["lease"]) == ("seat-h", "joined")
+    # The holder releases its own lease; the joined pass is then resumed and takes the lease again as seat-h.
+    backend.write("item.state", {"status": "open"})
+    before = len(backend.events())
+    resumed = open_ledger(backend.path, src, pass_id=first.pass_id)
+    (retaken,) = states(backend.events()[before:])
+    assert (retaken["status"], retaken["owner"], retaken["claim"]) == ("claimed", "seat-h", "seat-h")
+    before = len(backend.events())
+    if how == "end":
+        resumed.end()
+    else:
+        monkeypatch.setenv("TICKET_LEDGER_CLI", str(backend.path))
+        assert ticket.main(["release", KEY, first.pass_id]) == 0
+    ended = backend.events()[before:]
+    assert [event["kind"] for event in ended] == ["session.closed", "item.state"]
+    assert ended[1]["payload"]["status"] == "open"
+    assert row(backend)["status"] == "open"
+    other = open_ledger(backend.path, src, holder="seat-z")
+    assert other.live and row(backend).get("owner") == "seat-z"
+
+
+# --- M16: two opens racing on one handle each claim as the holder they named -------------------------------
+
+
+class Interleave(ticket.LedgerStore):
+    """A handle shared by two opens: open-a's card read waits until open-b has read the card too, and open-b then
+    waits until open-a's open is over, so both have named their holders before either claims."""
+
+    def __init__(self, cli):
+        super().__init__(cli, KEY, TITLE)
+        self.b_read, self.a_done = threading.Event(), threading.Event()
+        self.start_b = None
+
+    def read(self):
+        result = super().read()
+        name = threading.current_thread().name
+        if name == "open-a" and self.start_b is not None:
+            start, self.start_b = self.start_b, None
+            start()
+            assert self.b_read.wait(30)
+        elif name == "open-b" and not self.b_read.is_set():
+            self.b_read.set()
+            assert self.a_done.wait(30)
+        return result
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["no lease", "seat-b holds a live lease"])
+def test_M16_two_opens_racing_on_one_handle_each_claim_as_the_holder_they_named(fake, held):
+    src = Source()
+    open_ledger(fake.path, src).end()
+    if held:
+        fake.write("item.state", lease("seat-b"))
+    before = len(fake.events())
+    handle = Interleave(fake.path)
+    results = {}
+
+    def run(name, holder):
+        try:
+            results[name] = open_ledger(fake.path, src, handle=handle, holder=holder)
+        except Exception as exc:
+            results[name] = exc
+        finally:
+            if name == "open-a":
+                handle.a_done.set()
+
+    b = threading.Thread(target=run, args=("open-b", "seat-b"), name="open-b")
+    handle.start_b = b.start
+    a = threading.Thread(target=run, args=("open-a", "seat-a"), name="open-a")
+    a.start()
+    a.join(60)
+    b.join(60)
+    (record,) = [record_of(event) for event in pass_records(fake.events()[before:])]
+    if held:
+        assert isinstance(results["open-a"], ticket.StoreUnavailable) and results["open-a"].code == "lease_held"
+        assert "seat-b" in str(results["open-a"])
+        assert results["open-b"].live and results["open-b"].pass_id == record["id"]
+        assert (record["holder"], record["lease"]) == ("seat-b", "joined")
+        assert states(fake.events()[before:]) == []
+    else:
+        assert results["open-a"].live and results["open-a"].pass_id == record["id"]
+        assert (record["holder"], record["lease"]) == ("seat-a", "taken")
+        (taken,) = states(fake.events()[before:])
+        assert (taken["owner"], taken["claim"]) == ("seat-a", "seat-a")
+        assert isinstance(results["open-b"], ticket.StoreUnavailable) and results["open-b"].code == "handle_used"

@@ -1866,7 +1866,11 @@ def _ledger_card(
     records only while the item is open, but a pass record stays in it after
     the close. The third value is ``{"shape": "lease", "holder": <name>,
     "lease": "taken" | "joined"}`` for a pass record, ``{"shape": "claim"}``
-    for the old shape, and None with no live pass. An item that was closed
+    for the old shape, and None with no live pass. A lease of the record's
+    holder that the live pass wrote after its record (the ``item.state``
+    keyed ``ticket-lease/K/<pass>/<revision>``, as a resume writes when it
+    takes the lease again) makes it ``taken``, so the pass releases it at its
+    end. An item that was closed
     once reads ``closed``; its close stamp is marked ``close`` only when the
     close is trusted, so an outside status write is refused ``close_invalid``
     and never resumed.
@@ -1876,6 +1880,7 @@ def _ledger_card(
     card = _blank_card(key, title)
     live: dict[str, Any] | None = None
     pass_key = re.compile(rf"ticket-pass/{re.escape(key)}/([0-9a-f]+)/(claimed|released)")
+    lease_key = re.compile(rf"ticket-lease/{re.escape(key)}/([0-9a-f]+)/[^/]+")
     states: list[int] = []
     stops: list[int] = []
     for index, event in enumerate(events):
@@ -1906,6 +1911,10 @@ def _ledger_card(
             if payload["status"] == "closed":
                 card["status"] = "closed"
                 card["pass"], live = None, None
+            elif payload["status"] == "claimed" and live is not None and live["shape"] == "lease":
+                wrote = lease_key.fullmatch(event.get("idempotency_key") or "")
+                if wrote and wrote[1] == card["pass"]["id"] and payload.get("owner") == live["holder"]:
+                    live = {**live, "lease": "taken"}
     if card["status"] == "closed" and _trusted_close(events, states, stops, key):
         card["stamps"][-1]["close"] = True
     _check_card_shape(card, key, where)
@@ -2002,9 +2011,8 @@ class LedgerStore:
         self._row: Mapping[str, Any] | None = None
         self._live: dict[str, Any] | None = None
         self._read_token: str | None = None
-        # The holder the open named (``hold``), or None for the default; then the bound pass's holder and
-        # whether it took or joined the lease (None for a claim of the old shape).
-        self._given: str | None = None
+        # The bound pass's holder and whether it took or joined the lease (None for a claim of the old shape).
+        # The holder an open names is never kept here: it travels with that open's claim or join (``apply``).
         self._holder: str | None = None
         self._lease: str | None = None
         # Threads sharing this handle take turns; a binding event binds under it.
@@ -2021,19 +2029,6 @@ class LedgerStore:
         """The id of the last pass this handle held that has ended, or None."""
 
         return self._ended
-
-    def hold(self, holder: str | None) -> None:
-        """Name the holder this handle's pass takes or joins the item's lease as; None is the default holder.
-
-        The default holder of a new pass is ``ticket-pass/<pass id>``, so two
-        opens that name no holder are two holders. A holder that is not a name
-        is refused ``holder_invalid``. Only the ledger store has a lease.
-        """
-
-        if holder is not None:
-            _check_holder(holder)
-        with self._threads:
-            self._given = holder
 
     def leftover_notice(self) -> str | None:
         """The one line an open prints when the repository still holds unimported markdown cards (design 6.4), else None."""
@@ -2507,7 +2502,7 @@ class LedgerStore:
             lines.extend([f"## {entry['field']}", *entry["diff"]])
         return "\n".join(lines)
 
-    def apply(self, token: str, events: Sequence[tuple[str, Any]]) -> str:
+    def apply(self, token: str, events: Sequence[tuple[str, Any]], *, holder: str | None = None) -> str:
         """Land every event or none, only while the item's revision is still ``token``.
 
         A used handle is refused ``handle_used`` for a binding event before any
@@ -2518,8 +2513,16 @@ class LedgerStore:
         batch it sends landed; a join that keeps a live lease of its own
         holder, or continues a pass of the old shape, sends nothing and returns
         ``token``.
+
+        ``holder`` is the lease holder the open named for its claim or join
+        (None for the default, ``ticket-pass/<pass id>``). It is this call's
+        own argument, never state kept on the handle, so two opens racing on
+        one handle each claim as the holder they named. A holder that is not a
+        name is refused ``holder_invalid`` before any CLI call.
         """
 
+        if holder is not None:
+            _check_holder(holder)
         for kind, value in events:
             _validate_event(kind, value, self.key)
         binding = _binding(events)
@@ -2534,7 +2537,7 @@ class LedgerStore:
                 return token
             if token != (self._read_token or NO_TOKEN):
                 raise _stale(self.key, f"the lease is decided on the item as read at revision {self._read_token or NO_TOKEN}, not {token}")
-            token = self._join(token, binding[1]) if joining else self._claim(token, events[0][1])
+            token = self._join(token, binding[1], holder) if joining else self._claim(token, events[0][1], holder)
             self._pass_id, self._ended = binding[1], None
             return token
 
@@ -2572,10 +2575,10 @@ class LedgerStore:
             payload["prior_holder"] = prior
         return self._element("item.state", payload, f"ticket-lease/{self.key}/{pass_id}/{token}")
 
-    def _claim(self, token: str, claim: Mapping[str, Any]) -> str:
+    def _claim(self, token: str, claim: Mapping[str, Any], given: str | None) -> str:
         """A new pass's claim: one batch under ``token`` of the creation (on ``none``), the lease when taken, and the pass record."""
 
-        holder = self._given or f"ticket-pass/{claim['id']}"
+        holder = given or f"ticket-pass/{claim['id']}"
         take, prior = self._lease_decision(holder)
         record = {**claim, "holder": holder, "lease": "taken" if take else "joined"}
         batch = [self._created()] if token == NO_TOKEN else []
@@ -2591,13 +2594,15 @@ class LedgerStore:
             self._item = {"owner": holder, "claim": holder, "blocked_by": None}
         return token
 
-    def _join(self, token: str, pass_id: str) -> str:
+    def _join(self, token: str, pass_id: str, given: str | None) -> str:
         """Continue the live pass ``pass_id``: its holder keeps, renews or takes back the lease; the old shape takes none.
 
         A pass record names the holder. Its live lease is kept with no write;
         an expired or released one is taken again under ``token``; another
         holder's live lease is ``lease_held``, and a holder the open named that
-        is not the record's is ``holder_mismatch``. A pass of the old shape
+        is not the record's is ``holder_mismatch``. A resume that writes the
+        lease has taken it, though its record says joined, so its end releases
+        it. A pass of the old shape
         takes no lease and is ``lease_held`` while the item is claimed by
         anyone but the holder the open named (the default holder,
         ``ticket-pass/<pass id>``, when it named none); its claim stays.
@@ -2606,15 +2611,18 @@ class LedgerStore:
         live = self._live or {}
         if live.get("shape") == "lease":
             holder = live["holder"]
-            if self._given is not None and self._given != holder:
-                raise _holder_mismatch(self.key, self._given, holder)
+            if given is not None and given != holder:
+                raise _holder_mismatch(self.key, given, holder)
             take, prior = self._lease_decision(holder)
+            lease = live["lease"]
             if take:
                 token = self._send([self._lease_event(holder, prior, pass_id, token)], token)
                 self._item = {"owner": holder, "claim": holder, "blocked_by": None}
-            self._holder, self._lease = holder, live["lease"]
+                lease = "taken"
+                self._live = {**live, "lease": lease}
+            self._holder, self._lease = holder, lease
             return token
-        holder = self._given or f"ticket-pass/{pass_id}"
+        holder = given or f"ticket-pass/{pass_id}"
         row = self._row or {}
         on_row = row.get("owner") or row.get("claim")
         if row.get("recorded_status", row.get("status")) == "claimed" and on_row != holder:
@@ -2651,8 +2659,9 @@ class LedgerStore:
         """Send the pass-end and the lease's release under a fresh read's revision; True when that batch landed.
 
         It is sent only when the fresh read shows ``pass_id`` still the live
-        pass, its record saying it took the lease as ``holder``, and the item's
-        row still claimed by ``holder``. Never raises.
+        pass, having taken the lease as ``holder`` (its record says ``taken``,
+        or it wrote the lease since), and the item's row still claimed by
+        ``holder``. Never raises.
         """
 
         try:
@@ -3187,6 +3196,8 @@ class TicketPass:
         self._rounds = len(card["reviews"])
         self._pass_id: str | None = None
         self._live = False
+        # The lease holder this open named (None for the default); only the ledger store takes it.
+        self._lease_holder: str | None = None
         self.reconciliation: tuple[str, ...] = ()
         self.resume_card: dict[str, Any] = card
 
@@ -3226,8 +3237,6 @@ class TicketPass:
             _check_holder(holder)
         if store.pass_id is not None or store.ended is not None:
             raise _handle_used(key, store.pass_id or store.ended)
-        if isinstance(store, LedgerStore):
-            store.hold(holder)
         _check_item_store(key, source, store)
         ticket = source.pull(key)
         if ticket.key != key:
@@ -3246,6 +3255,7 @@ class TicketPass:
         state, flags, identity = _derive(card, ticket, pass_id, key)
         session = cls(ticket, store, card, token, identity)
         session._phase = state
+        session._lease_holder = holder
         notice = getattr(store, "leftover_notice", None)
         leftover = notice() if callable(notice) else None
         stored = getattr(store, "selection", None)
@@ -3265,7 +3275,7 @@ class TicketPass:
             session._claim()
         else:
             # The join binds the handle inside the store, under its lock; it changes no card byte.
-            session._token = store.apply(token, [("join", {"id": pass_id})])
+            session._token = session._bind(token, [("join", {"id": pass_id})])
             session._pass_id = pass_id
         session._live = True
         session._sync_steps()
@@ -3274,7 +3284,7 @@ class TicketPass:
     def _claim(self) -> None:
         claim = {"id": secrets.token_hex(8), "host": _host(), "started_at": _now()}
         try:
-            token = self.store.apply(self._token, [("claim", claim)])
+            token = self._bind(self._token, [("claim", claim)])
         except StoreUnavailable as exc:
             if exc.code in ("handle_used", "lease_held", "item_not_claimable"):
                 # Not a lost race: the handle was bound meanwhile, or the item's lease or status refuses the claim.
@@ -3286,6 +3296,13 @@ class TicketPass:
             raise
         self._advance(token, [("claim", claim)])
         self._pass_id = claim["id"]
+
+    def _bind(self, token: str, events: Sequence[tuple[str, Any]]) -> str:
+        """Send this open's claim or join; on the ledger store the holder it named travels with it, under its lock."""
+
+        if isinstance(self.store, LedgerStore):
+            return self.store.apply(token, events, holder=self._lease_holder)
+        return self.store.apply(token, events)
 
     @property
     def key(self) -> str:
