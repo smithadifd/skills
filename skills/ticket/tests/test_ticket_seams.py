@@ -18,16 +18,21 @@ from ticket_support import Source, build, card_bytes, read_card, store
 DEFAULTS = {"build": "builder-core", "review": "reviewer", "outward": "push-and-open-draft"}
 
 # The sha256 of what a default pass to S6 wrote, measured on the code before the seams were named, with the
-# host, the clock and the random ids held fixed (``_fixed``). A change to what a default pass writes moves it.
+# host, the clock, the random ids and the caller's ledger identity held fixed (``_fixed``). A change to what a
+# default pass writes moves it.
 MARKDOWN_CARD_SHA256 = "2d29ff9ebc6efce9a28ec5a21454d7380fbb3f0ec0ba606cfb90bdf4d254b98f"
 MARKDOWN_TOKEN = "4ef4daeed5681b20467d17f6ba895c6a04e42a40c12eb2472cf79c165ed1872d"
-LEDGER_EVENTS_SHA256 = "4541d53d606f99454002f0cf0dc7e639c23c1b6959993b940a3ee81e8d980b76"
+LEDGER_EVENTS_SHA256 = "880e42b20b4c20d9c62fa759cff581e093528f066a2eb4b607933ce9541cab0c"
 
 
 @pytest.fixture
 def _fixed(monkeypatch):
-    """The host, the clock and every random id fixed, so a pass writes the same bytes on every run."""
+    """The host, the clock, every random id and the caller's ledger identity fixed (the identity unset, which
+    the fake ledger stamps onto each event), so a pass writes the same bytes on every run and in every
+    environment."""
 
+    monkeypatch.delenv("LEDGER_SESSION", raising=False)
+    monkeypatch.delenv("LEDGER_AGENT", raising=False)
     counter = itertools.count(1)
     monkeypatch.setattr(ticket, "_host", lambda: "test-host")
     monkeypatch.setattr(ticket, "_now", lambda: "2026-11-22T09:00:00Z")

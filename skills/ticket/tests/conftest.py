@@ -22,6 +22,11 @@ def private_tmp(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("TICKET_LEDGER_CLI", raising=False)
     monkeypatch.delenv("LEDGER_DB", raising=False)
+    # The fake ledger CLI stamps every event with the caller's identity from LEDGER_SESSION and LEDGER_AGENT,
+    # so an ambient value would change the events a test reads back (and any digest of them). Both are cleared
+    # here; a test that wants an identity sets it itself.
+    monkeypatch.delenv("LEDGER_SESSION", raising=False)
+    monkeypatch.delenv("LEDGER_AGENT", raising=False)
     return tmp_path
 
 
