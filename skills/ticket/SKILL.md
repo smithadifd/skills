@@ -389,6 +389,13 @@ it opens nothing for other criteria or another revision.
    the unresolved findings and ends the pass at `stopped`. There is no fourth
    round.
 
+A pass has three named seams, `build`, `review` and `outward`, and each default is what this section
+and section 6 describe: `build` dispatches `builder-core` with the approved card, `review` is a fresh
+`reviewer` whose rounds `record_review` stores, and `outward` is the push and a draft pull request, with
+the merge left to the person or the review-gate merge command. `ticket.seam_set(card)` returns the three
+names. A card records no seam, so every pass uses these defaults and the seams change nothing a card or
+the ledger stores.
+
 ## 6. Outward go: a hard stop
 
 Before you present it, read the target repository's remotes with

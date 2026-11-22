@@ -1092,6 +1092,26 @@ def test_F5_a_write_between_the_close_read_and_the_close_is_refused(repo):
     assert resumed.approved("outward") is True
 
 
+def test_F9_a_stop_landed_by_another_handle_before_close_is_refused_stale_and_resumes_at_outward_go(repo):
+    src = Source()
+    session = build(repo, src, "S4", 1)
+    other = open_pass(repo, src, pass_id=session.pass_id)
+    other.more_info("person", "Which branch does this land on?")
+    outside = read_card(repo)
+    assert outside["status"] == "open"
+    assert outside["stamps"][-1]["point"] == "waiting on person: Which branch does this land on?"
+    assert outside["stamps"][-1]["close"] is False
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        session.close("Done.", refs=("example/repo#14",))
+    assert refusal(excinfo) == "stale"
+    assert read_card(repo) == outside
+    assert read_card(repo)["status"] == "open"
+    assert read_card(repo)["stamps"][-1]["point"] == "waiting on person: Which branch does this land on?"
+    resumed = open_pass(repo, src)
+    assert resumed.phase == "outward_go"
+    assert resumed.approved("outward") is True
+
+
 def test_F6_a_closed_ticket_never_reopens_on_a_later_resume(repo):
     src = Source()
     closer = build(repo, src, "S6")

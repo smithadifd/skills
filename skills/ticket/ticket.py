@@ -35,6 +35,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Iterator, Mapping, Protocol, Sequence
 
 # The store phases, shared by both stores (design section 2).
@@ -48,6 +49,18 @@ GATES = ("plan", "outward")
 CARD_SCHEMA = "ticket-card/v2"
 PLAN_SCHEMA = "ticket-plan-card/v2"
 MAX_REVIEW_ROUNDS = 3
+# The three seams of a pass (TL4 one-item skill design, section 3), each with the name of its default
+# implementation: what this skill does when nothing else is selected. Build: dispatch builder-core with the
+# approved card. Review: a fresh reviewer, recorded by record_review. Outward: push and open a draft; the merge
+# is the person's, or the review-gate merge command. A seam name is not a phase: no card or store phase is
+# named from this table, and no store reads it.
+SEAMS = MappingProxyType(
+    {
+        "build": "builder-core",
+        "review": "reviewer",
+        "outward": "push-and-open-draft",
+    }
+)
 NO_TOKEN = "none"
 # The installed script, so a recovery command runs from the target repository.
 _SCRIPT = os.path.abspath(__file__)
@@ -83,6 +96,22 @@ KEPT_LOCAL_POINT = (
     "Closed kept local: the person declined the outward go for plan revision {revision}, "
     "so nothing was pushed or opened."
 )
+
+
+def seam_set(card: Mapping[str, Any], *names: str) -> dict[str, str]:
+    """The seam set of a card: each seam name mapped to its implementation name.
+
+    A card carries no seam record yet (absent means default), so every seam
+    resolves to its default in ``SEAMS``, and nothing is written to the card
+    or the ledger. With no ``names`` the whole set is returned; with names,
+    only those. A name that is not a seam is refused, naming it: it never
+    resolves to a default.
+    """
+
+    for name in names:
+        if name not in SEAMS:
+            raise TicketError(f"unknown seam: {name!r}; the seams are {', '.join(SEAMS)}")
+    return {name: SEAMS[name] for name in (names or SEAMS)}
 
 
 def release_command(key: str, pass_id: str) -> str:
@@ -3932,6 +3961,7 @@ def import_repo(repo: str | Path, cli: str, *, dry_run: bool = False, say=print)
 
 
 __all__ = [
+    "SEAMS",
     "FileTicketSource",
     "GateRequired",
     "LedgerStore",
@@ -3946,6 +3976,7 @@ __all__ = [
     "TicketPass",
     "TicketSource",
     "choose_store",
+    "seam_set",
     "select_store",
     "find_cards",
     "import_command",

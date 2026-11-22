@@ -211,6 +211,28 @@ def test_H10_a_refused_close_overwrites_no_state(fake):
     assert [e["payload"] for e in fake.events() if e["kind"] == "item.state"] == [outside]
 
 
+def test_H48_an_outside_stop_before_close_is_refused_and_only_the_release_lands(fake):
+    src = Source()
+    session = build_ledger(fake, src, "S4", 1)
+    point = "Waiting on the person."
+    fake.outside(
+        "item.stopped", {"point": point, "phase": "review", "skills": [], "refs": []},
+        actor="other-agent", session="other-session",
+    )
+    before = fake.events()
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
+    assert refusal(excinfo) == "stale"
+    assert "other-agent" in str(excinfo.value) and "other-session" in str(excinfo.value)
+    assert keyed(after(fake, before)) == released(session)
+    assert "item.state" not in kinds(fake.events())
+    assert [e for e in fake.events() if e["kind"] == "item.stopped" and e["payload"]["phase"] == "close"] == []
+    resumed = open_ledger(fake, src)
+    assert resumed.phase == "outward_go"
+    assert resumed.approved("outward") is True
+    assert resumed.resume_card["stamps"][-1]["point"] == point
+
+
 @pytest.mark.parametrize("later", ["stopped", "state"])
 def test_H11_a_later_stop_or_state_invalidates_a_trusted_close(fake, later):
     src = Source()
