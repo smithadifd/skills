@@ -128,6 +128,19 @@ refused `acceptance_unparseable`, naming the line.
   opens is refused `stale`. One set during a live pass makes the pass's next
   write `stale`. Open the ticket again to see the change.
 
+### A parent's hand-off as the ticket
+
+Only a parent's adapter uses it, never `/ticket <KEY>`:
+`ticket.handoff_source("<KEY>", implementations={"<seam>": ["<name>"]})`,
+opened with `holder=` the loop's holder; the pass joins that lease, never
+takes it. The card's `handoff` field and `seam_set(card)` give the controller
+and seams. Refused (design note 6.8): `handoff_no_ledger`,
+`handoff_ledger_too_old`, `handoff_not_managed`, `handoff_unreadable`,
+`handoff_ambiguous`, `handoff_intent_v1`, `handoff_no_intent`,
+`handoff_seam_unknown`, `handoff_not_leased`; other sources there,
+`handoff_source_required`. Where a seam's name is not the default, this
+session does not run the default action for that seam.
+
 ### What an open records on the ledger store
 
 On the ledger store, every open of a tracker or JSON-file ticket, a new pass
@@ -450,12 +463,9 @@ it opens nothing for other criteria or another revision.
    the unresolved findings and ends the pass at `stopped`. There is no fourth
    round.
 
-A pass has three named seams, `build`, `review` and `outward`, and each default is what this section
-and section 6 describe: `build` dispatches `builder-core` with the approved card, `review` is a fresh
-`reviewer` whose rounds `record_review` stores, and `outward` is the push and a draft pull request, with
-the merge left to the person or the review-gate merge command. `ticket.seam_set(card)` returns the three
-names. A card records no seam, so every pass uses these defaults and the seams change nothing a card or
-the ledger stores.
+A pass has three seams, each defaulting to what this section and section 6 describe: `build` is
+`builder-core`, `review` a fresh `reviewer`, `outward` the push and a draft pull request.
+`ticket.seam_set(card)` returns them; only a hand-off names others.
 
 ## 6. Outward go: a hard stop
 

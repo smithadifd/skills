@@ -25,7 +25,9 @@ event's actor and session). ``query`` gives the lease-aware row of ledger 0.6:
 ``expires_at`` stamp has passed (by this machine's clock; a claim with no stamp,
 or one that does not parse, stays ``claimed``), ``recorded_status`` is the
 status the events record, and for an expired claim ``expired_holder`` and
-``expires_at`` name its holder and stamp (both null otherwise).
+``expires_at`` name its holder and stamp (both null otherwise). ``--version``
+prints ``ledger 0.7.0``, the release a parent's hand-off needs (a test scripts
+another line); it is plain text, not an envelope.
 
 Its state is one JSON file, named by the first argument: the events, every
 call (argv, stdin, exit status and error code), how the help probe answers,
@@ -532,6 +534,8 @@ def append_one(state, args):
 
 
 def carry_out(state, verb, args, stdin):
+    if verb == "--version" and len(args) == 1:
+        return 0, "ledger 0.7.0\n"
     try:
         if verb == "query" and "--item" in args:
             data = query(state, args[args.index("--item") + 1])
