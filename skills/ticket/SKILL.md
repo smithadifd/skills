@@ -248,6 +248,22 @@ from a refusal to continue a pass you did not start. The last message of a
 session states it too (see "The final message" below), so a person can resume
 with it the next day.
 
+On the ledger store the claim is also the item's lease. A new pass takes the
+lease as its holder, or joins it when the item is already leased to that
+holder, in the same write as its pass record. Name the holder with
+`open(..., holder=<name>)`; with none it is `ticket-pass/<pass id>`, so two
+opens that name none are two holders. A holder is one name with no whitespace
+or control character; any other is refused as `holder_invalid` before anything
+is read. Another
+holder's live lease refuses the open as `lease_held`, naming that holder, and
+nothing is written; a lease whose expiry cannot be read counts as live. A
+blocked or closed item takes no lease (`item_not_claimable`). A resume keeps
+the holder its pass record names, and takes the lease again when it expired or
+was released. A pass claimed before leases existed still holds the ticket
+against every new pass, takes no lease when it resumes, and another holder's
+lease refuses that resume as `lease_held`. The lease runs four hours and
+nothing renews it while the pass works; resume an idle pass by its id.
+
 One store handle serves one pass. The store refuses a reused handle, one
 bound to a pass or whose pass has ended, as `handle_used` at the claim or
 join itself, under its own lock, so two opens sharing a handle can never both
@@ -259,7 +275,9 @@ Another open while a pass is live is refused as `held`, naming the live pass
 and the command that releases it. The pass ends, and releases its claim, at
 close, at a more-information exit, at the review cap, on `session.end()`,
 when an exception leaves a `with TicketPass.open(...) as session:` block, or
-on any refusal. A `TicketError` (a wrong step, an invalid value, or
+on any refusal. On the ledger the end releases the lease the pass took, in one
+write with the pass's end, only while a fresh read shows the pass still holds
+it; a joined lease stays with its holder. A `TicketError` (a wrong step, an invalid value, or
 `GateRequired`) writes nothing and leaves the pass live. After a pass ends,
 every step refuses with `pass_ended`.
 
@@ -270,7 +288,7 @@ The command a refusal prints is shell-quoted word by word, so it is safe to copy
 It refuses unless that id is the live claim. It exits 0 when it released the
 claim, 1 when it refused, and 2 when `TICKET_LEDGER_CLI` names an incompatible
 ledger CLI. It selects the store the same way `choose_store` does. With the ledger store it releases the claim on the ledger item and
-ignores `--repo`.
+ignores `--repo`; it releases the lease that pass took by the same rule as the end.
 
 ## 1. Orient
 

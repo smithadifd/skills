@@ -357,8 +357,8 @@ def test_a_card_whose_replay_differs_before_the_write_writes_nothing(repo, fake,
     real = ticket._ledger_card
 
     def drifting(events, key, title):
-        card, rest = real(events, key, title)
-        return {**card, "title": card["title"] + " (drift)"}, rest
+        card, *rest = real(events, key, title)
+        return ({**card, "title": card["title"] + " (drift)"}, *rest)
 
     monkeypatch.setattr(ticket, "_ledger_card", drifting)
     code, lines, _ = run(capsys, "import-cards", str(repo))

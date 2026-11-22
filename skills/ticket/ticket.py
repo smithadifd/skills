@@ -34,6 +34,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping, Protocol, Sequence
@@ -148,6 +149,55 @@ class TicketHeld(StoreUnavailable):
         )
         self.key = key
         self.holder = dict(live)
+
+
+# The lease a ticket pass takes on its ledger item (design 6.2): four hours, the ledger's own default claim lease,
+# with no heartbeat. A pass idle past it is resumed by its id, and the resume renews it.
+LEASE_SECONDS = 4 * 60 * 60
+# A lease holder: one name of at most 200 characters with no whitespace or control character.
+_HOLDER = re.compile(r"[^\s\x00-\x1f\x7f]{1,200}")
+
+
+def _check_holder(holder: Any) -> None:
+    """Refuse a lease holder that is not a name, as ``holder_invalid``, before anything is read or written."""
+
+    if type(holder) is not str or not _HOLDER.fullmatch(holder):
+        raise StoreUnavailable(
+            f"the lease holder {holder!r} is not a name: give non-empty text of at most 200 characters with no "
+            "whitespace or control character. Nothing was read or written.",
+            code="holder_invalid",
+        )
+
+
+def _lease_held(key: str, holder: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"ledger item {key} is leased to {holder}, so this pass does not open on it. Nothing was written and the item "
+        "is unchanged. The lease ends when its holder releases it or it expires; only its holder continues under it.",
+        code="lease_held",
+    )
+
+
+def _not_claimable(key: str, status: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"ledger item {key} is {status}, so this pass takes no lease on it. Nothing was written and the item is "
+        "unchanged; a person resolves its status first.",
+        code="item_not_claimable",
+    )
+
+
+def _holder_mismatch(key: str, given: str, holder: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"the pass on ledger item {key} holds its lease as {holder}, not {given}, so it is not resumed under "
+        f"{given}. Nothing was written. Resume it with no holder, or with {holder}.",
+        code="holder_mismatch",
+    )
+
+
+def _lease_expiry() -> str:
+    """The stamp a lease taken now runs to: ``LEASE_SECONDS`` after ``_now()``, in the ledger's UTC millisecond form."""
+
+    start = datetime.strptime(_now(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return (start + timedelta(seconds=LEASE_SECONDS)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _host() -> str:
@@ -482,6 +532,18 @@ def _validate_join(join: Any) -> None:
     _text(join["id"], "the join's id")
     if not _PASS_ID.fullmatch(join["id"]):
         raise TicketError("the join's id must be lowercase hex")
+
+
+def _validate_pass_record(record: Any) -> None:
+    """A ledger pass record (design 6.2): the claim's id, host and start, the lease holder, and taken or joined."""
+
+    if type(record) is not dict or set(record) != {"id", "host", "started_at", "holder", "lease"}:
+        raise TicketError("a pass record names exactly its id, host, started_at, holder and lease")
+    _validate_claim({name: record[name] for name in ("id", "host", "started_at")})
+    if type(record["holder"]) is not str or not _HOLDER.fullmatch(record["holder"]):
+        raise TicketError("a pass record's holder must be a holder name")
+    if record["lease"] not in ("taken", "joined"):
+        raise TicketError("a pass record's lease is taken or joined")
 
 
 def _validate_stamp(stamp: Any) -> None:
@@ -1644,6 +1706,8 @@ _LEDGER_WRITER = "ticket"
 # its format version, and the body is the record's canonical JSON (design 6.2.3).
 _RECORD_FRAME = re.compile(r"ticket-([a-z]+):v([1-9][0-9]*) (.+)", re.DOTALL)
 _RECORD_KINDS = ("plan", "decision", "review")
+# The pass record a ledger pass writes with its claim (design 6.2): a framed note, never a card event.
+_PASS_RECORD = "pass"
 _RECORD_VERSION = 2
 _CLAIM_PURPOSE = re.compile(r"ticket pass [0-9a-f]+ on (.+) at (\S+)")
 # How an ``ok: false`` answer is read (design 6.2.4). Only the two lost races
@@ -1716,21 +1780,23 @@ def _ledger_incompatible(cli: str, detail: str) -> StoreUnavailable:
     )
 
 
-def _fold_record(card: dict[str, Any], text: str, key: str, where: str) -> None:
-    """Fold one ``item.note`` into the card when it is a ticket record (design 6.2.3).
+def _fold_record(card: dict[str, Any], text: str, key: str, where: str) -> dict[str, Any] | None:
+    """Fold one ``item.note`` into the card when it is a ticket record (design 6.2.3); return it when it is a pass record.
 
     A text that is not framed is an ordinary note. A framed record of a kind or
     version this skill does not know, a body that is not a JSON object, or a
     body its section-I validator refuses is ``card_unreadable``: a record is
-    never skipped. A plan's identity is read first, as on the markdown card.
+    never skipped. A plan's identity is read first, as on the markdown card. A
+    ``ticket-pass:v2`` record is returned for the caller to fold; nothing else
+    is.
     """
 
     frame = _RECORD_FRAME.fullmatch(text)
     if frame is None:
-        return
+        return None
     kind, version, body = frame[1], int(frame[2]), frame[3]
     name = f"ticket-{kind}:v{version}"
-    if kind not in _RECORD_KINDS or version != _RECORD_VERSION:
+    if kind not in (*_RECORD_KINDS, _PASS_RECORD) or version != _RECORD_VERSION:
         raise _unreadable(where, f"it holds a ticket record this skill does not know ({name})")
     try:
         record = json.loads(body)
@@ -1744,14 +1810,19 @@ def _fold_record(card: dict[str, Any], text: str, key: str, where: str) -> None:
             _validate_plan(record, key)
         elif kind == "decision":
             _validate_decision(record)
+        elif kind == _PASS_RECORD:
+            _validate_pass_record(record)
         else:
             _validate_review(record)
     except TicketError as exc:
         raise _unreadable(where, f"a {name} record is not valid ({exc})") from exc
+    if kind == _PASS_RECORD:
+        return record
     if kind == "plan":
         card["plan"] = record
     else:
         card[f"{kind}s"].append(record)
+    return None
 
 
 def _trusted_close(events: Sequence[Mapping[str, Any]], states: list[int], stops: list[int], key: str) -> bool:
@@ -1781,18 +1852,29 @@ def _trusted_close(events: Sequence[Mapping[str, Any]], states: list[int], stops
     )
 
 
-def _ledger_card(events: Sequence[Mapping[str, Any]], key: str, title: str) -> tuple[dict[str, Any], Any]:
-    """The section-2 card folded from one item's exported events, in id order, and the latest state's blocked-by.
+def _ledger_card(
+    events: Sequence[Mapping[str, Any]], key: str, title: str,
+) -> tuple[dict[str, Any], Any, dict[str, Any] | None]:
+    """The section-2 card folded from one item's exported events, in id order, the latest state's blocked-by, and
+    how the live pass claimed the item.
 
-    The pass is the latest claim of this ticket not yet released (the export
-    shows session records only while the item is open). An item that was
-    closed once reads ``closed``; its close stamp is marked ``close`` only
-    when the close is trusted, so an outside status write is refused
-    ``close_invalid`` and never resumed.
+    The pass is the latest claim of this ticket not yet released: a
+    ``ticket-pass:v2`` pass record, or a claim of the old shape, the
+    ``session.opened`` keyed ``ticket-pass/K/<pass>/claimed``. The
+    ``session.closed`` keyed ``ticket-pass/K/<pass>/released`` releases
+    either, and a closed status releases any pass: the export shows session
+    records only while the item is open, but a pass record stays in it after
+    the close. The third value is ``{"shape": "lease", "holder": <name>,
+    "lease": "taken" | "joined"}`` for a pass record, ``{"shape": "claim"}``
+    for the old shape, and None with no live pass. An item that was closed
+    once reads ``closed``; its close stamp is marked ``close`` only when the
+    close is trusted, so an outside status write is refused ``close_invalid``
+    and never resumed.
     """
 
     where = f"ledger item {key}"
     card = _blank_card(key, title)
+    live: dict[str, Any] | None = None
     pass_key = re.compile(rf"ticket-pass/{re.escape(key)}/([0-9a-f]+)/(claimed|released)")
     states: list[int] = []
     stops: list[int] = []
@@ -1802,11 +1884,15 @@ def _ledger_card(events: Sequence[Mapping[str, Any]], key: str, title: str) -> t
         if kind == "session.opened" and mark and mark[2] == "claimed":
             purpose = _CLAIM_PURPOSE.fullmatch(payload.get("purpose", ""))
             card["pass"] = {"id": mark[1], "host": purpose and purpose[1], "started_at": purpose and purpose[2]}
+            live = {"shape": "claim"}
         elif kind == "session.closed" and mark and mark[2] == "released":
             if card["pass"] is not None and card["pass"]["id"] == mark[1]:
-                card["pass"] = None
+                card["pass"], live = None, None
         elif kind == "item.note":
-            _fold_record(card, payload["text"], key, where)
+            record = _fold_record(card, payload["text"], key, where)
+            if record is not None:
+                card["pass"] = {name: record[name] for name in ("id", "host", "started_at")}
+                live = {"shape": "lease", "holder": record["holder"], "lease": record["lease"]}
         elif kind == "item.stopped":
             stops.append(index)
             card["stamps"].append(
@@ -1819,10 +1905,11 @@ def _ledger_card(events: Sequence[Mapping[str, Any]], key: str, title: str) -> t
             states.append(index)
             if payload["status"] == "closed":
                 card["status"] = "closed"
+                card["pass"], live = None, None
     if card["status"] == "closed" and _trusted_close(events, states, stops, key):
         card["stamps"][-1]["close"] = True
     _check_card_shape(card, key, where)
-    return card, events[states[-1]]["payload"].get("blocked_by") if states else None
+    return card, events[states[-1]]["payload"].get("blocked_by") if states else None, live
 
 
 # --- Recording a pulled ticket as the item's spec (design 6.6) -------------
@@ -1880,7 +1967,16 @@ class LedgerStore:
     ``--expect-revision`` of the held token, so it lands only on the card the
     pass last read or wrote, all of its events or none (design 6.2). The
     ticket's own records travel as framed notes; the ledger's kinds carry the
-    claim, stamps, tried records and the closed status.
+    lease, the pass's end, stamps, tried records and the closed status.
+
+    A new pass takes or joins the item's lease in its one claim batch: the
+    lease is an ``item.state`` (status ``claimed``, ``owner`` and ``claim``
+    both the holder, ``expires_at``, and ``prior_holder`` when it replaces an
+    expired lease), decided on the item's ``query`` row read at the revision
+    the batch is sent under, and the pass record (``ticket-pass:v2``) says
+    which holder and whether the lease was taken or joined. A claim of the old
+    shape (``session.opened``) still holds the item against every new pass, and
+    another holder's lease blocks its resume.
     """
 
     # What ``choose_store`` chose and why, printed by ``open``; None on a handle built directly.
@@ -1902,6 +1998,15 @@ class LedgerStore:
         self._card = _blank_card(key, title)
         # The item's owner, claim and blocked-by as last read, carried into the closed status.
         self._item: dict[str, Any] = {}
+        # The item's query row, how its live pass claimed it (``_ledger_card``) and the revision, as last read.
+        self._row: Mapping[str, Any] | None = None
+        self._live: dict[str, Any] | None = None
+        self._read_token: str | None = None
+        # The holder the open named (``hold``), or None for the default; then the bound pass's holder and
+        # whether it took or joined the lease (None for a claim of the old shape).
+        self._given: str | None = None
+        self._holder: str | None = None
+        self._lease: str | None = None
         # Threads sharing this handle take turns; a binding event binds under it.
         self._threads = threading.RLock()
 
@@ -1916,6 +2021,19 @@ class LedgerStore:
         """The id of the last pass this handle held that has ended, or None."""
 
         return self._ended
+
+    def hold(self, holder: str | None) -> None:
+        """Name the holder this handle's pass takes or joins the item's lease as; None is the default holder.
+
+        The default holder of a new pass is ``ticket-pass/<pass id>``, so two
+        opens that name no holder are two holders. A holder that is not a name
+        is refused ``holder_invalid``. Only the ledger store has a lease.
+        """
+
+        if holder is not None:
+            _check_holder(holder)
+        with self._threads:
+            self._given = holder
 
     def leftover_notice(self) -> str | None:
         """The one line an open prints when the repository still holds unimported markdown cards (design 6.4), else None."""
@@ -2133,10 +2251,11 @@ class LedgerStore:
     def _claim_event_id(self) -> int | None:
         """The event id of this handle's pass claim, read from the item's export, or None.
 
-        The claim is the one ``session.opened`` keyed
-        ``ticket-pass/K/<pass>/claimed``. No bound pass, an unreadable export,
-        no such event, more than one, or an id that is not an integer is None.
-        Never raises.
+        The claim is the one pass record, the ``item.note`` keyed
+        ``ticket-pass/K/<pass>/record``, or for a pass of the old shape the one
+        ``session.opened`` keyed ``ticket-pass/K/<pass>/claimed``. No bound
+        pass, an unreadable export, no such event, more than one, or an id that
+        is not an integer is None. Never raises.
         """
 
         pass_id = self._pass_id
@@ -2148,10 +2267,13 @@ class LedgerStore:
             return None
         if not export.ok or type(export.data) is not dict or type(export.data.get("events")) is not list:
             return None
-        wanted = f"ticket-pass/{self.key}/{pass_id}/claimed"
+        wanted = {
+            ("item.note", f"ticket-pass/{self.key}/{pass_id}/record"),
+            ("session.opened", f"ticket-pass/{self.key}/{pass_id}/claimed"),
+        }
         found = [
             event.get("id") for event in export.data["events"]
-            if type(event) is dict and event.get("kind") == "session.opened" and event.get("idempotency_key") == wanted
+            if type(event) is dict and (event.get("kind"), event.get("idempotency_key")) in wanted
         ]
         if len(found) != 1 or type(found[0]) is not int:
             return None
@@ -2243,12 +2365,13 @@ class LedgerStore:
         with self._threads:
             row = self._ticket_row()
             if row is None:
-                card, token, item = _blank_card(self.key, self.title), NO_TOKEN, {}
+                card, token, item, live = _blank_card(self.key, self.title), NO_TOKEN, {}, None
             else:
-                card, blocked = _ledger_card(self._data(self._run("export-item", self.key), "read")["events"], self.key, self.title)
+                events = self._data(self._run("export-item", self.key), "read")["events"]
+                card, blocked, live = _ledger_card(events, self.key, self.title)
                 token = str(row["revision"])
                 item = {"owner": row.get("owner"), "claim": row.get("claim"), "blocked_by": blocked}
-            self._card, self._item = card, item
+            self._card, self._item, self._row, self._live, self._read_token = card, item, row, live, token
             return copy.deepcopy(card), token
 
     def _ticket_row(self) -> Mapping[str, Any] | None:
@@ -2390,44 +2513,171 @@ class LedgerStore:
         A used handle is refused ``handle_used`` for a binding event before any
         CLI call; the claim is checked on the card this handle last read or
         wrote, and ``--expect-revision`` makes that check hold at write time. A
-        join sends nothing and returns ``token``; a claim binds the handle
-        only after its batch landed.
+        claim or a join decides the lease on the row this handle read at
+        ``token`` (``_claim``, ``_join``) and binds the handle only after any
+        batch it sends landed; a join that keeps a live lease of its own
+        holder, or continues a pass of the old shape, sends nothing and returns
+        ``token``.
         """
 
         for kind, value in events:
             _validate_event(kind, value, self.key)
         binding = _binding(events)
-        joining = binding is not None and binding[0] == "join"
         with self._threads:
             if binding is not None and (self._pass_id is not None or self._ended is not None):
                 raise _handle_used(self.key, self._pass_id or self._ended)
+            joining = binding is not None and binding[0] == "join"
             _check_pass(self.key, self._card["pass"], binding[1] if joining else self._pass_id, self._ended)
-            if not joining:
+            if binding is None:
                 token = self._send(self._batch(token, events), token)
                 self._card = _fold(self._card, events)
-            if binding is not None:
-                self._pass_id, self._ended = binding[1], None
+                return token
+            if token != (self._read_token or NO_TOKEN):
+                raise _stale(self.key, f"the lease is decided on the item as read at revision {self._read_token or NO_TOKEN}, not {token}")
+            token = self._join(token, binding[1]) if joining else self._claim(token, events[0][1])
+            self._pass_id, self._ended = binding[1], None
             return token
 
-    def release(self) -> None:
-        """Close this handle's own claim with no ``--expect-revision``; a failure is reported and ignored.
+    def _lease_decision(self, holder: str) -> tuple[bool, str | None]:
+        """Whether the pass takes the lease as ``holder`` (else it joins it), and the expired holder it replaces.
 
-        Releasing again sends the same key, so the ledger replays the stored
-        release and writes nothing.
+        Read from the item's row as last read: no item, or an open one, is
+        taken; a live lease of ``holder`` is joined; an expired lease is taken
+        over, naming its holder as the prior holder. Another holder's live
+        lease, a claim naming nobody and a lease whose stamp the ledger cannot
+        read (it reads as live) are ``lease_held``; a blocked or closed item is
+        ``item_not_claimable``.
+        """
+
+        row = self._row
+        if row is None:
+            return True, None
+        recorded = row.get("recorded_status", row.get("status"))
+        if recorded in ("blocked", "closed"):
+            raise _not_claimable(self.key, recorded)
+        if recorded != "claimed":
+            return True, None
+        on_row = row.get("owner") or row.get("claim")
+        expired = row.get("status") == "open" and row.get("recorded_status") == "claimed"
+        if expired and _is_text(row.get("expired_holder")):
+            prior = row["expired_holder"]
+            return True, (None if prior == holder else prior)
+        if _is_text(on_row) and on_row == holder:
+            return False, None
+        raise _lease_held(self.key, on_row if _is_text(on_row) else "a claim that names no holder")
+
+    def _lease_event(self, holder: str, prior: str | None, pass_id: str, token: str) -> dict[str, Any]:
+        payload = {"status": "claimed", "owner": holder, "claim": holder, "expires_at": _lease_expiry()}
+        if prior is not None:
+            payload["prior_holder"] = prior
+        return self._element("item.state", payload, f"ticket-lease/{self.key}/{pass_id}/{token}")
+
+    def _claim(self, token: str, claim: Mapping[str, Any]) -> str:
+        """A new pass's claim: one batch under ``token`` of the creation (on ``none``), the lease when taken, and the pass record."""
+
+        holder = self._given or f"ticket-pass/{claim['id']}"
+        take, prior = self._lease_decision(holder)
+        record = {**claim, "holder": holder, "lease": "taken" if take else "joined"}
+        batch = [self._created()] if token == NO_TOKEN else []
+        if take:
+            batch.append(self._lease_event(holder, prior, claim["id"], token))
+        text = f"ticket-{_PASS_RECORD}:v{_RECORD_VERSION} {_canonical(record)}"
+        batch.append(self._element("item.note", {"text": text}, f"ticket-pass/{self.key}/{claim['id']}/record"))
+        token = self._send(batch, token)
+        self._card = _fold(self._card, [("claim", claim)])
+        self._live = {"shape": "lease", "holder": holder, "lease": record["lease"]}
+        self._holder, self._lease = holder, record["lease"]
+        if take:
+            self._item = {"owner": holder, "claim": holder, "blocked_by": None}
+        return token
+
+    def _join(self, token: str, pass_id: str) -> str:
+        """Continue the live pass ``pass_id``: its holder keeps, renews or takes back the lease; the old shape takes none.
+
+        A pass record names the holder. Its live lease is kept with no write;
+        an expired or released one is taken again under ``token``; another
+        holder's live lease is ``lease_held``, and a holder the open named that
+        is not the record's is ``holder_mismatch``. A pass of the old shape
+        takes no lease and is ``lease_held`` while the item is claimed by
+        anyone but the holder the open named (the default holder,
+        ``ticket-pass/<pass id>``, when it named none); its claim stays.
+        """
+
+        live = self._live or {}
+        if live.get("shape") == "lease":
+            holder = live["holder"]
+            if self._given is not None and self._given != holder:
+                raise _holder_mismatch(self.key, self._given, holder)
+            take, prior = self._lease_decision(holder)
+            if take:
+                token = self._send([self._lease_event(holder, prior, pass_id, token)], token)
+                self._item = {"owner": holder, "claim": holder, "blocked_by": None}
+            self._holder, self._lease = holder, live["lease"]
+            return token
+        holder = self._given or f"ticket-pass/{pass_id}"
+        row = self._row or {}
+        on_row = row.get("owner") or row.get("claim")
+        if row.get("recorded_status", row.get("status")) == "claimed" and on_row != holder:
+            raise _lease_held(self.key, on_row if _is_text(on_row) else "a claim that names no holder")
+        self._holder, self._lease = None, None
+        return token
+
+    def release(self) -> None:
+        """End this handle's own pass; its pass-end lands, and a lease it took is released while it still holds it.
+
+        When the pass took the lease, a fresh read decides (``_release_lease``):
+        the pass-end and the lease's release travel in one batch under that
+        read's revision. Otherwise, or when that batch does not land, the
+        pass-end is sent alone with no ``--expect-revision`` and any lease is
+        left to its expiry; a joined lease is never released. A failure is
+        reported and ignored. Releasing again sends the pass-end's key alone,
+        so the ledger replays the stored one and writes nothing.
         """
 
         with self._threads:
             mine = self._pass_id or self._ended
-            self._pass_id, self._ended = None, mine
+            took, holder = self._lease == "taken", self._holder
+            self._pass_id, self._ended, self._lease = None, mine, None
             if mine is None:
+                return
+            if took and self._release_lease(mine, holder):
                 return
             try:
                 self._send([self._released(mine)], None)
             except StoreUnavailable as exc:
                 print(f"ticket.py: the release of pass {mine} did not land: {exc}", file=sys.stderr)
 
+    def _release_lease(self, pass_id: str, holder: str | None) -> bool:
+        """Send the pass-end and the lease's release under a fresh read's revision; True when that batch landed.
+
+        It is sent only when the fresh read shows ``pass_id`` still the live
+        pass, its record saying it took the lease as ``holder``, and the item's
+        row still claimed by ``holder``. Never raises.
+        """
+
+        try:
+            card, token = self.read()
+            live, row = self._live or {}, self._row or {}
+            holds = (
+                card["pass"] is not None and card["pass"]["id"] == pass_id
+                and live.get("shape") == "lease" and live.get("lease") == "taken" and live.get("holder") == holder
+                and row.get("recorded_status", row.get("status")) == "claimed"
+                and (row.get("owner") or row.get("claim")) == holder
+            )
+            if not holds:
+                return False
+            released = self._element("item.state", {"status": "open"}, f"ticket-lease/{self.key}/{pass_id}/{token}/released")
+            self._send([self._released(pass_id), released], token)
+            return True
+        except Exception:
+            return False
+
     def clear_pass(self, pass_id: str) -> None:
-        """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim."""
+        """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim.
+
+        The pass-end lands as ``release`` sends it, and the lease the pass took
+        is released with it only while the pass still holds it.
+        """
 
         card, _ = self.read()
         live = card["pass"]
@@ -2438,6 +2688,9 @@ class LedgerStore:
                 + "; nothing was changed",
                 code="held" if live else "pass_ended",
             )
+        record = self._live or {}
+        if record.get("lease") == "taken" and self._release_lease(pass_id, record.get("holder")):
+            return
         self._send([self._released(pass_id)], None)
 
     # The batch and the answer.
@@ -2458,7 +2711,8 @@ class LedgerStore:
 
         Ordinary keys carry the held token, one random request token per
         ``apply`` and the event's index; the close's two keys share one random
-        close token and name the pass.
+        close token and name the pass. A claim is never here: ``_claim`` builds
+        its batch.
         """
 
         key = self.key
@@ -2466,12 +2720,7 @@ class LedgerStore:
         batch = []
         for index, (kind, value) in enumerate(events):
             ordinary = f"ticket-write/{key}/{token}/{request}/{index}"
-            if kind == "claim":
-                if token == NO_TOKEN:
-                    batch.append(self._created())
-                purpose = f"ticket pass {value['id']} on {value['host']} at {value['started_at']}"
-                batch.append(self._element("session.opened", {"purpose": purpose}, f"ticket-pass/{key}/{value['id']}/claimed"))
-            elif kind in _RECORD_KINDS:
+            if kind in _RECORD_KINDS:
                 batch.append(self._element("item.note", {"text": f"ticket-{kind}:v{_RECORD_VERSION} {_canonical(value)}"}, ordinary))
             elif kind == "stamp":
                 payload = {"point": value["point"], "phase": value["phase"], "skills": value["next_skills"], "refs": value["refs"]}
@@ -2817,7 +3066,8 @@ class LedgerItemSource:
             {
                 "key": key,
                 "title": row["title"],
-                "status": row["status"],
+                # A claim is a pass's lease on the item, not the ticket's status: the item reads open while it is held.
+                "status": "open" if row["status"] == "claimed" else row["status"],
                 "description": body,
                 "acceptance_criteria": criteria,
                 "updated_at": recorded,
@@ -2941,8 +3191,18 @@ class TicketPass:
         self.resume_card: dict[str, Any] = card
 
     @classmethod
-    def open(cls, key: str, source: TicketSource, store: Store, *, pass_id: str | None = None) -> "TicketPass":
+    def open(
+        cls, key: str, source: TicketSource, store: Store, *, pass_id: str | None = None, holder: str | None = None,
+    ) -> "TicketPass":
         """Open a pass: a new one claims the ticket; ``pass_id`` continues that live pass.
+
+        On the ledger store a new pass takes the item's lease as ``holder``, or
+        joins it when the item is already leased to that holder; with no holder
+        it is ``ticket-pass/<pass id>``, so two opens that name none are two
+        holders. Another holder's live lease is ``lease_held`` and nothing is
+        written. A resume keeps the holder its pass record names. A holder that
+        is not a name is refused ``holder_invalid`` before anything is pulled,
+        read or written. The markdown store has no lease and ignores it.
 
         One store handle serves one pass. A handle bound to a pass, or whose
         pass has ended, is reported ``handle_used`` here, before anything is
@@ -2962,8 +3222,12 @@ class TicketPass:
         a new pass sends its claim, a join sends a ``join`` event.
         """
 
+        if holder is not None:
+            _check_holder(holder)
         if store.pass_id is not None or store.ended is not None:
             raise _handle_used(key, store.pass_id or store.ended)
+        if isinstance(store, LedgerStore):
+            store.hold(holder)
         _check_item_store(key, source, store)
         ticket = source.pull(key)
         if ticket.key != key:
@@ -3012,8 +3276,8 @@ class TicketPass:
         try:
             token = self.store.apply(self._token, [("claim", claim)])
         except StoreUnavailable as exc:
-            if exc.code == "handle_used":
-                # Not a lost race: the handle was bound meanwhile, and the fix is a fresh handle.
+            if exc.code in ("handle_used", "lease_held", "item_not_claimable"):
+                # Not a lost race: the handle was bound meanwhile, or the item's lease or status refuses the claim.
                 raise
             # A lost race: read once more and name the pass that won.
             card, _ = self.store.read()
@@ -3767,7 +4031,7 @@ def _import_batch(card: Mapping[str, Any]) -> list[dict[str, Any]]:
         batch.append(element("item.state", {"status": "closed"}, f"{close}/state" if trusted else ordinary()))
     replayed = [{"id": number, **event} for number, event in enumerate(batch, 1)]
     try:
-        card_back, _ = _ledger_card(replayed, key, card["title"])
+        card_back, _, _ = _ledger_card(replayed, key, card["title"])
     except StoreUnavailable as exc:
         raise _Skip(f"the card cannot be replayed through the ledger mapping: {_one_line(exc)}") from exc
     if card_back != card:

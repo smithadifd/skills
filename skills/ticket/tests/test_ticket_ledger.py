@@ -10,6 +10,7 @@ and is skipped otherwise. Every other row runs against the fake.
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -41,7 +42,17 @@ def kinds(events):
 
 
 def claims(fake):
-    return [event for event in fake.events() if event["kind"] == "session.opened"]
+    """The pass records: one per new pass's claim."""
+
+    return [event for event in fake.events() if event["kind"] == "item.note" and event["payload"]["text"].startswith("ticket-pass:v2 ")]
+
+
+def leases(fake):
+    return [event for event in fake.events() if event["kind"] == "item.state" and event["payload"]["status"] == "claimed"]
+
+
+def closed_states(fake):
+    return [event for event in fake.events() if event["kind"] == "item.state" and event["payload"]["status"] == "closed"]
 
 
 def note(text):
@@ -54,12 +65,22 @@ def after(fake, before):
     return fake.events()[len(before):]
 
 
-def released(session):
+def pass_end(session):
     return [("session.closed", f"ticket-pass/{KEY}/{session.pass_id}/released")]
 
 
+def released(session):
+    """A pass's end that releases the lease it took: the pass-end, then the lease's open state (``keyed`` puts R for
+    the revision of the fresh read in its key)."""
+
+    return pass_end(session) + [("item.state", f"ticket-lease/{KEY}/{session.pass_id}/R/released")]
+
+
 def keyed(events):
-    return [(event["kind"], event["idempotency_key"]) for event in events]
+    return [
+        (event["kind"], re.sub(r"^(ticket-lease/[^/]+/[0-9a-f]+/)[0-9]+(/released)$", r"\1R\2", event["idempotency_key"]))
+        for event in events
+    ]
 
 
 # --- Claims, races and keys ---------------------------------------------------
@@ -68,14 +89,18 @@ def keyed(events):
 def test_H1_two_sessions_racing_to_claim_get_one_pass(fake):
     src = Source()
     open_ledger(fake, src).end()
-    opened = len(claims(fake))
+    opened, leased = len(claims(fake)), len(leases(fake))
     winner = []
     loser = ReadHook(fake.path, KEY, TITLE, lambda: winner.append(open_ledger(fake, src)))
     with pytest.raises(ticket.TicketHeld) as excinfo:
         open_ledger(fake, src, handle=loser)
-    assert fake.appends()[-1].code == "stale_revision"
+    refused = fake.appends()[-1]
+    assert refused.code == "stale_revision"
+    assert kinds(refused.batch) == ["item.state", "item.note"] and refused.argv[-2] == "--expect-revision"
     assert excinfo.value.holder["id"] == winner[0].pass_id
     assert len(claims(fake)) == opened + 1
+    assert len(leases(fake)) == leased + 1
+    assert leases(fake)[-1]["payload"]["owner"] == f"ticket-pass/{winner[0].pass_id}"
     assert fake.store().read()[0]["pass"]["id"] == winner[0].pass_id
 
 
@@ -89,7 +114,7 @@ def test_H2_a_refused_close_writes_nothing_but_the_release(fake):
     assert refusal(excinfo) == "stale"
     assert "other-agent" in str(excinfo.value) and "other-session" in str(excinfo.value)
     assert keyed(after(fake, before)) == released(session)
-    assert "item.state" not in kinds(fake.events())
+    assert closed_states(fake) == []
     assert [e for e in fake.events() if e["kind"] == "item.stopped" and e["payload"]["phase"] == "close"] == []
     resumed = open_ledger(fake, src)
     assert resumed.phase == "outward_go"
@@ -177,12 +202,13 @@ def test_H8_a_close_lands_under_the_bound_keys(fake):
         "payload": {"point": "Ticket pass complete.", "phase": "close", "skills": ["ticket"], "refs": ["example/repo#14"],
                     "source": WRITER},
     }
+    holder = f"ticket-pass/{pass_id}"
     assert state == {
         "kind": "item.state", "item_id": KEY, "idempotency_key": f"ticket-close/{KEY}/{pass_id}/{token}/state",
-        "payload": {"status": "closed", "owner": "someone", "claim": "claim-7", "blocked_by": ["EK-1"], "source": WRITER},
+        "payload": {"status": "closed", "owner": holder, "claim": holder, "source": WRITER},
     }
     assert "--expect-revision" not in release.argv
-    assert [(e["kind"], e["idempotency_key"]) for e in release.batch] == released(session)
+    assert [(e["kind"], e["idempotency_key"]) for e in release.batch] == pass_end(session)
 
 
 def test_H9_an_outside_closed_state_is_not_a_trusted_close(fake):
@@ -207,8 +233,9 @@ def test_H10_a_refused_close_overwrites_no_state(fake):
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",))
     assert refusal(excinfo) == "stale"
-    assert keyed(after(fake, before)) == released(session)
-    assert [e["payload"] for e in fake.events() if e["kind"] == "item.state"] == [outside]
+    assert keyed(after(fake, before)) == pass_end(session)
+    assert [e["payload"] for e in fake.events() if e["kind"] == "item.state"][-1] == outside
+    assert closed_states(fake) == []
 
 
 def test_H48_an_outside_stop_before_close_is_refused_and_only_the_release_lands(fake):
@@ -225,7 +252,7 @@ def test_H48_an_outside_stop_before_close_is_refused_and_only_the_release_lands(
     assert refusal(excinfo) == "stale"
     assert "other-agent" in str(excinfo.value) and "other-session" in str(excinfo.value)
     assert keyed(after(fake, before)) == released(session)
-    assert "item.state" not in kinds(fake.events())
+    assert closed_states(fake) == []
     assert [e for e in fake.events() if e["kind"] == "item.stopped" and e["payload"]["phase"] == "close"] == []
     resumed = open_ledger(fake, src)
     assert resumed.phase == "outward_go"
@@ -273,17 +300,19 @@ def test_H12_later_notes_links_and_session_records_leave_a_close_trusted(fake, l
     assert fake.events() == before
 
 
-def test_H13_release_needs_no_revision_and_lands_once(fake):
+def test_H13_the_pass_end_lands_once_whatever_the_held_revision(fake):
     session = open_ledger(fake, Source())
     fake.outside("item.note", note("see PR 12"))
+    revision = str(fake.events()[-1]["id"])
     session.end()
     first = fake.appends()[-1]
-    assert "--expect-revision" not in first.argv
-    assert keyed(fake.events()[-1:]) == released(session)
+    assert first.argv[-2:] == ["--expect-revision", revision]
+    assert keyed(fake.events()[-2:]) == released(session)
     count = len(fake.events())
     session.store.release()
     second = fake.appends()[-1]
-    assert second.stdin == first.stdin and second.code is None and second.status == 0
+    assert "--expect-revision" not in second.argv
+    assert keyed(second.batch) == pass_end(session) and second.code is None and second.status == 0
     assert len(fake.events()) == count
 
 
@@ -392,8 +421,8 @@ def test_H19_the_pass_is_hidden_on_a_closed_item(tmp_path, monkeypatch):
     assert card["pass"] is None
     with sqlite3.connect(tmp_path / "ledger.db") as database:
         stored = database.execute(
-            "SELECT count(*) FROM events WHERE kind = 'session.opened' AND idempotency_key = ?",
-            (f"ticket-pass/{KEY}/{session.pass_id}/claimed",),
+            "SELECT count(*) FROM events WHERE kind = 'item.note' AND idempotency_key = ?",
+            (f"ticket-pass/{KEY}/{session.pass_id}/record",),
         ).fetchone()[0]
     assert stored == 1
 
@@ -448,12 +477,16 @@ def test_H23_the_first_open_creates_the_item_before_it_records_the_spec_and_clai
     assert create.batch == [CREATED]
     assert [call.verb for call in fake.calls()] == [
         "query", "append-many", "spec", "query", "export-item", "spec", "append-many"]
-    assert kinds(fake.events()) == ["item.created", "item.spec", "session.opened"]
+    assert kinds(fake.events()) == ["item.created", "item.spec", "item.state", "item.note"]
     assert claim.argv[-2:] == ["--expect-revision", str(fake.events()[1]["id"])]
-    (opened,) = claim.batch
-    purpose = f"ticket pass {session.pass_id} on {ticket._host()}"
-    assert opened["kind"] == "session.opened" and opened["idempotency_key"] == f"ticket-pass/{KEY}/{session.pass_id}/claimed"
-    assert opened["payload"]["purpose"].startswith(purpose + " at ") and opened["payload"]["source"] == WRITER
+    taken, record = claim.batch
+    holder = f"ticket-pass/{session.pass_id}"
+    assert taken["idempotency_key"] == f"ticket-lease/{KEY}/{session.pass_id}/{fake.events()[1]['id']}"
+    assert {name: taken["payload"][name] for name in ("status", "owner", "claim", "source")} == {
+        "status": "claimed", "owner": holder, "claim": holder, "source": WRITER}
+    assert record["kind"] == "item.note" and record["idempotency_key"] == f"ticket-pass/{KEY}/{session.pass_id}/record"
+    body = json.loads(record["payload"]["text"].removeprefix("ticket-pass:v2 "))
+    assert (body["id"], body["host"], body["holder"], body["lease"]) == (session.pass_id, ticket._host(), holder, "taken")
     rows = subprocess.run([str(fake.path), "--json", "query", "--item", KEY], capture_output=True, text=True, check=True)
     assert '"type": "ticket"' in rows.stdout
 
@@ -464,7 +497,7 @@ def test_H23_a_claim_on_none_still_creates_the_item_in_its_own_batch(fake):
     handle.apply(ticket.NO_TOKEN, [("claim", {"id": "0123456789abcdef", "host": "here", "started_at": "2026-11-13T00:00:00Z"})])
     (claim,) = fake.appends()
     assert claim.argv[-2:] == ["--expect-revision", "none"]
-    assert [element["kind"] for element in claim.batch] == ["item.created", "session.opened"]
+    assert [element["kind"] for element in claim.batch] == ["item.created", "item.state", "item.note"]
     assert claim.batch[0] == CREATED
 
 
@@ -553,20 +586,25 @@ def test_H24_every_batch_the_store_builds_passes_the_ledger_schema(tmp_path):
                         assert "close" not in element["payload"]
                     kinds_sent.add(element["kind"])
     assert kinds_sent == {
-        "item.created", "session.opened", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
+        "item.created", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
 
 
 def _ledger_validate_payload():
-    """The ledger's own ``validate_payload``, loaded from ``ledger/schema.py`` beside the CLI ``LEDGER_CLI`` names."""
+    """The ledger's own ``validate_payload``, from ``ledger/schema.py`` beside the CLI ``LEDGER_CLI`` names.
+
+    It is imported as ``ledger.schema``, inside its package, because the schema's check of a lease stamp
+    imports ``ledger.lease`` relatively.
+    """
 
     cli = Path(LEDGER_CLI).resolve()
     for root in (cli.parent, cli.parent.parent / "skills" / "_lib"):
-        schema = root / "ledger" / "schema.py"
-        if schema.is_file():
-            spec = importlib.util.spec_from_file_location("ledger_schema_under_test", schema)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module.validate_payload
+        if (root / "ledger" / "schema.py").is_file():
+            saved = list(sys.path)
+            sys.path.insert(0, str(root))
+            try:
+                return importlib.import_module("ledger.schema").validate_payload
+            finally:
+                sys.path[:] = saved
     raise AssertionError(f"no ledger/schema.py beside {cli}")
 
 
@@ -600,12 +638,19 @@ def test_H25_a_ticket_note_with_an_unknown_frame_is_unreadable(fake, frame):
     assert fake.events() == before
 
 
-@pytest.mark.parametrize("body", ["not json", "json list", "fails the validator"])
+_A_PASS_RECORD = {"id": "0123456789abcdef", "host": "here", "started_at": "2026-11-22T00:00:00Z", "holder": "seat-a"}
+
+
+@pytest.mark.parametrize("body", ["not json", "json list", "fails the validator", "a pass record that fails its validator"])
 def test_H26_a_ticket_note_that_does_not_parse_is_unreadable(fake, body):
     src = Source()
     build_ledger(fake, src, "S2", 0).end()
-    text = "ticket-review:v2 " + {"not json": "{", "json list": "[1]",
-                                   "fails the validator": '{"round": "2", "verdict": "pass"}'}[body]
+    text = {
+        "not json": "ticket-review:v2 {",
+        "json list": "ticket-review:v2 [1]",
+        "fails the validator": 'ticket-review:v2 {"round": "2", "verdict": "pass"}',
+        "a pass record that fails its validator": "ticket-pass:v2 " + ticket._canonical({**_A_PASS_RECORD, "lease": "borrowed"}),
+    }[body]
     fake.outside("item.note", note(text))
     before = fake.events()
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
@@ -650,7 +695,8 @@ def test_H28_a_refusal_that_is_not_a_race_is_not_stale(fake, code):
     excinfo, message, later = _refused_review(fake, code)
     assert refusal(excinfo) == "ledger_refused"
     assert code in str(excinfo.value) and message in str(excinfo.value)
-    assert [kinds(call.batch) for call in later] == [["session.closed"]]
+    assert [call.verb for call in later] == ["query", "export-item", "append-many"]
+    assert kinds(later[-1].batch) == ["session.closed", "item.state"]
     assert fake.store().read()[0]["pass"] is None
 
 
@@ -659,13 +705,14 @@ def test_H29_exit_one_and_four_refusals_are_permanent(fake, code):
     excinfo, _, later = _refused_review(fake, code)
     assert refusal(excinfo) == "ledger_refused"
     assert code in str(excinfo.value)
-    assert [call.verb for call in later] == ["append-many"]
+    # The release's fresh read (query, export-item) comes first: no batch-key lookup follows the refused answer.
+    assert [call.verb for call in later] == ["query", "export-item", "append-many"]
 
 
 def test_H30_a_usage_answer_is_incompatible(fake):
     excinfo, _, later = _refused_review(fake, "usage")
     assert refusal(excinfo) == "ledger_incompatible"
-    assert [call.verb for call in later] == ["append-many"]
+    assert [call.verb for call in later] == ["query", "export-item", "append-many"]
 
 
 @pytest.mark.parametrize(
@@ -739,7 +786,7 @@ def test_H33_a_join_appends_nothing_and_binds_under_the_store_lock(fake):
     landed = handle.apply(token, [("tried", {"what": "A write after the join.", "phase": "build"})])
     assert landed == str(fake.events()[-1]["id"])
     assert fake.events()[-1]["kind"] == "item.tried"
-    assert kinds(fake.events()).count("session.opened") == 1
+    assert len(claims(fake)) == 1
 
 
 def test_a_claim_binds_the_handle_before_the_store_lock_is_released(fake):

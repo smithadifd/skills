@@ -1151,9 +1151,9 @@ def test_F8_a_closed_card_takes_no_claim_on_the_ledger_and_the_markdown_store(re
     assert read_card(repo)["pass"] is None
     fake = FakeLedger(tmp_path / "ledger")
     build_ledger(fake, src, "S6")
-    opened = [event for event in fake.events() if event["kind"] == "session.opened"]
+    before = fake.events()
     assert open_ledger(fake, src).phase == "closed"
-    assert [event for event in fake.events() if event["kind"] == "session.opened"] == opened
+    assert fake.events() == before
 
 
 # --- open: the pulled ticket's key, and a closed ticket's review -------------

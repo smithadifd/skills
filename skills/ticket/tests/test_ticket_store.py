@@ -1000,7 +1000,7 @@ def test_a_markdown_ticket_opened_after_a_ledger_appears_begins_a_ledger_card_un
     session = ticket.TicketPass.open(KEY, Source(), handle)
     assert session.live and session.plan is None  # a fresh ledger card, claimed
     # The intake's creation batch (design 6.6), then the claim.
-    assert [[element["kind"] for element in call.batch] for call in fake.appends()] == [["item.created"], ["session.opened"]]
+    assert [[element["kind"] for element in call.batch] for call in fake.appends()] == [["item.created"], ["item.state", "item.note"]]
     assert fake.store().read()[0]["pass"]["id"] == session.pass_id
     assert session.reconciliation[-1].startswith("markdown ticket cards remain in ")  # the leftover notice only
     assert card_bytes(repo) == before  # the markdown card is untouched

@@ -62,7 +62,9 @@ def versions(fake):
 
 
 def claims(fake):
-    return [event for event in fake.events() if event["kind"] == "session.opened"]
+    """The pass records: one per new pass's claim."""
+
+    return [event for event in fake.events() if event["kind"] == "item.note" and event["payload"]["text"].startswith("ticket-pass:v2 ")]
 
 
 def set_command(fake, source=SOURCE):
@@ -155,7 +157,8 @@ def test_a_status_flip_alone_writes_no_version_and_no_status(repo, fake):
     session = open_ticket(repo, src)
     assert versions(fake) == [1]
     assert session.reconciliation[1:] == ()
-    assert [event for event in fake.events() if event["kind"] == "item.state"] == []
+    # The only states are each pass's lease and its release, never the tracker's status.
+    assert [event["payload"]["status"] for event in fake.events() if event["kind"] == "item.state"] == ["claimed", "open", "claimed"]
     # Neither status reaches any event the ledger holds (a host name has no space in it).
     assert all("In Progress" not in json.dumps(event["payload"]) and "Won't Do" not in json.dumps(event["payload"])
                for event in fake.events())
@@ -186,7 +189,7 @@ def test_a_ledger_item_source_records_no_spec_of_its_own(repo, fake):
 def test_an_item_a_person_filed_is_not_created_again(repo, fake, path):
     fake.new_item()
     session = open_ticket(repo, write_ticket(path))
-    assert [[element["kind"] for element in call.batch] for call in fake.appends()] == [["session.opened"]]
+    assert [[element["kind"] for element in call.batch] for call in fake.appends()] == [["item.state", "item.note"]]
     assert versions(fake) == [1] and session.live is True
 
 
