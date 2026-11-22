@@ -394,6 +394,10 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `held` (`TicketHeld`) | another pass is live; the message names its id, host, started-at and the release command | the command names the installed script by its absolute path (the directory of `ticket.py` itself, as `SKILL.md` writes `${CLAUDE_SKILL_DIR}/ticket.py`), so it runs from the target repository. The command is rendered with `shlex.join` over its whole argv (interpreter, script path, subcommand, key, pass id), so no stored value can add a shell word. A pass id is lowercase hex; a card whose live pass id is anything else is `card_unreadable` |
 | `pass_ended` | this handle's pass has ended, or is no longer the live pass; nothing was written | a refusal (`StoreUnavailable`), never a `TicketError`: every step taken on a pass that is not live raises it, including any step on a pass that stopped at the cap |
 | `handle_used` | the store handle is bound to a pass, or a pass it held has ended, and a binding event (`claim` or `join`) or an `open` reached it; nothing was written | a refusal (`StoreUnavailable`) raised by `apply` under the store's lock on a `claim` or `join` (the guard), ahead of the card read and the token check, so it wins over `stale` and over every card refusal, and by `open` before `source.pull` (the early report), for a new pass and for a join alike; the message names the used pass and the fix (open each pass with a fresh store handle); the lost-claim handler re-raises it unchanged. The rule it enforces is section 5's one handle per pass |
+| `lease_held` | on the ledger, another holder's live lease is on the item, or a claim that names no holder, so a new pass does not open and a resume does not continue (section 5.1); nothing was written | a lease whose expiry stamp the ledger cannot read counts as live; the lost-claim handler re-raises it unchanged |
+| `holder_invalid` | the lease holder `open` was given is not a name: empty, not text, over 200 characters, or holding whitespace or a control character; nothing was read or written | raised by `open` before anything else, and by the ledger store's `apply` for the holder a claim or join carries |
+| `holder_mismatch` | a resume named a holder that is not the one its pass record names (section 5.1); nothing was written | |
+| `item_not_claimable` | on the ledger, the item's recorded status is `blocked` or `closed`, so the pass takes no lease on it; nothing was written | the lost-claim handler re-raises it unchanged |
 | `plan_unidentifiable` | the stored plan cannot be read (section 3.1) | also raised when the plan is `{}`, `[]` or `""` (only `None` is "no plan") |
 | `card_unreadable` | the card does not parse or has the wrong shape, including a plan snapshot that breaks the snapshot rules while its identity is readable (section 2); on the ledger, also a ticket record note whose frame, version or body cannot be read (section 6.2.3) | |
 | `close_invalid` | `status` is closed but the close does not validate | a valid card can only reach `closed` through the atomic close (D2), so an invalid close is an edit or an outside status write, and D4 says a corrupt card is refused, not resumed into a writable pass |
@@ -462,7 +466,9 @@ and no pass is live. The claim is a conditional write at the token read, so two 
 the same card cannot both claim: the loser's write is stale, it re-reads once, and reports `held`
 naming the winner. A person's `release <key> <pass-id>` clears the live claim only when the id names
 it. Release is the one unconditional write: it clears this handle's own claim whatever has landed
-since, so a pass that gave up never stays held. No claim expires by time.
+since, so a pass that gave up never stays held. No claim expires by time; on the ledger store the claim
+also takes or joins the item's lease, which does, and which the release frees only while the pass still
+holds it (5.1).
 
 One live pass per ticket, and **one store handle per pass**, enforced at the one moment it can be:
 inside the store, under its own lock, as part of the write that binds the handle. A handle carries the
@@ -493,14 +499,16 @@ pass's claim. The rules below make that state unreachable. Each has matrix rows.
 4. **A `join` is an event with no card effect.** It names exactly the id of the live pass it continues
    (lowercase hex, like a claim id); folding it changes nothing; the markdown store saves nothing for
    it, so the card's bytes and modification time are unchanged and the token returned is the one
-   passed. The ledger store appends nothing for it and binds the handle under its own serialization
-   (section 6.2).
+   passed. The ledger store appends nothing for it, except the lease a resume takes again when it has
+   expired or was released (5.1), and binds the handle under its own serialization (section 6.2).
 5. **`release()` clears only its own claim.** It reads the handle's `pass_id`, marks the handle ended,
    and under the lock clears the card's `pass` only when its id equals that one. By rule 1 a handle
    never held another id, so no pass object can release a pass it did not open, and a handle that was
    never bound clears nothing. This is what makes the unconditional release safe.
 6. **The lost-claim handler passes `handle_used` through.** A refused claim is re-read once and
-   reported `held` naming the winner, except a `handle_used`, which is re-raised unchanged: `held`
+   reported `held` naming the winner, except a `handle_used`, a `lease_held` or an
+   `item_not_claimable`, each re-raised unchanged (the last two are the item's lease or status, not a
+   lost race): `held`
    would send the caller to the release command for a pass that is not stuck, while the fix is a fresh
    handle. Because the used-handle check runs ahead of the token check (rule 1), the second of two
    opens on one handle whose reads both predate the first's claim is refused `handle_used`, not
@@ -517,6 +525,51 @@ A handle's states: *fresh* (no pass, nothing ended) becomes *bound to P* only wh
 *ended, held P*; neither later state returns to fresh, and a binding event on either is `handle_used`
 (any other event on an ended handle is `pass_ended`). A handle shared by threads for the *same* pass
 stays supported: they take turns on its thread lock.
+
+### 5.1 The ledger lease
+
+On the ledger store the claim is also the item's lease, the ledger's own claim: an `item.state`
+`{status: "claimed", owner: H, claim: H, expires_at, prior_holder?}`. `H` is the *holder*: the name
+`open(..., holder=H)` gives, or `ticket-pass/<pass id>` when it gives none, so two opens that name no holder
+are two holders; never the ledger's actor and never an environment default. The holder travels with that
+open's own claim or join (`apply(..., holder=H)`) and is never kept on the store handle, so two opens racing
+on one handle each claim as the holder they named. `expires_at` is the ledger's
+UTC millisecond stamp, four hours after the claim (the ledger's default lease), and nothing renews it while
+the pass works; a pass idle past it is resumed by its id. The pass never calls the ledger's `claim` verb,
+which takes no `--expect-revision`, claims a closed item, and sets the owner from the ledger's actor.
+
+- **A new pass** decides on the item's `query` row read at the revision R its claim is sent under (a handle
+  that read another revision is `stale`), after the card's own claim check (a live pass of either shape is
+  `held`): no item, or one whose recorded status is `open`, is taken; a live lease of `H` is joined; an
+  expired lease (the row's `status` is `open` while its `recorded_status` is `claimed`) is taken, naming
+  the row's `expired_holder` as `prior_holder` when that is not `H`; another holder's live lease, a claim
+  naming no holder, and a lease whose stamp does not parse (the ledger reads it as live) are `lease_held`;
+  a `blocked` or `closed` item is `item_not_claimable`. One batch under `--expect-revision R` holds
+  `item.created` on `none`, the lease when it is taken, and the pass record, a note
+  `ticket-pass:v2 {id, host, started_at, holder, lease}` keyed `ticket-pass/K/P/record`, `lease` being
+  `taken` or `joined`. A batch that answers `stale_revision` is re-read once and reported `held` naming
+  the winner, as before.
+- **A resume** (`open(pass_id=P)`) of a pass with a record keeps the record's holder (an `open` naming
+  another is `holder_mismatch`): its live lease is kept with no write; an expired or released one is
+  taken again in one batch under R; another holder's live lease is `lease_held`. A pass claimed in the old
+  shape, the `session.opened` keyed `ticket-pass/K/P/claimed` (which `import-cards` still writes for a live
+  markdown pass), takes no lease when it resumes, and is `lease_held` while the item is claimed by anyone
+  but the holder the open names; its claim is not released. A live claim of either shape holds the ticket
+  against every new pass, so an old claim and a lease never both authorize writers on one item.
+- **The end.** The pass-end (`session.closed` keyed `ticket-pass/K/P/released`) always lands. A pass took
+  the lease when its record says `taken`, or when it wrote the lease since (a joined pass whose resume
+  took the lease again after its holder released it or it expired). When the pass took the lease, a fresh
+  read decides: while that read shows the pass still live, having taken the lease as `H`, and the row still
+  claimed by `H`, the pass-end and `item.state {status: "open"}` (key
+  `ticket-lease/K/P/<R>/released`) travel in one batch under that read's revision R; otherwise, or when
+  that batch does not land, the pass-end is sent alone with no `--expect-revision` and the lease is left
+  to its expiry. A joined lease is never released. `ticket.py release` follows the same rule. At close the
+  closed state replaces the lease and carries its `owner` and `claim`.
+- **The fold.** A pass record or an old-shape claim makes its pass the card's `pass`; the matching
+  `session.closed` clears it, and so does a closed state: the export hides session records before a close,
+  but a pass record stays visible, so a closed item never reads a live pass. A lease of the record's holder
+  keyed `ticket-lease/K/P/<R>`, written after the live pass's record, makes that pass one that took the
+  lease. A pass record its validator refuses is `card_unreadable`.
 
 ## 6. Both stores behind one interface
 
@@ -599,15 +652,15 @@ pass `P`, held token `R`, close token `T`:
 | Event | Ledger kind, payload (every key named; no other key is sent) | Idempotency key |
 |---|---|---|
 | `claim` on token `none` | `item.created {type: "ticket", title, source: W}`, then the `claim` row below, in one batch | `ticket-item/K/created` |
-| `claim` | `session.opened {purpose: "ticket pass <id> on <host> at <started_at>", source: W}` | `ticket-pass/K/P/claimed` |
-| `join` | no event: a join appends nothing; the handle binds to `P` under the store's own serialization, and a used handle is refused `handle_used` before any CLI call | none |
-| `release` | `session.closed {outcome, source: W}`, no `--expect-revision` | `ticket-pass/K/P/released` |
+| `claim` | when the lease is taken, `item.state {status: "claimed", owner: H, claim: H, expires_at, prior_holder?, source: W}`; then `item.note {text: "ticket-pass:v2 " + canonical JSON of {id, host, started_at, holder, lease}, source: W}` (5.1) | `ticket-lease/K/P/R`; `ticket-pass/K/P/record` |
+| `join` | no event, unless the record's lease has expired or was released: then the lease row above, alone (5.1); the handle binds to `P` under the store's own serialization, and a used handle is refused `handle_used` before any CLI call | `ticket-lease/K/P/R` |
+| `release` | `session.closed {outcome, source: W}`; with `item.state {status: "open", source: W}` under `--expect-revision` of a fresh read while the pass still holds the lease it took, else alone with no `--expect-revision` (5.1) | `ticket-pass/K/P/released`; `ticket-lease/K/P/R/released` |
 | `plan` | `item.note {text: "ticket-plan:v2 " + canonical JSON of the plan snapshot, source: W}` | ordinary |
 | `decision` | `item.note {text: "ticket-decision:v2 " + canonical JSON of the decision record, source: W}` | ordinary |
 | `review` | `item.note {text: "ticket-review:v2 " + canonical JSON of the review record, source: W}` | ordinary |
 | `stamp` | `item.stopped {point, phase: <store phase>, skills: next_skills, refs, source: W}`; `close` is not a payload key: the normalizer derives it from the key on read | ordinary; the close stamp: `ticket-close/K/P/T/stop` |
 | `tried` | `item.tried {what, phase: <store phase>, outcome?, evidence?, source: W}`; an absent optional field is omitted, never sent as null | ordinary |
-| `closed` | `item.state {status: "closed", owner?, claim?, blocked_by?, source: W}`; `owner`, `claim` and `blocked_by` carried from the read when present | `ticket-close/K/P/T/state` |
+| `closed` | `item.state {status: "closed", owner?, claim?, blocked_by?, source: W}`; `owner`, `claim` and `blocked_by` carried from the read when present, or from the lease the pass wrote | `ticket-close/K/P/T/state` |
 
 Ordinary keys are `ticket-write/K/R/<request token>/<n>`: one random request token per `apply`, `n`
 the event's index in the batch. A retry of the same `apply` reuses the request token. Every batch
@@ -621,7 +674,7 @@ version lives inside the note text, where the skill, not the ledger, reads it.
 |---|---|---|---|
 | `item.created.type` | enum of item types | `"ticket"` | H23 |
 | `item.created.title` | text, length ≥ 1 | the ticket title (the source refuses an empty title) | I1, H23 |
-| `session.opened.purpose`, `session.closed.outcome` | optional text ≥ 1 | the purpose or outcome sentence | H1, H13 |
+| `session.closed.outcome` | optional text ≥ 1 | the outcome sentence | H13 |
 | `item.note.text` | text ≥ 1, no maximum | frame, one space, canonical JSON (6.2.3) | H18, H24 |
 | `item.stopped.point` | text, 1–600 | the point; the skill refuses an empty or over-long point first | I2 |
 | `item.stopped.phase` | enum `orient plan build review close` | the store phase (section 2) | I2, H8 |
@@ -631,8 +684,10 @@ version lives inside the note text, where the skill, not the ledger, reads it.
 | `item.tried.phase` | enum, as above | the store phase | I8 |
 | `item.tried.outcome` | optional text ≥ 1 | `outcome`, when present | I8 |
 | `item.tried.evidence` | optional, ≤ 300, one line | `evidence`, when present | I8 |
-| `item.state.status` | enum `open claimed blocked closed` | `"closed"` | H8 |
-| `item.state.owner`, `item.state.claim` | optional text ≥ 1 | the values `query` reported, when non-empty | H8 |
+| `item.state.status` | enum `open claimed blocked closed` | `"claimed"` (the lease), `"open"` (its release), `"closed"` | M1, H13, H8 |
+| `item.state.owner`, `item.state.claim` | optional text ≥ 1 | the holder, on the lease; on the close, the values `query` reported or the lease's, when non-empty | M1, H8 |
+| `item.state.expires_at` | a UTC millisecond stamp that is a real date and time | four hours after the claim (5.1) | M1, H24 |
+| `item.state.prior_holder` | optional text ≥ 1 | the expired holder the lease replaces | M14 |
 | `item.state.blocked_by` | optional list of text ≥ 1 | the latest `item.state`'s list, when present | H8, H10 |
 | every `source` | optional text ≥ 1 | `W`, never empty | H24 |
 
@@ -651,9 +706,10 @@ mapping table:
 | Step | Batch | `--expect-revision` |
 |---|---|---|
 | `open` of a tracker or JSON-file ticket whose item does not exist yet (6.6) | `item.created`, alone, before `spec set` | `none` |
-| a claim on token `none` (a handle used without an open: a direct `apply`) | `item.created`, `session.opened` | `none` |
-| `open` (new pass), token `R` | `session.opened` | `R` |
-| `open(pass_id=P)`; `finish_orient`; `finish_research` | nothing | — |
+| a claim on token `none` (a handle used without an open: a direct `apply`) | `item.created`, `item.state` (the lease), `item.note` (the pass record) | `none` |
+| `open` (new pass), token `R` | `item.state` (the lease, when taken), `item.note` (the pass record) | `R` |
+| `open(pass_id=P)` whose record's lease expired or was released | `item.state` (the lease) | `R` |
+| `open(pass_id=P)` otherwise; `finish_orient`; `finish_research` | nothing | — |
 | `begin_build`; `require_outward_go`; `approved` | nothing (a `query` for the token comparison, then `export-item` only when equal) | — |
 | `present_plan` | `item.note` (plan), `item.stopped` (phase `plan`) | `R` |
 | `record_go("plan")` | `item.note` (decision); then, outside the batch, `elect` and `append decision.recorded` (fail closed) | `R` |
@@ -664,7 +720,7 @@ mapping table:
 | `record_tried` | `item.tried` | `R` |
 | `more_info` | `item.stopped` (the store phase of the live phase) | `R` |
 | `close` | `item.stopped` (phase `close`, key `ticket-close/K/P/T/stop`), `item.state` (key `ticket-close/K/P/T/state`) | `R` |
-| `end()`, release | `session.closed` | none |
+| `end()`, release | `session.closed`, with `item.state` (open) while the pass still holds the lease it took (5.1) | a fresh read's revision; none for `session.closed` alone |
 
 Every `open` of a tracker or JSON-file ticket also runs one `spec set` before the card read (6.6), a
 new pass and `open(pass_id=P)` alike; it writes an `item.spec` event only for a changed ticket. Because

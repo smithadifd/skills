@@ -164,12 +164,12 @@ class FakeLedger:
         return [e for e in self.events() if e["item_id"] == item and e["kind"] == "item.spec"][-1]["payload"]["content_hash"]
 
 
-def open_ledger(cli, src, pass_id=None, handle=None):
-    """Open a pass on a fresh ledger handle over ``cli`` (a ``FakeLedger`` or the path of a real CLI)."""
+def open_ledger(cli, src, pass_id=None, handle=None, holder=None):
+    """Open a pass on a fresh ledger handle over ``cli`` (a ``FakeLedger`` or the path of a real CLI), as ``holder``."""
 
     if handle is None:
         handle = cli.store() if isinstance(cli, FakeLedger) else ticket.LedgerStore(cli, KEY, TITLE)
-    return ticket.TicketPass.open(KEY, src, handle, pass_id=pass_id)
+    return ticket.TicketPass.open(KEY, src, handle, pass_id=pass_id, holder=holder)
 
 
 def build_ledger(cli, src, stage, rounds=0):

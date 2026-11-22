@@ -102,7 +102,7 @@ def test_K1_a_declined_outward_go_is_bound_to_the_captured_utterance_and_closes_
     assert (session.phase, session.live) == ("closed", False)
     stops = _of_kind(fake, "item.stopped")
     assert (stops[-1]["payload"]["point"], stops[-1]["payload"]["phase"]) == (KEPT_LOCAL, "close")
-    assert [event["payload"]["status"] for event in _of_kind(fake, "item.state")] == ["closed"]
+    assert [event["payload"]["status"] for event in _of_kind(fake, "item.state")] == ["claimed", "closed"]
     with pytest.raises(ticket.StoreUnavailable):
         session.require_outward_go()
     resumed = open_ledger(fake, src)

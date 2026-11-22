@@ -20,7 +20,12 @@ latest close (all of them while it is closed), and ``append-many`` lands its
 batch whole or not at all, replays a stored key, refuses a stored key that
 holds another event (``conflict``) and checks ``--expect-revision`` once,
 before the first event it writes (``stale_revision``, naming the newest
-event's actor and session).
+event's actor and session). ``query`` gives the lease-aware row of ledger 0.6:
+``status`` is the status a reader acts on, ``open`` for a claim whose
+``expires_at`` stamp has passed (by this machine's clock; a claim with no stamp,
+or one that does not parse, stays ``claimed``), ``recorded_status`` is the
+status the events record, and for an expired claim ``expired_holder`` and
+``expires_at`` name its holder and stamp (both null otherwise).
 
 Its state is one JSON file, named by the first argument: the events, every
 call (argv, stdin, exit status and error code), how the help probe answers,
@@ -86,6 +91,25 @@ def status_of(events):
     return status
 
 
+def lease_stamp(moment):
+    """A moment in the ledger's lease form: UTC, millisecond precision, so the stamps order as text."""
+
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def expired_stamp(recorded, latest):
+    """The stamp of a claim whose lease has passed, else None: the ledger's ``lease.read_status``."""
+
+    expires = latest.get("expires_at")
+    if recorded != "claimed" or type(expires) is not str:
+        return None
+    try:
+        datetime.strptime(expires, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        return None
+    return expires if expires <= lease_stamp(datetime.now(timezone.utc)) else None
+
+
 def query(state, item):
     events = of_item(state["events"], item)
     created = [event for event in events if event["kind"] == "item.created"]
@@ -94,9 +118,13 @@ def query(state, item):
     states = [event["payload"] for event in events if event["kind"] == "item.state"]
     latest = states[-1] if states else {}
     kind = {"type": created[0]["payload"]["type"]} if "type" in created[0]["payload"] else {}
+    recorded = status_of(events)
+    expired = expired_stamp(recorded, latest)
     row = {
         "item_id": item, **kind, "title": created[0]["payload"]["title"],
-        "status": status_of(events), "owner": latest.get("owner"), "claim": latest.get("claim"),
+        "status": "open" if expired else recorded, "recorded_status": recorded,
+        "owner": latest.get("owner"), "claim": latest.get("claim"),
+        "expired_holder": (latest.get("owner") or latest.get("claim")) if expired else None, "expires_at": expired,
         "revision": events[-1]["id"],
     }
     return {"items": [row], "limit": 50, "truncated": False}
