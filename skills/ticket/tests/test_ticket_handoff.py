@@ -693,6 +693,84 @@ def test_O23_a_pass_that_took_the_lease_before_the_hand_off_never_releases_the_l
     only_the_pass_end(backend, mark, first.pass_id, claim)
 
 
+# --- O24-O27: one rule for the lease once a pass saw the item handed off, after the handback too ----------------
+
+
+@pytest.mark.parametrize("case", ["the release command", "its own handle ends"])
+def test_O24_after_the_handback_a_pass_that_took_the_lease_before_the_hand_off_still_never_releases_it(repo, backend, case):
+    # The loop re-stamps its claim at the done and still works under it: whichever handle ends the pass, the lease
+    # stays the loop's for the rest of the pass's life (design 6.8).
+    first = took_then_handed_off(repo, backend)
+    backend.done("build-1")
+    claim = latest_claim(backend)
+    mark = len(backend.events())
+    if case == "the release command":
+        assert ticket.main(["release", KEY, first.pass_id]) == 0
+    else:
+        first.end()
+    only_the_pass_end(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("case", ["while handed off", "after the handback"])
+def test_O25_the_release_command_clears_a_crashed_hand_off_resume_and_leaves_the_loops_lease(repo, backend, case):
+    first = took_then_handed_off(repo, backend)
+    resumed = open_handoff(repo, declared=DECLARED, pass_id=first.pass_id)
+    assert (resumed.live, resumed.pass_id) == (True, first.pass_id)
+    # The resume crashes and never ends; a person clears it with the release command.
+    if case == "after the handback":
+        backend.done("build-1")
+    claim = latest_claim(backend)
+    mark = len(backend.events())
+    assert ticket.main(["release", KEY, first.pass_id]) == 0
+    only_the_pass_end(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("case", ["the release command", "its own handle ends"])
+def test_O26_a_pass_opened_through_the_hand_off_never_releases_a_lease_it_takes_after_the_handback(repo, backend, case):
+    # The pass began while the item was handed off, so the lease is never its own to release, even one it takes
+    # again through the ledger-id source after the loop let the item go.
+    handed_off(backend)
+    first = open_handoff(repo, declared=DECLARED)
+    backend.done("build-1")
+    backend.write("item.state", {"status": "open"})
+    resumed = open_ledger_id(repo, holder=HOLDER, pass_id=first.pass_id)
+    assert (resumed.live, resumed.pass_id) == (True, first.pass_id)
+    (taken,) = [event for event in backend.events() if event["kind"] == "item.state"
+                and (event["idempotency_key"] or "").startswith(f"ticket-lease/{KEY}/{first.pass_id}/")]
+    assert taken["payload"]["owner"] == HOLDER
+    claim = latest_claim(backend)
+    mark = len(backend.events())
+    if case == "the release command":
+        assert ticket.main(["release", KEY, first.pass_id]) == 0
+    else:
+        resumed.end()
+    only_the_pass_end(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("end", ["the release command", "its own handle ends"])
+@pytest.mark.parametrize("case", ["never handed off", "taken after an earlier hand-off's handback"])
+def test_O27_a_default_pass_still_releases_the_lease_it_took_on_an_item_not_handed_off_in_its_life(repo, backend, case, end):
+    backend.file_row()
+    if case == "taken after an earlier hand-off's handback":
+        backend.take()
+        backend.hand_off()
+        backend.done("build-1")
+        backend.write("item.state", {"status": "open"})
+    first = open_ledger_id(repo, holder=HOLDER)
+    (record,) = [record_of(event) for event in pass_records(backend.events())]
+    assert (record["id"], record["holder"], record["lease"]) == (first.pass_id, HOLDER, "taken")
+    mark = len(backend.events())
+    if end == "the release command":
+        assert ticket.main(["release", KEY, first.pass_id]) == 0
+    else:
+        first.end()
+    landed = [(event["kind"], event["idempotency_key"]) for event in backend.events()[mark:]]
+    assert landed[0] == ("session.closed", f"ticket-pass/{KEY}/{first.pass_id}/released")
+    assert len(landed) == 2 and landed[1][0] == "item.state", landed
+    assert landed[1][1].startswith(f"ticket-lease/{KEY}/{first.pass_id}/") and landed[1][1].endswith("/released"), landed
+    assert row(backend)["status"] == "open"
+
+
 # --- G: what must not change ------------------------------------------------------------------------------------
 
 def _cli(*args):

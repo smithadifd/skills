@@ -2091,15 +2091,18 @@ def _handoff_outcome(events: Sequence[Mapping[str, Any]], key: str) -> tuple[dic
         return None, exc
 
 
-def _handed_off(events: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether the item has an open ``loop.intent`` whose payload version is not 1 (design 6.8).
+def _handed_off(events: Sequence[Mapping[str, Any]], since: int | None = None) -> bool:
+    """Whether the item has an open ``loop.intent`` whose payload version is not 1 (design 6.8); with ``since``,
+    whether it had one at any point from the event at index ``since`` on.
 
     Such an item opens only through the hand-off source. An intent whose operation and operation id cannot be read,
-    or whose version cannot be, counts as open: a done cannot be matched to it.
+    or whose version cannot be, counts as open: a done cannot be matched to it. With ``since`` only a done before
+    that event closes an intent, so an intent open then, or written after it, counts even when its done came later:
+    that is how the fold decides a pass saw the item handed off, after the handback too.
     """
 
     closed = set()
-    for event in events:
+    for event in events[:since]:
         payload = event.get("payload")
         if event.get("kind") == "loop.done" and type(payload) is dict:
             closed.add((payload.get("operation"), payload.get("operation_id")))
@@ -2134,7 +2137,11 @@ def _ledger_card(
     holder that the live pass wrote after its record (the ``item.state``
     keyed ``ticket-lease/K/<pass>/<revision>``, as a resume writes when it
     takes the lease again) makes it ``taken``, so the pass releases it at its
-    end. An item that was closed
+    end. A pass that saw the item handed off (an intent ``_handed_off`` counts,
+    open when the pass began or written since) reads ``joined`` whatever its
+    record says or it took since: from the hand-off on, for the rest of that
+    pass's life and after the handback too, the lease is the parent's, and no
+    end path of the pass releases it (design 6.8). An item that was closed
     once reads ``closed``; its close stamp is marked ``close`` only when the
     close is trusted, so an outside status write is refused ``close_invalid``
     and never resumed.
@@ -2143,6 +2150,7 @@ def _ledger_card(
     where = f"ledger item {key}"
     card = _blank_card(key, title)
     live: dict[str, Any] | None = None
+    start = 0  # the index of the live pass's record: where the pass that holds a lease began
     pass_key = re.compile(rf"ticket-pass/{re.escape(key)}/([0-9a-f]+)/(claimed|released)")
     lease_key = re.compile(rf"ticket-lease/{re.escape(key)}/([0-9a-f]+)/[^/]+")
     states: list[int] = []
@@ -2161,7 +2169,7 @@ def _ledger_card(
             record = _fold_record(card, payload["text"], key, where)
             if record is not None:
                 card["pass"] = {name: record[name] for name in ("id", "host", "started_at")}
-                live = {"shape": "lease", "holder": record["holder"], "lease": record["lease"]}
+                live, start = {"shape": "lease", "holder": record["holder"], "lease": record["lease"]}, index
         elif kind == "item.stopped":
             stops.append(index)
             card["stamps"].append(
@@ -2179,6 +2187,10 @@ def _ledger_card(
                 wrote = lease_key.fullmatch(event.get("idempotency_key") or "")
                 if wrote and wrote[1] == card["pass"]["id"] and payload.get("owner") == live["holder"]:
                     live = {**live, "lease": "taken"}
+    if live is not None and live["shape"] == "lease" and _handed_off(events, start):
+        # The one rule every end path reads (design 6.8): once the pass saw the item handed off, the lease is the
+        # parent's for the rest of the pass's life, so its end, a resume's end and the release command leave it.
+        live = {**live, "lease": "joined"}
     if card["status"] == "closed" and _trusted_close(events, states, stops, key):
         card["stamps"][-1]["close"] = True
     _check_card_shape(card, key, where)
@@ -2990,15 +3002,16 @@ class LedgerStore:
         holder's live lease is ``lease_held``, and a holder the open named that
         is not the record's is ``holder_mismatch``. A resume that writes the
         lease has taken it, though its record says joined, so its end releases
-        it. A pass of the old shape
+        it, unless the pass saw the item handed off (the fold, design 6.8). A
+        pass of the old shape
         takes no lease and is ``lease_held`` while the item is claimed by
         anyone but the holder the open named (the default holder,
         ``ticket-pass/<pass id>``, when it named none); its claim stays.
         Through the hand-off source a resume of either shape takes no lease:
         an item not leased live to the holder is ``handoff_not_leased``. Nor
-        does it hold one: the lease is the parent's, so a resume of a pass
-        whose record says ``taken`` holds it as joined and its end never
-        releases it.
+        does it hold one: the read gives a pass that saw the item handed off
+        a joined lease, whichever source resumes it, so its end never releases
+        the parent's lease.
         """
 
         live = self._live or {}
@@ -3009,7 +3022,7 @@ class LedgerStore:
             take, prior = self._lease_decision(holder)
             if handoff and not self._leased_live(holder):
                 raise _handoff_not_leased(self.key, holder, self._row)
-            lease = "joined" if handoff else live["lease"]
+            lease = live["lease"]
             if take:
                 token = self._send([self._lease_event(holder, prior, pass_id, token)], token)
                 self._item = {"owner": holder, "claim": holder, "blocked_by": None}
@@ -3034,8 +3047,8 @@ class LedgerStore:
         the pass-end and the lease's release travel in one batch under that
         read's revision. Otherwise, or when that batch does not land, the
         pass-end is sent alone with no ``--expect-revision`` and any lease is
-        left to its expiry; a joined lease, and any lease on a handed-off item,
-        is never released. A failure is
+        left to its expiry; a joined lease is never released, and the read gives
+        a pass that saw the item handed off a joined lease. A failure is
         reported and ignored. Releasing again sends the pass-end's key alone,
         so the ledger replays the stored one and writes nothing.
         """
@@ -3058,10 +3071,10 @@ class LedgerStore:
 
         It is sent only when the fresh read shows ``pass_id`` still the live
         pass, having taken the lease as ``holder`` (its record says ``taken``,
-        or it wrote the lease since), the item's row still claimed by
-        ``holder``, and the item not handed off: while it has an open loop
-        intent of a version other than 1 the lease is the parent's, and only
-        the parent releases it (design 6.8). Never raises.
+        or it wrote the lease since, and it never saw the item handed off: the
+        fold reads such a pass's lease as joined, because from the hand-off on
+        the lease is the parent's and only the parent releases it, design
+        6.8), and the item's row still claimed by ``holder``. Never raises.
         """
 
         try:
@@ -3072,7 +3085,6 @@ class LedgerStore:
                 and live.get("shape") == "lease" and live.get("lease") == "taken" and live.get("holder") == holder
                 and row.get("recorded_status", row.get("status")) == "claimed"
                 and (row.get("owner") or row.get("claim")) == holder
-                and not self._handed_off
             )
             if not holds:
                 return False
@@ -3086,8 +3098,9 @@ class LedgerStore:
         """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim.
 
         The pass-end lands as ``release`` sends it, and the lease the pass took
-        is released with it only while the pass still holds it and the item is
-        not handed off.
+        is released with it only while the pass still holds it, never once the
+        pass saw the item handed off: it reads the record's lease from the same
+        fold ``release`` reads (design 6.8).
         """
 
         card, _ = self.read()
