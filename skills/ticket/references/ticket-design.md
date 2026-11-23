@@ -563,19 +563,21 @@ which takes no `--expect-revision`, claims a closed item, and sets the owner fro
   against every new pass, so an old claim and a lease never both authorize writers on one item.
 - **The end.** The pass-end (`session.closed` keyed `ticket-pass/K/P/released`) always lands. A pass took
   the lease when its record says `taken`, or when it wrote the lease since (a joined pass whose resume
-  took the lease again after its holder released it or it expired). When the pass took the lease, a fresh
-  read decides: while that read shows the pass still live, having taken the lease as `H`, and the row still
-  claimed by `H`, the pass-end and `item.state {status: "open"}` (key
+  took the lease again after its holder released it or it expired). Every end of a bound handle asks a fresh
+  read, never what that handle took, joined or read before: while that read shows the pass still live, its
+  record's holder `H`, the pass having taken the lease as `H` (and no hand-off protecting `H`, 6.8), and the
+  row still recorded claimed by `H`, the pass-end and `item.state {status: "open"}` (key
   `ticket-lease/K/P/<R>/released`) travel in one batch under that read's revision R; otherwise, or when
   that batch does not land, the pass-end is sent alone with no `--expect-revision` and the lease is left
-  to its expiry. A joined lease is never released. `ticket.py release` follows the same rule. At close the
-  closed state replaces the lease and carries its `owner` and `claim`.
+  to its expiry. A joined lease is never released. `ticket.py release` follows the same rule: it checks the
+  live pass id, then asks the same decision. At close the closed state replaces the lease and carries its
+  `owner` and `claim`.
 - **The fold.** A pass record or an old-shape claim makes its pass the card's `pass`; the matching
   `session.closed` clears it, and so does a closed state: the export hides session records before a close,
   but a pass record stays visible, so a closed item never reads a live pass. A lease of the record's holder
   keyed `ticket-lease/K/P/<R>`, written after the live pass's record, makes that pass one that took the
-  lease, unless the pass saw its item handed off (6.8): then the fold gives it a joined lease. A pass record
-  its validator refuses is `card_unreadable`.
+  lease, unless a hand-off that overlapped the pass's life was handed under the pass's own holder (6.8):
+  then the fold gives it a joined lease. A pass record its validator refuses is `card_unreadable`.
 
 ## 6. Both stores behind one interface
 
@@ -1183,18 +1185,34 @@ One deliberate exception: `LedgerStore.read` never refuses over a hand-off. A ca
 missing or cannot be read carries no `handoff` field, so `ticket.py release` and `clear_pass` still free a
 crashed pass on an item whose hand-off is malformed. Only the open through the hand-off source refuses.
 
-**The lease is the parent's.** From the moment the item is handed off, the lease is the parent's for the
-rest of the life of every pass that saw it, while the hand-off is open and after the handback alike: no end
-path of that pass releases it. A pass saw the hand-off when a `loop.intent` of a version other than 1 was
-open when its pass record was written or was written after it. This is the predicate the other-source
-refusal reads, `_handed_off`, with one change: only a `loop.done` written before the pass's record closes an
-intent. The fold applies it on every read and gives such a pass a joined lease, whatever its record says
-(it took the lease before the hand-off) and whatever it took since (it took the lease again after the loop
-let the item go). Every end path decides from that read: the pass's own `end()`, the end of a resume through
-any source, and `ticket.py release` (`clear_pass`), including the release of a crashed resume. Each sends the
-pass-end alone, and the lease runs on to the parent's release or its expiry. A pass on an item never handed
-off in its life releases a lease it took exactly as before. That includes a pass whose record came after an
-earlier hand-off's handback.
+**The hand-off's holder name is the parent's.** A hand-off protects the holder name it was handed under, not
+every claim of every pass that saw it. That *historical holder* L is the holder (`owner`, else `claim`) of
+the latest claim-bearing `item.state` strictly before the hand-off's `loop.intent`: the claim the loop writer
+checks before it writes the intent. A state that names nobody is passed over, and L is never read from
+today's row or from a later restamp; the intent itself names no holder, and its controller, actor and
+target are not holder evidence. A hand-off overlapped a pass's life when it was open when the pass's record
+was written, or was written after it: this is the predicate the other-source refusal reads, except that only
+a `loop.done` written before the pass's record closes an intent, so it still counts after the handback, and
+one whose version or operation cannot be read counts too. When any such hand-off's L is the pass's recorded
+holder H, by exact equality (a default `ticket-pass/<id>` name is no exception), or L cannot be established
+(no claim-bearing state before it, or a holder that is not a string), the fold gives the pass a joined lease,
+whatever its record says (it took the lease before the hand-off) and whatever it took since (it took the
+lease again under that name after the loop let the item go). So no end path of the pass releases a lease
+under H, and the lease runs on to the parent's release or its expiry. A hand-off under another name protects
+nothing of the pass: a pass whose own lease ran out, was taken over and handed off under another holder,
+and which took its own name back after the handback, releases what it took back. A pass on an item never
+handed off in its life, or whose only hand-offs were done before its record, releases a lease it took
+exactly as before.
+
+**Every end decides from a fresh read.** Every end path asks 5.1's one decision, read immediately before it
+from `export-item` and `query --item`: the pass's own `end()` on any of its handles, the end of a resume
+through any source, and `ticket.py release` (`clear_pass`, which checks the live pass id and adds no lease
+check of its own), including the release of a crashed resume. The pass's holder is the one its record names
+on that read, never the handle's. No handle keeps what it took or joined: an original handle that joined,
+whose pass a later handle took the lease again for, releases at its end; and a late handle of a pass that
+already ended, with another pass live under the same holder, sends its pass-end alone and leaves that
+pass's claim. A write between the read and the batch makes the batch `stale`: the pass-end goes alone,
+with no retry.
 
 **The seams.** After the open nothing else changes: the same phases, the same two hard stops, the same
 steps. Where a seam's name is not the default, the session does not run the default action for that seam:

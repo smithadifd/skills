@@ -20,7 +20,7 @@ import pytest
 
 import ticket
 from ledger_support import (
-    FakeLedger, ReadHook, ledger_library, machine, plant_done, plant_intent, plant_take,
+    LIVE_STAMP, FakeLedger, ReadHook, ledger_library, machine, plant_done, plant_intent, plant_take,
 )
 from ticket_support import A, B, KEY, TITLE, Source, refusal, write_card
 
@@ -693,13 +693,13 @@ def test_O23_a_pass_that_took_the_lease_before_the_hand_off_never_releases_the_l
     only_the_pass_end(backend, mark, first.pass_id, claim)
 
 
-# --- O24-O27: one rule for the lease once a pass saw the item handed off, after the handback too ----------------
+# --- O24-O27: a hand-off under the pass's own holder name protects it after the handback too -------------------
 
 
 @pytest.mark.parametrize("case", ["the release command", "its own handle ends"])
 def test_O24_after_the_handback_a_pass_that_took_the_lease_before_the_hand_off_still_never_releases_it(repo, backend, case):
-    # The loop re-stamps its claim at the done and still works under it: whichever handle ends the pass, the lease
-    # stays the loop's for the rest of the pass's life (design 6.8).
+    # The loop re-stamps its claim at the done and still works under it: the hand-off was handed under the pass's
+    # own holder, so whichever handle ends the pass, the lease stays the loop's for the rest of its life (design 6.8).
     first = took_then_handed_off(repo, backend)
     backend.done("build-1")
     claim = latest_claim(backend)
@@ -727,8 +727,8 @@ def test_O25_the_release_command_clears_a_crashed_hand_off_resume_and_leaves_the
 
 @pytest.mark.parametrize("case", ["the release command", "its own handle ends"])
 def test_O26_a_pass_opened_through_the_hand_off_never_releases_a_lease_it_takes_after_the_handback(repo, backend, case):
-    # The pass began while the item was handed off, so the lease is never its own to release, even one it takes
-    # again through the ledger-id source after the loop let the item go.
+    # The pass began while the item was handed off under its holder, so a lease under that name is never its own to
+    # release, even one it takes again through the ledger-id source after the loop let the item go.
     handed_off(backend)
     first = open_handoff(repo, declared=DECLARED)
     backend.done("build-1")
@@ -769,6 +769,378 @@ def test_O27_a_default_pass_still_releases_the_lease_it_took_on_an_item_not_hand
     assert len(landed) == 2 and landed[1][0] == "item.state", landed
     assert landed[1][1].startswith(f"ticket-lease/{KEY}/{first.pass_id}/") and landed[1][1].endswith("/released"), landed
     assert row(backend)["status"] == "open"
+
+
+# --- O28-O43: the lease decision at every end, from a fresh read (design 6.8) ----------------------------------
+# P is the pass, H the holder its record names, and L the holder a hand-off was handed under: the holder of the
+# latest claim-bearing state before the hand-off's intent. "Released" is the pass-end and `item.state {status:
+# "open"}` in one batch; "retained" is the pass-end alone, the claim event unchanged.
+
+SEAT = "seat-h"
+NEXT = "seat-next"
+ENDS = ["its own handle ends", "the release command", "clear_pass"]
+
+
+def claim_event(backend):
+    """The item's latest claim-bearing event, whole (an ``item.state`` naming a holder)."""
+
+    claims = [event for event in backend.events() if event["kind"] == "item.state"
+              and (event["payload"].get("owner") or event["payload"].get("claim"))]
+    return claims[-1] if claims else None
+
+
+def end_pass(backend, how, handle, pass_id):
+    """End pass ``pass_id``: ``handle``'s ``end()``, ``ticket.py release K P``, or ``clear_pass`` on a fresh handle."""
+
+    if how == "the release command":
+        assert ticket.main(["release", KEY, pass_id]) == 0
+    elif how == "clear_pass":
+        ticket.LedgerStore(backend.path, KEY, TITLE).clear_pass(pass_id)
+    else:
+        handle.end()
+
+
+def retained(backend, mark, pass_id, claim):
+    """Since ``mark`` the pass-end alone landed; the claim event is ``claim``, whole; the row is claimed by its holder."""
+
+    assert [(event["kind"], event["idempotency_key"]) for event in backend.events()[mark:]] == [
+        ("session.closed", f"ticket-pass/{KEY}/{pass_id}/released")]
+    assert claim_event(backend) == claim
+    current = row(backend)
+    holder = claim["payload"].get("owner") or claim["payload"].get("claim")
+    assert (current["status"], current.get("owner") or current.get("claim")) == ("claimed", holder)
+
+
+def released(repo, backend, mark, pass_id):
+    """Since ``mark`` the pass-end and the lease's release landed in one batch and the row reads open; another holder
+    then takes the item. That holder's pass is returned."""
+
+    landed = [(event["kind"], event["idempotency_key"]) for event in backend.events()[mark:]]
+    assert len(landed) == 2, landed
+    assert landed[0] == ("session.closed", f"ticket-pass/{KEY}/{pass_id}/released")
+    assert landed[1][0] == "item.state" and landed[1][1].startswith(f"ticket-lease/{KEY}/{pass_id}/"), landed
+    assert landed[1][1].endswith("/released") and backend.events()[-1]["payload"]["status"] == "open"
+    if isinstance(backend, Fake):
+        assert [element["kind"] for element in backend.fake.appends()[-1].batch] == ["session.closed", "item.state"]
+    assert row(backend)["status"] == "open"
+    following = open_ledger_id(repo, holder=NEXT)
+    (record,) = [record_of(event) for event in pass_records(backend.events()) if record_of(event)["id"] == following.pass_id]
+    assert (record["holder"], record["lease"]) == (NEXT, "taken")
+    current = row(backend)
+    assert (current["status"], current.get("owner") or current.get("claim")) == ("claimed", NEXT)
+    return following
+
+
+def lease_taken_by(backend, pass_id, holder):
+    """The leases pass ``pass_id`` wrote after its record (keyed ``ticket-lease/K/P/<R>``), each asserted ``holder``'s."""
+
+    taken = [event for event in backend.events() if event["kind"] == "item.state"
+             and (event["idempotency_key"] or "").startswith(f"ticket-lease/{KEY}/{pass_id}/")
+             and not event["idempotency_key"].endswith("/released")]
+    assert taken and all(event["payload"]["owner"] == holder for event in taken), taken
+    return taken
+
+
+@pytest.mark.parametrize("end", ENDS)
+def test_lease_default_release(repo, backend, end):
+    # O28: a default pass, never handed off, releases the lease it took as ticket-pass/P on every end path.
+    backend.file_row()
+    first = open_ledger_id(repo)
+    (record,) = [record_of(event) for event in pass_records(backend.events())]
+    assert (record["holder"], record["lease"]) == (f"ticket-pass/{first.pass_id}", "taken")
+    mark = len(backend.events())
+    end_pass(backend, end, first, first.pass_id)
+    released(repo, backend, mark, first.pass_id)
+
+
+@pytest.mark.parametrize("handle", ["the original", "a resume"])
+def test_lease_ordinary_join(repo, backend, handle):
+    # O29: a pass that joined a lease taken outside it, on an item never handed off, never releases it.
+    backend.file_row()
+    backend.write("item.state", {"status": "claimed", "owner": SEAT, "claim": SEAT, "expires_at": LIVE_STAMP})
+    first = open_ledger_id(repo, holder=SEAT)
+    (record,) = [record_of(event) for event in pass_records(backend.events())]
+    assert (record["holder"], record["lease"]) == (SEAT, "joined")
+    ending = first if handle == "the original" else open_ledger_id(repo, holder=SEAT, pass_id=first.pass_id)
+    claim = claim_event(backend)
+    mark = len(backend.events())
+    ending.end()
+    retained(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("end", ["its own handle ends", "a resume ends", "the release command", "clear_pass"])
+@pytest.mark.parametrize("state", ["handed off", "handed back"])
+def test_lease_preexisting_shared_holder(repo, backend, state, end):
+    # O30: P took the lease as H; the loop then took the item and handed it off under the same name (L = H). While
+    # handed off and after the handback, no end path of P releases it.
+    first = took_then_handed_off(repo, backend)
+    if state == "handed back":
+        backend.done("build-1")
+    ending = first
+    if end == "a resume ends":
+        if state == "handed off":
+            ending = open_handoff(repo, declared=DECLARED, pass_id=first.pass_id)
+        else:
+            ending = open_ledger_id(repo, holder=HOLDER, pass_id=first.pass_id)
+        assert (ending.live, ending.pass_id) == (True, first.pass_id)
+    claim = claim_event(backend)
+    mark = len(backend.events())
+    end_pass(backend, end, ending, first.pass_id)
+    retained(backend, mark, first.pass_id, claim)
+
+
+def test_lease_different_current_holder(repo, backend, monkeypatch):
+    # O31: P took the lease as its default holder H; it ran out; the loop took the item over and handed it off as
+    # L, another name. The original handle's end leaves L's claim.
+    backend.file_row()
+    with monkeypatch.context() as clock:
+        clock.setattr(ticket, "_lease_expiry", lambda: PAST)
+        first = open_ledger_id(repo)
+    backend.take(HOLDER)
+    backend.hand_off()
+    claim = claim_event(backend)
+    assert claim["payload"]["claim"] == HOLDER
+    mark = len(backend.events())
+    first.end()
+    retained(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("handle", ["the original", "a hand-off resume"])
+def test_lease_handoff_open(repo, backend, handle):
+    # O32: a pass opened through the open hand-off joins L's claim (L = H) and never writes or releases it.
+    handed_off(backend)
+    claim = claim_event(backend)
+    first = open_handoff(repo, declared=DECLARED)
+    assert claim_event(backend) == claim
+    ending = first
+    if handle == "a hand-off resume":
+        ending = open_handoff(repo, declared=DECLARED, pass_id=first.pass_id)
+        assert claim_event(backend) == claim
+    mark = len(backend.events())
+    ending.end()
+    retained(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("handle", ["the original", "the resume"])
+@pytest.mark.parametrize("lease", ["kept", "taken again"])
+def test_lease_handoff_after_handback(repo, backend, lease, handle):
+    # O33: the same pass after the handback, resumed through the ledger-id source as H = L, keeping L's restamped
+    # lease or taking it again after a bare state open: still never released.
+    handed_off(backend)
+    first = open_handoff(repo, declared=DECLARED)
+    backend.done("build-1")
+    if lease == "taken again":
+        backend.write("item.state", {"status": "open"})
+    resumed = open_ledger_id(repo, holder=HOLDER, pass_id=first.pass_id)
+    assert (resumed.live, resumed.pass_id) == (True, first.pass_id)
+    if lease == "taken again":
+        lease_taken_by(backend, first.pass_id, HOLDER)
+    claim = claim_event(backend)
+    mark = len(backend.events())
+    (first if handle == "the original" else resumed).end()
+    retained(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("end", ["the release command", "clear_pass"])
+@pytest.mark.parametrize("state", ["handed off", "handed back"])
+def test_lease_crashed_shared_resume(repo, backend, state, end):
+    # O34: P took the lease before the hand-off (L = H); its resume through the hand-off source crashes, while
+    # handed off or after the handback; a person ends it: the lease is retained.
+    first = took_then_handed_off(repo, backend)
+    resumed = open_handoff(repo, declared=DECLARED, pass_id=first.pass_id)
+    assert (resumed.live, resumed.pass_id) == (True, first.pass_id)
+    if state == "handed back":
+        backend.done("build-1")
+    claim = claim_event(backend)
+    mark = len(backend.events())
+    end_pass(backend, end, None, first.pass_id)
+    retained(backend, mark, first.pass_id, claim)
+
+
+def own_retake(repo, backend, monkeypatch, joined):
+    """P's own name H, another name than the loop's L: P took H (its record says ``taken``, the lease already run
+    out) or, with ``joined``, joined H taken outside it, which then ran out; the loop took the item over as L, handed
+    it off and back, and L's restamped lease ran out; P is resumed through the ledger-id source and takes H again.
+    The original handle, the resume and H are returned."""
+
+    backend.file_row()
+    if joined:
+        backend.write("item.state", {"status": "claimed", "owner": SEAT, "claim": SEAT, "expires_at": LIVE_STAMP})
+        first = open_ledger_id(repo, holder=SEAT)
+        backend.write("item.state", {"status": "claimed", "owner": SEAT, "claim": SEAT, "expires_at": PAST})
+        holder, lease = SEAT, "joined"
+    else:
+        with monkeypatch.context() as clock:
+            clock.setattr(ticket, "_lease_expiry", lambda: PAST)
+            first = open_ledger_id(repo)
+        holder, lease = f"ticket-pass/{first.pass_id}", "taken"
+    (record,) = [record_of(event) for event in pass_records(backend.events())]
+    assert (record["holder"], record["lease"]) == (holder, lease)
+    backend.take(HOLDER)
+    backend.hand_off()
+    backend.done("build-1")
+    backend.write("item.state", {"status": "claimed", "claim": HOLDER, "expires_at": PAST})
+    resumed = open_ledger_id(repo, holder=SEAT if joined else None, pass_id=first.pass_id)
+    assert (resumed.live, resumed.pass_id) == (True, first.pass_id)
+    lease_taken_by(backend, first.pass_id, holder)
+    return first, resumed, holder
+
+
+def test_lease_own_retake_resumer(repo, backend, monkeypatch):
+    # O35: H is not L; after the handback P takes H again: the resuming handle's end releases it.
+    first, resumed, _ = own_retake(repo, backend, monkeypatch, joined=False)
+    mark = len(backend.events())
+    resumed.end()
+    released(repo, backend, mark, first.pass_id)
+
+
+def test_lease_own_retake_original(repo, backend, monkeypatch):
+    # O36: the same re-take, ended by P's original handle: released (H is not the hand-off's historical holder,
+    # though it is the holder on today's row).
+    first, _, _ = own_retake(repo, backend, monkeypatch, joined=False)
+    mark = len(backend.events())
+    first.end()
+    released(repo, backend, mark, first.pass_id)
+
+
+def test_lease_cached_join_original(repo, backend, monkeypatch):
+    # O37: P's original handle joined H (it holds `joined` from its own claim); a second handle took H again after
+    # the handback. The original handle ends first and, from a fresh read, releases; the second handle's later end
+    # touches nothing of the next holder's pass.
+    first, resumed, _ = own_retake(repo, backend, monkeypatch, joined=True)
+    mark = len(backend.events())
+    first.end()
+    following = released(repo, backend, mark, first.pass_id)
+    claim = claim_event(backend)
+    mark = len(backend.events())
+    resumed.end()
+    assert backend.events()[mark:] == []
+    assert claim_event(backend) == claim
+    assert fresh_card(backend)["pass"]["id"] == following.pass_id
+    assert (row(backend)["status"], row(backend).get("owner")) == ("claimed", NEXT)
+
+
+@pytest.mark.parametrize("end", ["the release command", "clear_pass"])
+def test_lease_crashed_own_retake(repo, backend, monkeypatch, end):
+    # O38: the joined pass's resume took H again after the handback (H is not L) and crashed; a person's release
+    # releases the lease the resume took.
+    first, _, _ = own_retake(repo, backend, monkeypatch, joined=True)
+    mark = len(backend.events())
+    end_pass(backend, end, None, first.pass_id)
+    released(repo, backend, mark, first.pass_id)
+
+
+def test_lease_late_handle(repo, backend):
+    # O39: two handles on P; P ends and releases; Q opens under the same H and takes it; P's late handle ends and
+    # leaves Q's pass and claim alone.
+    backend.file_row()
+    first = open_ledger_id(repo, holder=SEAT)
+    late = open_ledger_id(repo, holder=SEAT, pass_id=first.pass_id)
+    assert (late.live, late.pass_id) == (True, first.pass_id)
+    mark = len(backend.events())
+    first.end()
+    landed = [event["kind"] for event in backend.events()[mark:]]
+    assert landed == ["session.closed", "item.state"] and row(backend)["status"] == "open"
+    following = open_ledger_id(repo, holder=SEAT)
+    (record,) = [record_of(event) for event in pass_records(backend.events()) if record_of(event)["id"] == following.pass_id]
+    assert (record["holder"], record["lease"]) == (SEAT, "taken")
+    claim = claim_event(backend)
+    mark = len(backend.events())
+    late.end()
+    assert backend.events()[mark:] == []
+    assert claim_event(backend) == claim
+    assert fresh_card(backend)["pass"]["id"] == following.pass_id
+    assert (row(backend)["status"], row(backend).get("owner")) == ("claimed", SEAT)
+
+
+@pytest.mark.parametrize("end", ["its own handle ends", "a hand-off resume ends", "the release command", "clear_pass"])
+def test_lease_coincident_holder_name(repo, backend, end):
+    # O40: the loop takes the item and hands it off under ticket-pass/P, P's own default name: names are identity,
+    # so the lease is retained on every end path.
+    backend.file_row()
+    first = open_ledger_id(repo)
+    holder = f"ticket-pass/{first.pass_id}"
+    backend.take(holder)
+    backend.hand_off(holder=holder)
+    ending = first
+    if end == "a hand-off resume ends":
+        ending = open_handoff(repo, declared=DECLARED, pass_id=first.pass_id, holder=holder)
+        assert (ending.live, ending.pass_id) == (True, first.pass_id)
+    claim = claim_event(backend)
+    assert claim["payload"]["claim"] == holder
+    mark = len(backend.events())
+    end_pass(backend, end, ending, first.pass_id)
+    retained(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("end", ["its own handle ends", "a resume ends", "the release command", "clear_pass"])
+def test_lease_prior_handback(repo, backend, end):
+    # O41: a hand-off done and let go before P began, under the name P then takes (H = the former L): every end
+    # path releases.
+    backend.file_row()
+    backend.take()
+    backend.hand_off()
+    backend.done("build-1")
+    backend.write("item.state", {"status": "open"})
+    first = open_ledger_id(repo, holder=HOLDER)
+    (record,) = [record_of(event) for event in pass_records(backend.events())]
+    assert (record["holder"], record["lease"]) == (HOLDER, "taken")
+    ending = first
+    if end == "a resume ends":
+        ending = open_ledger_id(repo, holder=HOLDER, pass_id=first.pass_id)
+        assert (ending.live, ending.pass_id) == (True, first.pass_id)
+    mark = len(backend.events())
+    end_pass(backend, end, ending, first.pass_id)
+    released(repo, backend, mark, first.pass_id)
+
+
+def test_lease_nobody_state_before_handoff(repo, backend):
+    # O42: P took H; the loop took the item as H; a bare state open (naming nobody) came before the hand-off, so the
+    # loop wrote no hand-off claim. L is still H, read past the bare state: P's re-take after the handback is
+    # retained.
+    backend.file_row()
+    first = open_ledger_id(repo, holder=HOLDER)
+    backend.take()
+    backend.write("item.state", {"status": "open"})
+    if isinstance(backend, Fake):
+        # The loop writer writes no hand-off claim and no restamp when the item's row names nobody.
+        payload = {"operation": "build", "operation_id": "build-1", "controller": "director", "seams": dict(LOOP)}
+        plant_intent(backend.fake, "build", "build-1", payload=payload, payload_version=2)
+        intent = intent_id(backend)
+        backend.fake.outside("loop.done", {"operation": "build", "operation_id": "build-1", "outcome": "handback",
+                                           "intent_event_id": intent}, actor="loop", key=f"loop:{KEY}:build:build-1:done")
+    else:
+        backend.hand_off()
+        backend.done("build-1")
+    assert [event["payload"].get("claim") for event in backend.events()
+            if event["kind"] == "item.state" and event["id"] > intent_id(backend)] == []
+    resumed = open_ledger_id(repo, holder=HOLDER, pass_id=first.pass_id)
+    assert (resumed.live, resumed.pass_id) == (True, first.pass_id)
+    lease_taken_by(backend, first.pass_id, HOLDER)
+    claim = claim_event(backend)
+    mark = len(backend.events())
+    resumed.end()
+    retained(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("case", ["no claim before the hand-off", "a claim before it naming a holder that is not a string"])
+def test_lease_unknown_handoff_holder(repo, fake, case):
+    # O43: when the holder a hand-off was handed under cannot be established, the pass's own name is protected:
+    # its re-take after the handback is retained.
+    fake.file_row()
+    fake.fake.outside("loop.managed", {}, actor="loop", key=f"loop:{KEY}:managed")
+    if case != "no claim before the hand-off":
+        fake.write("item.state", {"status": "claimed", "owner": 7, "expires_at": PAST})
+    fake.hand_off()
+    first = open_handoff(repo, declared=DECLARED)
+    fake.done("build-1")
+    fake.write("item.state", {"status": "open"})
+    resumed = open_ledger_id(repo, holder=HOLDER, pass_id=first.pass_id)
+    lease_taken_by(fake, first.pass_id, HOLDER)
+    claim = claim_event(fake)
+    mark = len(fake.events())
+    resumed.end()
+    retained(fake, mark, first.pass_id, claim)
 
 
 # --- G: what must not change ------------------------------------------------------------------------------------

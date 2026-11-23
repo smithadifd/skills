@@ -2091,14 +2091,14 @@ def _handoff_outcome(events: Sequence[Mapping[str, Any]], key: str) -> tuple[dic
         return None, exc
 
 
-def _handed_off(events: Sequence[Mapping[str, Any]], since: int | None = None) -> bool:
-    """Whether the item has an open ``loop.intent`` whose payload version is not 1 (design 6.8); with ``since``,
-    whether it had one at any point from the event at index ``since`` on.
+def _hand_offs(events: Sequence[Mapping[str, Any]], since: int | None = None) -> list[int]:
+    """The index of every ``loop.intent`` whose payload version is not 1 that counts as open (design 6.8); with
+    ``since``, of every one open at the event at index ``since`` or written after it.
 
-    Such an item opens only through the hand-off source. An intent whose operation and operation id cannot be read,
-    or whose version cannot be, counts as open: a done cannot be matched to it. With ``since`` only a done before
-    that event closes an intent, so an intent open then, or written after it, counts even when its done came later:
-    that is how the fold decides a pass saw the item handed off, after the handback too.
+    An intent whose operation and operation id cannot be read, or whose version cannot be, counts as open: a done
+    cannot be matched to it. With ``since`` only a done before that event closes an intent, so an intent open then,
+    or written after it, counts even when its done came later: these are the hand-offs that overlapped the life of
+    the pass whose record is that event, after the handback too.
     """
 
     closed = set()
@@ -2106,7 +2106,8 @@ def _handed_off(events: Sequence[Mapping[str, Any]], since: int | None = None) -
         payload = event.get("payload")
         if event.get("kind") == "loop.done" and type(payload) is dict:
             closed.add((payload.get("operation"), payload.get("operation_id")))
-    for event in events:
+    found = []
+    for index, event in enumerate(events):
         if event.get("kind") != "loop.intent":
             continue
         version = event.get("payload_version")
@@ -2115,6 +2116,51 @@ def _handed_off(events: Sequence[Mapping[str, Any]], since: int | None = None) -
         payload = event.get("payload")
         ident = (payload.get("operation"), payload.get("operation_id")) if type(payload) is dict else (None, None)
         if not (_is_text(ident[0]) and _is_text(ident[1])) or ident not in closed:
+            found.append(index)
+    return found
+
+
+def _handed_off(events: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the item has an open ``loop.intent`` whose payload version is not 1 (design 6.8): such an item opens
+    only through the hand-off source."""
+
+    return bool(_hand_offs(events))
+
+
+def _historical_holder(events: Sequence[Mapping[str, Any]], index: int) -> str | None:
+    """The holder the hand-off at ``events[index]`` was handed under (design 6.8), or None when it cannot be
+    established.
+
+    It is the holder (the ``owner``, else the ``claim``, each when present and not empty) of the latest
+    claim-bearing ``item.state`` strictly before the hand-off: the claim the ledger's loop writer checks before it
+    writes one. A state that names nobody is passed over. No such state, or a holder that is not a string, is
+    None. It is never read from today's row or from a later stamp.
+    """
+
+    for event in reversed(events[:index]):
+        if event.get("kind") != "item.state":
+            continue
+        for name in ("owner", "claim"):
+            value = event["payload"].get(name)
+            if value is None or value == "":
+                continue
+            return value if type(value) is str else None
+    return None
+
+
+def _protects(events: Sequence[Mapping[str, Any]], since: int, holder: str) -> bool:
+    """Whether a hand-off that overlapped the life of the pass whose record is ``events[since]`` protects that
+    pass's holder ``holder`` (design 6.8).
+
+    Each such hand-off (``_hand_offs`` with ``since``) protects the holder it was handed under
+    (``_historical_holder``). When that is ``holder``, by exact equality whatever the name (a default
+    ``ticket-pass/<id>`` included), or cannot be established, the pass never releases a lease under its holder. A
+    hand-off handed under another holder protects nothing of this pass.
+    """
+
+    for index in _hand_offs(events, since):
+        historical = _historical_holder(events, index)
+        if historical is None or historical == holder:
             return True
     return False
 
@@ -2137,11 +2183,12 @@ def _ledger_card(
     holder that the live pass wrote after its record (the ``item.state``
     keyed ``ticket-lease/K/<pass>/<revision>``, as a resume writes when it
     takes the lease again) makes it ``taken``, so the pass releases it at its
-    end. A pass that saw the item handed off (an intent ``_handed_off`` counts,
-    open when the pass began or written since) reads ``joined`` whatever its
-    record says or it took since: from the hand-off on, for the rest of that
-    pass's life and after the handback too, the lease is the parent's, and no
-    end path of the pass releases it (design 6.8). An item that was closed
+    end. A pass whose holder a hand-off that overlapped its life was handed
+    under (``_protects``: open when the pass began or written since, its done
+    no matter) reads ``joined`` whatever its record says or it took since: that
+    holder name is the parent's for the rest of the pass's life, after the
+    handback too, and no end path of the pass releases a lease under it (design
+    6.8). A hand-off under another holder changes nothing. An item that was closed
     once reads ``closed``; its close stamp is marked ``close`` only when the
     close is trusted, so an outside status write is refused ``close_invalid``
     and never resumed.
@@ -2187,9 +2234,9 @@ def _ledger_card(
                 wrote = lease_key.fullmatch(event.get("idempotency_key") or "")
                 if wrote and wrote[1] == card["pass"]["id"] and payload.get("owner") == live["holder"]:
                     live = {**live, "lease": "taken"}
-    if live is not None and live["shape"] == "lease" and _handed_off(events, start):
-        # The one rule every end path reads (design 6.8): once the pass saw the item handed off, the lease is the
-        # parent's for the rest of the pass's life, so its end, a resume's end and the release command leave it.
+    if live is not None and live["shape"] == "lease" and _protects(events, start, live["holder"]):
+        # The one rule every end path reads (design 6.8): a hand-off that overlapped the pass's life under the pass's
+        # own holder name keeps that name the parent's for the rest of the pass's life, so no end path releases it.
         live = {**live, "lease": "joined"}
     if card["status"] == "closed" and _trusted_close(events, states, stops, key):
         card["stamps"][-1]["close"] = True
@@ -2295,10 +2342,8 @@ class LedgerStore:
         self._row: Mapping[str, Any] | None = None
         self._live: dict[str, Any] | None = None
         self._read_token: str | None = None
-        # The bound pass's holder and whether it took or joined the lease (None for a claim of the old shape).
-        # The holder an open names is never kept here: it travels with that open's claim or join (``apply``).
-        self._holder: str | None = None
-        self._lease: str | None = None
+        # No holder and no lease is kept here. The holder an open names travels with that open's claim or join
+        # (``apply``), and the end reads the pass's holder and lease from a fresh read (``_release_lease``).
         # The item's hand-off as last read (design 6.8): the open hand-off, or the refusal an open through the
         # hand-off source gives; and whether the item has an open loop intent of a version other than 1.
         self._handoff: dict[str, Any] | None = None
@@ -2989,7 +3034,6 @@ class LedgerStore:
         token = self._send(batch, token)
         self._card = _fold(self._card, [("claim", claim)])
         self._live = {"shape": "lease", "holder": holder, "lease": record["lease"]}
-        self._holder, self._lease = holder, record["lease"]
         if take:
             self._item = {"owner": holder, "claim": holder, "blocked_by": None}
         return token
@@ -3002,16 +3046,15 @@ class LedgerStore:
         holder's live lease is ``lease_held``, and a holder the open named that
         is not the record's is ``holder_mismatch``. A resume that writes the
         lease has taken it, though its record says joined, so its end releases
-        it, unless the pass saw the item handed off (the fold, design 6.8). A
-        pass of the old shape
+        it, unless a hand-off that overlapped the pass's life was handed under
+        its holder (the fold, design 6.8). A pass of the old shape
         takes no lease and is ``lease_held`` while the item is claimed by
         anyone but the holder the open named (the default holder,
         ``ticket-pass/<pass id>``, when it named none); its claim stays.
         Through the hand-off source a resume of either shape takes no lease:
-        an item not leased live to the holder is ``handoff_not_leased``. Nor
-        does it hold one: the read gives a pass that saw the item handed off
-        a joined lease, whichever source resumes it, so its end never releases
-        the parent's lease.
+        an item not leased live to the holder is ``handoff_not_leased``. What
+        the resume took is never kept on the handle: its end decides from a
+        fresh read, whichever source resumed it.
         """
 
         live = self._live or {}
@@ -3022,13 +3065,10 @@ class LedgerStore:
             take, prior = self._lease_decision(holder)
             if handoff and not self._leased_live(holder):
                 raise _handoff_not_leased(self.key, holder, self._row)
-            lease = live["lease"]
             if take:
                 token = self._send([self._lease_event(holder, prior, pass_id, token)], token)
                 self._item = {"owner": holder, "claim": holder, "blocked_by": None}
-                lease = "taken"
-                self._live = {**live, "lease": lease}
-            self._holder, self._lease = holder, lease
+                self._live = {**live, "lease": "taken"}
             return token
         holder = given or f"ticket-pass/{pass_id}"
         row = self._row or {}
@@ -3037,52 +3077,54 @@ class LedgerStore:
             raise _lease_held(self.key, on_row if _is_text(on_row) else "a claim that names no holder")
         if handoff and not self._leased_live(holder):
             raise _handoff_not_leased(self.key, holder, self._row)
-        self._holder, self._lease = None, None
         return token
 
     def release(self) -> None:
-        """End this handle's own pass; its pass-end lands, and a lease it took is released while it still holds it.
+        """End this handle's own pass; its pass-end lands, and a lease the pass took is released while it still holds it.
 
-        When the pass took the lease, a fresh read decides (``_release_lease``):
-        the pass-end and the lease's release travel in one batch under that
-        read's revision. Otherwise, or when that batch does not land, the
+        A bound handle always asks a fresh read (``_release_lease``), whatever
+        it took, joined or read before: when that read says the pass may
+        release, the pass-end and the lease's release travel in one batch under
+        that read's revision. Otherwise, or when that batch does not land, the
         pass-end is sent alone with no ``--expect-revision`` and any lease is
-        left to its expiry; a joined lease is never released, and the read gives
-        a pass that saw the item handed off a joined lease. A failure is
-        reported and ignored. Releasing again sends the pass-end's key alone,
-        so the ledger replays the stored one and writes nothing.
+        left to its expiry. A failure is reported and ignored. Releasing again
+        sends the pass-end's key alone, so the ledger replays the stored one
+        and writes nothing.
         """
 
         with self._threads:
             mine = self._pass_id or self._ended
-            took, holder = self._lease == "taken", self._holder
-            self._pass_id, self._ended, self._lease = None, mine, None
+            bound = self._pass_id is not None
+            self._pass_id, self._ended = None, mine
             if mine is None:
                 return
-            if took and self._release_lease(mine, holder):
+            if bound and self._release_lease(mine):
                 return
             try:
                 self._send([self._released(mine)], None)
             except StoreUnavailable as exc:
                 print(f"ticket.py: the release of pass {mine} did not land: {exc}", file=sys.stderr)
 
-    def _release_lease(self, pass_id: str, holder: str | None) -> bool:
+    def _release_lease(self, pass_id: str) -> bool:
         """Send the pass-end and the lease's release under a fresh read's revision; True when that batch landed.
 
-        It is sent only when the fresh read shows ``pass_id`` still the live
-        pass, having taken the lease as ``holder`` (its record says ``taken``,
-        or it wrote the lease since, and it never saw the item handed off: the
-        fold reads such a pass's lease as joined, because from the hand-off on
-        the lease is the parent's and only the parent releases it, design
-        6.8), and the item's row still claimed by ``holder``. Never raises.
+        The one release decision of every end path (``release`` and
+        ``clear_pass``), read now from ``export-item`` and ``query --item``,
+        never from this handle. It is sent only when that read shows
+        ``pass_id`` still the live pass with a lease record naming its holder
+        H, the pass having taken the lease as H (its record says ``taken``,
+        or it wrote the lease since) with no hand-off that overlapped its life
+        handed under H (the fold reads such a pass's lease as joined, design
+        6.8), and the item's row still recorded claimed by H. Never raises.
         """
 
         try:
             card, token = self.read()
             live, row = self._live or {}, self._row or {}
+            holder = live.get("holder")
             holds = (
                 card["pass"] is not None and card["pass"]["id"] == pass_id
-                and live.get("shape") == "lease" and live.get("lease") == "taken" and live.get("holder") == holder
+                and live.get("shape") == "lease" and live.get("lease") == "taken"
                 and row.get("recorded_status", row.get("status")) == "claimed"
                 and (row.get("owner") or row.get("claim")) == holder
             )
@@ -3098,9 +3140,9 @@ class LedgerStore:
         """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim.
 
         The pass-end lands as ``release`` sends it, and the lease the pass took
-        is released with it only while the pass still holds it, never once the
-        pass saw the item handed off: it reads the record's lease from the same
-        fold ``release`` reads (design 6.8).
+        is released with it only when ``release``'s own fresh decision
+        (``_release_lease``) says so: this checks the live pass id and adds no
+        lease check of its own (design 6.8).
         """
 
         card, _ = self.read()
@@ -3112,8 +3154,7 @@ class LedgerStore:
                 + "; nothing was changed",
                 code="held" if live else "pass_ended",
             )
-        record = self._live or {}
-        if record.get("lease") == "taken" and self._release_lease(pass_id, record.get("holder")):
+        if self._release_lease(pass_id):
             return
         self._send([self._released(pass_id)], None)
 
