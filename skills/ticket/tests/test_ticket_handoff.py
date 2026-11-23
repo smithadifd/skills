@@ -1098,10 +1098,21 @@ def test_lease_nobody_state_before_handoff(repo, backend):
     # O42: P took H; the loop took the item as H; a bare state open (naming nobody) came before the hand-off, so the
     # loop wrote no hand-off claim. L is still H, read past the bare state: P's re-take after the handback is
     # retained.
+    nobody_state_before_handoff(repo, backend, {})
+
+
+def test_lease_nobody_state_empty_strings_before_handoff(repo, fake):
+    # O42, second case: the same, but the bare state carries the owner and claim keys as empty strings, which is
+    # also a state naming nobody. Fake only: the real ledger refuses an empty owner or claim when it is written
+    # (validation bad-type:owner), so that state cannot exist there.
+    nobody_state_before_handoff(repo, fake, {"owner": "", "claim": ""})
+
+
+def nobody_state_before_handoff(repo, backend, nobody):
     backend.file_row()
     first = open_ledger_id(repo, holder=HOLDER)
     backend.take()
-    backend.write("item.state", {"status": "open"})
+    backend.write("item.state", {"status": "open", **nobody})
     if isinstance(backend, Fake):
         # The loop writer writes no hand-off claim and no restamp when the item's row names nobody.
         payload = {"operation": "build", "operation_id": "build-1", "controller": "director", "seams": dict(LOOP)}
