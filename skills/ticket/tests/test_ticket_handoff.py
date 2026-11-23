@@ -554,6 +554,23 @@ def test_O16c_a_tracker_ticket_on_a_handed_off_item_takes_no_lease_and_writes_no
     assert [event["kind"] for event in fake.events()[before:] if event["kind"] != "item.spec"] == []
 
 
+UNMATCHABLE = {
+    "a version 2 intent naming no operation_id": (_payload(operation_id=None), 2),
+    "an intent with no payload version": (_payload(), None),
+}
+
+
+@pytest.mark.parametrize("case", list(UNMATCHABLE))
+def test_O16d_an_intent_no_done_can_match_or_whose_version_cannot_be_read_refuses_the_ledger_id_source(repo, fake, case):
+    # Design 6.8: such an intent counts as open, so the item opens only through the hand-off source.
+    fake.file_row()
+    fake.take()
+    payload, version = UNMATCHABLE[case]
+    plant_intent(fake.fake, "build", "build-1", HOLDER, payload=payload, payload_version=version, hand_off=True)
+    message = refused(fake, lambda: open_ledger_id(repo, holder=HOLDER), "handoff_source_required")
+    assert HOLDER in message
+
+
 @pytest.mark.parametrize("writer", ["a spec set", "another writer's note"])
 def test_O17_a_write_between_the_read_and_the_claim_is_stale_and_nothing_is_written(repo, fake, writer):
     handed_off(fake)
@@ -625,6 +642,55 @@ def test_O21_a_stored_markdown_card_that_carries_a_handoff_field_is_unreadable(r
         ticket.TicketPass.open(KEY, Source(), ticket.MarkdownStore(repo, KEY, TITLE))
     assert refusal(excinfo) == "card_unreadable"
     assert (repo / ".ticket" / f"{KEY}.md").read_bytes() == kept
+
+
+# --- O22-O23: a pass on a handed-off item never releases the loop's lease ---------------------------------------
+
+
+def took_then_handed_off(repo, backend):
+    """A ledger-id pass as ``HOLDER`` that took the lease (its record says ``taken``), left live; then the loop takes
+    the item as the same holder and hands off ``build-1``. The pass is returned."""
+
+    backend.file_row()
+    first = open_ledger_id(repo, holder=HOLDER)
+    (record,) = [record_of(event) for event in pass_records(backend.events())]
+    assert (record["id"], record["holder"], record["lease"]) == (first.pass_id, HOLDER, "taken")
+    backend.take()
+    backend.hand_off()
+    return first
+
+
+def only_the_pass_end(backend, mark, pass_id, claim):
+    assert [(event["kind"], event["idempotency_key"]) for event in backend.events()[mark:]] == [
+        ("session.closed", f"ticket-pass/{KEY}/{pass_id}/released")]
+    assert latest_claim(backend) == claim
+    current = row(backend)
+    assert (current["status"], current.get("claim")) == ("claimed", HOLDER)
+
+
+@pytest.mark.parametrize("case", ["ended while handed off", "ended after the handback"])
+def test_O22_a_hand_off_resume_of_a_pass_that_took_the_lease_never_releases_the_loops_lease(repo, backend, case):
+    first = took_then_handed_off(repo, backend)
+    resumed = open_handoff(repo, declared=DECLARED, pass_id=first.pass_id)
+    assert (resumed.live, resumed.pass_id) == (True, first.pass_id)
+    if case == "ended after the handback":
+        backend.done("build-1")
+    claim = latest_claim(backend)
+    mark = len(backend.events())
+    resumed.end()
+    only_the_pass_end(backend, mark, first.pass_id, claim)
+
+
+@pytest.mark.parametrize("case", ["the release command", "its own handle ends"])
+def test_O23_a_pass_that_took_the_lease_before_the_hand_off_never_releases_the_loops_lease(repo, backend, case):
+    first = took_then_handed_off(repo, backend)
+    claim = latest_claim(backend)
+    mark = len(backend.events())
+    if case == "the release command":
+        assert ticket.main(["release", KEY, first.pass_id]) == 0
+    else:
+        first.end()
+    only_the_pass_end(backend, mark, first.pass_id, claim)
 
 
 # --- G: what must not change ------------------------------------------------------------------------------------

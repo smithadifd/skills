@@ -459,7 +459,8 @@ unchanged and, on the fake, no `append-many` sent (O17's second case sends the o
 refuses). O16a, O16b and O21 are red on origin/main for what main does; the rest are red there because the
 source does not exist. X1 to X27 are the mutations the row's design bar names; X28 to X32 cover the inherited
 refusals (one mutation, three sites), the read's no-refusal rule, SKILL.md, the store check and the loop-event
-check.
+check. X34 to X37 cover the other-source rule's two fail-closed halves and the lease no pass releases on a
+handed-off item.
 
 | ID | Test name | Setup | Expected | Mutation |
 |---|---|---|---|---|
@@ -483,11 +484,14 @@ check.
 | O16a | `test_O16a_the_ledger_id_source_on_a_handed_off_item_is_refused_naming_the_holder` (real) | the ledger-id source, holder the loop's | `handoff_source_required` naming `roll-seat-1`; nothing written | X19 the other-source refusal dropped |
 | O16b | `test_O16b_after_a_bare_state_open_a_default_pass_is_refused_and_the_loop_still_records` (real) | an outside `state open`, then a default pass of the ledger-id source | `handoff_source_required`, nothing written; the loop's build result then records | X19 (shared with O16a) |
 | O16c | `test_O16c_a_tracker_ticket_on_a_handed_off_item_takes_no_lease_and_writes_no_pass` | a tracker ticket opened on the handed-off item | `handoff_source_required`; no lease and no pass record (a spec version may land first: 6.8's known limit) | X19 (shared with O16a) |
+| O16d | `test_O16d_an_intent_no_done_can_match_or_whose_version_cannot_be_read_refuses_the_ledger_id_source[a version 2 intent naming no operation_id \| an intent with no payload version]` | the item taken; a version 2 intent with no `operation_id` / an intent with the hand-off's payload and no `payload_version`; the ledger-id source as the loop's holder | `handoff_source_required` naming `roll-seat-1`; nothing written | X34 `_handed_off` skips an intent whose operation or operation id cannot be read / X35 `_handed_off` skips an intent with no payload version |
 | O17 | `test_O17_a_write_between_the_read_and_the_claim_is_stale_and_nothing_is_written[a spec set \| another writer's note]` | a write lands right after the open's card read | `stale`; only the other writer's event lands | X28 the hand-off source skips an inherited check (here the spec confirm, and the claim's revision) |
 | O18 | `test_O18_the_ledger_id_refusals_hold_on_the_hand_off[no spec \| no acceptance]` | a handed-off item with no spec / no acceptance | `no_spec` / `no_acceptance`; nothing written | X28 the hand-off source skips an inherited check (here the spec read) |
 | O19 | `test_O19_the_controller_is_the_open_events_never_a_note_a_target_or_a_closed_hand_off` | a closed hand-off naming `decoy-closed`, two notes naming `decoy-note`, the open hand-off with `target` naming `decoy-target` | the card's controller is `director`, from the open event | X6 / X21 (shared with O4) |
 | O20 | `test_O20_skill_md_gives_the_hand_off_its_own_section_its_refusals_and_the_fail_closed_seam_line` | SKILL.md | the section `A parent's hand-off as the ticket`, outside the `/ticket <KEY>` order, names the constructor, `holder=`, every new refusal code and the fail-closed seam line | X30 the section's heading renamed |
 | O21 | `test_O21_a_stored_markdown_card_that_carries_a_handoff_field_is_unreadable` | a markdown card with a `handoff` key | `card_unreadable` on read and on open; the card's bytes unchanged | X23 the markdown store's refusal of a stored `handoff` key dropped |
+| O22 | `test_O22_a_hand_off_resume_of_a_pass_that_took_the_lease_never_releases_the_loops_lease[ended while handed off \| ended after the handback]` (real) | a ledger-id pass as `roll-seat-1` that took the lease (its record says `taken`), left live; the loop takes the item as the same holder and hands off `build-1`; a resume of the pass through the hand-off source; `end()` / the same with the hand-off's `loop.done` before the end | the end writes the pass-end only; the row stays claimed by the loop's holder and its latest claim unchanged | X36 the hand-off resume keeps the record's `taken` (with X37, the first case too) |
+| O23 | `test_O23_a_pass_that_took_the_lease_before_the_hand_off_never_releases_the_loops_lease[the release command \| its own handle ends]` (real) | the same pass that took the lease, the item then taken and handed off; `ticket.py release K P` / the pass's own `end()` | the pass-end only; the row stays claimed by the loop's holder and its latest claim unchanged | X37 the release decision ignores a handed-off item |
 | G1 | `test_L1_...`, `test_L2_...`, `test_L3_...` | as L | unchanged; L2's digests unchanged (a default pass writes what it wrote) | as L |
 | G2 | `test_G2_a_default_open_on_each_source_makes_the_same_calls_in_the_same_order[ledger id \| tracker key \| json file \| ad-hoc ask]` | a default open of each source | the CLI calls, measured on origin/main and written out, in order; no `--version` call; no `handoff` field | X25 the version call made for every source |
 | G3 | M1 to M16 and N1 to N22 | as M and N | unchanged; M5 still joins a loop-shaped lease on an item with no hand-off | as M and N |
@@ -500,14 +504,14 @@ check.
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
-  H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 31 (G1 and G3 name L's, M's and
-  N's tests and add no mutation). Total 328 rows. Eight carry no test with a mutation of their own in this release:
+  H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 34 (G1 and G3 name L's, M's and
+  N's tests and add no mutation). Total 331 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
   production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 276 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7, M12, M14 and M15 run on the
   fake CLI and also on a real ledger CLI when `LEDGER_REAL_CLI` names one, as do N2, N3, N4, N13, N15 and N16,
-  and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, G4 and G6.
-- Mutations named: 1 per row (G32, L3, M3, M5, M9, M11, M15, N1, N9, N14, N16 and N22 name two, L2 and M16 two sites of one, N5 four, N7 three, N8 five; in section O, O1, O4, O13 name two, O7 three, O11 six, O15 three sites of one, X27 two sites of one, and X28 three sites across O14, O17 and O18); the `_source_differences` four and the `_has_go` criteria mutation are
+  and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22, O23, G4 and G6.
+- Mutations named: 1 per row (G32, L3, M3, M5, M9, M11, M15, N1, N9, N14, N16 and N22 name two, L2 and M16 two sites of one, N5 four, N7 three, N8 five; in section O, O1, O4, O13 and O16d name two, O7 three, O11 six, O15 three sites of one, X27 two sites of one, and X28 three sites across O14, O17 and O18); the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's
   `ended` half (E11j, E11k) and E11q's step-(a) drop (E11q, E11r).

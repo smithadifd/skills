@@ -2995,7 +2995,10 @@ class LedgerStore:
         anyone but the holder the open named (the default holder,
         ``ticket-pass/<pass id>``, when it named none); its claim stays.
         Through the hand-off source a resume of either shape takes no lease:
-        an item not leased live to the holder is ``handoff_not_leased``.
+        an item not leased live to the holder is ``handoff_not_leased``. Nor
+        does it hold one: the lease is the parent's, so a resume of a pass
+        whose record says ``taken`` holds it as joined and its end never
+        releases it.
         """
 
         live = self._live or {}
@@ -3006,7 +3009,7 @@ class LedgerStore:
             take, prior = self._lease_decision(holder)
             if handoff and not self._leased_live(holder):
                 raise _handoff_not_leased(self.key, holder, self._row)
-            lease = live["lease"]
+            lease = "joined" if handoff else live["lease"]
             if take:
                 token = self._send([self._lease_event(holder, prior, pass_id, token)], token)
                 self._item = {"owner": holder, "claim": holder, "blocked_by": None}
@@ -3031,7 +3034,8 @@ class LedgerStore:
         the pass-end and the lease's release travel in one batch under that
         read's revision. Otherwise, or when that batch does not land, the
         pass-end is sent alone with no ``--expect-revision`` and any lease is
-        left to its expiry; a joined lease is never released. A failure is
+        left to its expiry; a joined lease, and any lease on a handed-off item,
+        is never released. A failure is
         reported and ignored. Releasing again sends the pass-end's key alone,
         so the ledger replays the stored one and writes nothing.
         """
@@ -3054,8 +3058,10 @@ class LedgerStore:
 
         It is sent only when the fresh read shows ``pass_id`` still the live
         pass, having taken the lease as ``holder`` (its record says ``taken``,
-        or it wrote the lease since), and the item's row still claimed by
-        ``holder``. Never raises.
+        or it wrote the lease since), the item's row still claimed by
+        ``holder``, and the item not handed off: while it has an open loop
+        intent of a version other than 1 the lease is the parent's, and only
+        the parent releases it (design 6.8). Never raises.
         """
 
         try:
@@ -3066,6 +3072,7 @@ class LedgerStore:
                 and live.get("shape") == "lease" and live.get("lease") == "taken" and live.get("holder") == holder
                 and row.get("recorded_status", row.get("status")) == "claimed"
                 and (row.get("owner") or row.get("claim")) == holder
+                and not self._handed_off
             )
             if not holds:
                 return False
@@ -3079,7 +3086,8 @@ class LedgerStore:
         """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim.
 
         The pass-end lands as ``release`` sends it, and the lease the pass took
-        is released with it only while the pass still holds it.
+        is released with it only while the pass still holds it and the item is
+        not handed off.
         """
 
         card, _ = self.read()

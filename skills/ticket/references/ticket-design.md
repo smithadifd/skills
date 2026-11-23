@@ -1163,8 +1163,9 @@ card without it has the defaults.
 | The markdown store, another item's store, another CLI's | `source_store_mismatch` |
 | The ledger off by the store rule (at `handoff_source`) | `handoff_no_ledger` |
 | A version line below 0.7.0, or one that cannot be read | `handoff_ledger_too_old` |
-| No such item; no `loop.managed` event | `handoff_not_managed` |
+| No such item | `handoff_not_managed` |
 | No spec; no acceptance; acceptance that cannot be parsed | `no_spec`, `no_acceptance`, `acceptance_unparseable` |
+| No `loop.managed` event | `handoff_not_managed` |
 | A loop event that cannot be read; an open intent of a version other than 1 or 2; a hand-off payload that breaks the grammar | `handoff_unreadable` |
 | Two open hand-offs | `handoff_ambiguous`, naming both operation ids; never the newer |
 | No open hand-off and an open version 1 build intent | `handoff_intent_v1`, naming its operation id |
@@ -1180,6 +1181,12 @@ card without it has the defaults.
 One deliberate exception: `LedgerStore.read` never refuses over a hand-off. A card whose hand-off is
 missing or cannot be read carries no `handoff` field, so `ticket.py release` and `clear_pass` still free a
 crashed pass on an item whose hand-off is malformed. Only the open through the hand-off source refuses.
+
+**The lease is the parent's.** No pass releases the lease of a handed-off item. A resume through the
+hand-off source holds the lease as joined even when the pass's record says `taken` (the pass took it before
+the item was handed off), so its end, even after the handback, sends the pass-end alone. `release` and
+`clear_pass` decide on a fresh read, and while that read shows an open loop intent of a version other than
+1 they send the pass-end alone and leave the lease to the parent.
 
 **The seams.** After the open nothing else changes: the same phases, the same two hard stops, the same
 steps. Where a seam's name is not the default, the session does not run the default action for that seam:
