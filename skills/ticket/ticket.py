@@ -68,6 +68,10 @@ _SCRIPT = os.path.abspath(__file__)
 
 _SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A name in a parent's hand-off (design 6.8): its controller, a seam's implementation, or one the opener declares it
+# runs. ASCII letters, digits, dot, underscore and hyphen, starting with a letter or digit, at most 64 characters, the
+# ledger's own entity token; names are compared by exact equality, so a look-alike letter never makes two equal.
+_HANDOFF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # A pass id is hex (design section 2); no length is fixed.
 _PASS_ID = re.compile(r"[0-9a-f]+")
 # What a stamp or a review may point at: a path (absolute, or relative with a
@@ -102,17 +106,22 @@ KEPT_LOCAL_POINT = (
 def seam_set(card: Mapping[str, Any], *names: str) -> dict[str, str]:
     """The seam set of a card: each seam name mapped to its implementation name.
 
-    A card carries no seam record yet (absent means default), so every seam
+    A card carries no seam record (absent means default), so every seam
     resolves to its default in ``SEAMS``, and nothing is written to the card
-    or the ledger. With no ``names`` the whole set is returned; with names,
-    only those. A name that is not a seam is refused, naming it: it never
-    resolves to a default.
+    or the ledger. The one exception is the ``handoff`` field of a ledger
+    item's card: the ledger store derives it from the item's one open
+    hand-off on every read (design 6.8), never from a record, and the seams
+    are then the hand-off's own names. With no ``names`` the whole set is
+    returned; with names, only those. A name that is not a seam is refused,
+    naming it: it never resolves to a default.
     """
 
     for name in names:
         if name not in SEAMS:
             raise TicketError(f"unknown seam: {name!r}; the seams are {', '.join(SEAMS)}")
-    return {name: SEAMS[name] for name in (names or SEAMS)}
+    handoff = card.get("handoff")
+    chosen = handoff["seams"] if isinstance(handoff, Mapping) else SEAMS
+    return {name: chosen[name] for name in (names or SEAMS)}
 
 
 def release_command(key: str, pass_id: str) -> str:
@@ -182,6 +191,27 @@ def _not_claimable(key: str, status: str) -> StoreUnavailable:
         f"ledger item {key} is {status}, so this pass takes no lease on it. Nothing was written and the item is "
         "unchanged; a person resolves its status first.",
         code="item_not_claimable",
+    )
+
+
+def _handoff_not_leased(key: str, holder: str, row: Mapping[str, Any] | None) -> StoreUnavailable:
+    row = row or {}
+    on_row = row.get("owner") or row.get("claim")
+    reads = f"{row.get('status')} (recorded {row.get('recorded_status')}), held by {on_row or 'no holder'}"
+    return StoreUnavailable(
+        f"ledger item {key} is not leased live to {holder} (it reads {reads}), so a pass opened through its "
+        "hand-off would have to take the lease, and it never takes one. Nothing was written and the item is "
+        "unchanged; the holder that handed it off takes it again.",
+        code="handoff_not_leased",
+    )
+
+
+def _handoff_source_required(key: str, holder: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"ledger item {key} is handed off by a parent (it has an open loop intent of a version other than 1), "
+        f"so only the hand-off source opens it, as its lease holder {holder}. Nothing was written and the item is "
+        "unchanged.",
+        code="handoff_source_required",
     )
 
 
@@ -881,6 +911,9 @@ def _check_card_shape(card: Any, key: str, where: str) -> None:
 
     if type(card) is not dict or card.get("schema") != CARD_SCHEMA or card.get("key") != key:
         raise _unreadable(where, f"it is not a {CARD_SCHEMA} card for ticket {key}")
+    if "handoff" in card:
+        # Only the ledger store derives this field, from an item's open hand-off, after this check (design 6.8).
+        raise _unreadable(where, "it stores a handoff field, which only a ledger item's own hand-off event gives")
     if not _is_text(card.get("title")):
         raise _unreadable(where, "it has no title")
     if card.get("status") not in ("open", "closed"):
@@ -1951,6 +1984,187 @@ def _trusted_close(events: Sequence[Mapping[str, Any]], states: list[int], stops
     )
 
 
+# --- A parent's hand-off on a ledger item (design 6.8) ----------------------
+
+_LOOP_KINDS = ("loop.managed", "loop.intent", "loop.done")
+# A hand-off's payload: exactly these keys, plus any of the optional ones (the ledger's ``loop.intent`` version 2).
+_HANDOFF_REQUIRED = ("operation", "operation_id", "controller", "seams")
+_HANDOFF_OPTIONAL = ("target", "head", "asked_event_id", "source")
+
+
+def _handoff_refused(code: str, key: str, why: str) -> StoreUnavailable:
+    return StoreUnavailable(
+        f"ledger item {key} is not opened through a parent's hand-off: {why}. Nothing was written and the item is "
+        "unchanged.",
+        code=code,
+    )
+
+
+def _is_handoff_name(value: Any) -> bool:
+    return type(value) is str and _HANDOFF_NAME.fullmatch(value) is not None
+
+
+def _read_handoff(events: Sequence[Mapping[str, Any]], key: str) -> dict[str, Any]:
+    """The item's one open hand-off, read from its exported events, as the card's ``handoff`` field (design 6.8).
+
+    The reader rule is the ledger's own: an intent is open unless a ``loop.done`` in the same events names the same
+    ``operation`` and ``operation_id``, and the hand-off is the one open ``loop.intent`` of payload version 2. The
+    field is the hand-off's controller, its three seams, its operation id and its event id. Any doubt is a refusal by
+    name, never a guess: no ``loop.managed`` event is ``handoff_not_managed``; a loop event with no whole-number id
+    and payload version, an intent or done that names no operation and operation id, an open intent of a version
+    other than 1 or 2, or a hand-off whose payload breaks the grammar is ``handoff_unreadable``; two open hand-offs
+    are ``handoff_ambiguous``, never the newer; no hand-off with an open version 1 build intent is
+    ``handoff_intent_v1``, and with none ``handoff_no_intent``. Nothing else is read: not a note, a stamp, the pass
+    record, the intent's ``target``, a link or the environment.
+    """
+
+    loop = [event for event in events if event.get("kind") in _LOOP_KINDS]
+    if not any(event["kind"] == "loop.managed" for event in loop):
+        raise _handoff_refused("handoff_not_managed", key, "it is not loop-managed (it has no loop.managed event)")
+    for event in loop:
+        what = f"its {event['kind']} event {event.get('id')!r}"
+        if type(event.get("id")) is not int or type(event.get("payload_version")) is not int:
+            raise _handoff_refused("handoff_unreadable", key, f"{what} has no whole-number id and payload version")
+        if event["kind"] == "loop.managed":
+            continue
+        payload = event.get("payload")
+        if type(payload) is not dict or not _is_text(payload.get("operation")) or not _is_text(payload.get("operation_id")):
+            raise _handoff_refused("handoff_unreadable", key, f"{what} does not name its operation and operation id")
+    closed = {
+        (event["payload"]["operation"], event["payload"]["operation_id"]) for event in loop if event["kind"] == "loop.done"
+    }
+    open_intents = [
+        event for event in loop
+        if event["kind"] == "loop.intent"
+        and (event["payload"]["operation"], event["payload"]["operation_id"]) not in closed
+    ]
+    for event in open_intents:
+        if event["payload_version"] not in (1, 2):
+            why = f"its open loop.intent event {event['id']} has payload version {event['payload_version']}, neither 1 nor 2"
+            raise _handoff_refused("handoff_unreadable", key, why)
+    handoffs = [event for event in open_intents if event["payload_version"] == 2]
+    if len(handoffs) > 1:
+        named = ", ".join(event["payload"]["operation_id"] for event in handoffs)
+        raise _handoff_refused("handoff_ambiguous", key, f"it has {len(handoffs)} open hand-offs ({named}), and none is picked")
+    if not handoffs:
+        builds = [event["payload"]["operation_id"] for event in open_intents if event["payload"]["operation"] == "build"]
+        if builds:
+            why = f"its open build intent ({', '.join(builds)}) is version 1, which names no controller and no seams"
+            raise _handoff_refused("handoff_intent_v1", key, why)
+        raise _handoff_refused("handoff_no_intent", key, "it has no open build hand-off")
+    event = handoffs[0]
+    payload = event["payload"]
+
+    def unreadable(why: str) -> StoreUnavailable:
+        return _handoff_refused("handoff_unreadable", key, f"its hand-off (event {event['id']}) {why}")
+
+    missing = [name for name in _HANDOFF_REQUIRED if name not in payload]
+    if missing:
+        raise unreadable(f"has no {', '.join(missing)}")
+    extra = sorted(set(payload) - set(_HANDOFF_REQUIRED) - set(_HANDOFF_OPTIONAL))
+    if extra:
+        raise unreadable(f"has keys a hand-off does not have: {', '.join(extra)}")
+    if payload["operation"] != "build":
+        raise unreadable(f"is for the operation {payload['operation']!r}, not build")
+    if not _is_handoff_name(payload["controller"]):
+        raise unreadable(f"names the controller {payload['controller']!r}, which is not a name token")
+    seams = payload["seams"]
+    if type(seams) is not dict or set(seams) != set(SEAMS):
+        raise unreadable("does not name exactly the seams build, review and outward")
+    for seam in SEAMS:
+        if not _is_handoff_name(seams[seam]):
+            raise unreadable(f"names the {seam} implementation {seams[seam]!r}, which is not a name token")
+    return {
+        "controller": payload["controller"],
+        "seams": {seam: seams[seam] for seam in SEAMS},
+        "operation_id": payload["operation_id"],
+        "event_id": event["id"],
+    }
+
+
+def _handoff_outcome(events: Sequence[Mapping[str, Any]], key: str) -> tuple[dict[str, Any] | None, StoreUnavailable | None]:
+    """The item's hand-off and None, or None and the refusal ``_read_handoff`` gives; never raises."""
+
+    try:
+        return _read_handoff(events, key), None
+    except StoreUnavailable as exc:
+        return None, exc
+
+
+def _hand_offs(events: Sequence[Mapping[str, Any]], since: int | None = None) -> list[int]:
+    """The index of every ``loop.intent`` whose payload version is not 1 that counts as open (design 6.8); with
+    ``since``, of every one open at the event at index ``since`` or written after it.
+
+    An intent whose operation and operation id cannot be read, or whose version cannot be, counts as open: a done
+    cannot be matched to it. With ``since`` only a done before that event closes an intent, so an intent open then,
+    or written after it, counts even when its done came later: these are the hand-offs that overlapped the life of
+    the pass whose record is that event, after the handback too.
+    """
+
+    closed = set()
+    for event in events[:since]:
+        payload = event.get("payload")
+        if event.get("kind") == "loop.done" and type(payload) is dict:
+            closed.add((payload.get("operation"), payload.get("operation_id")))
+    found = []
+    for index, event in enumerate(events):
+        if event.get("kind") != "loop.intent":
+            continue
+        version = event.get("payload_version")
+        if type(version) is int and version == 1:
+            continue
+        payload = event.get("payload")
+        ident = (payload.get("operation"), payload.get("operation_id")) if type(payload) is dict else (None, None)
+        if not (_is_text(ident[0]) and _is_text(ident[1])) or ident not in closed:
+            found.append(index)
+    return found
+
+
+def _handed_off(events: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the item has an open ``loop.intent`` whose payload version is not 1 (design 6.8): such an item opens
+    only through the hand-off source."""
+
+    return bool(_hand_offs(events))
+
+
+def _historical_holder(events: Sequence[Mapping[str, Any]], index: int) -> str | None:
+    """The holder the hand-off at ``events[index]`` was handed under (design 6.8), or None when it cannot be
+    established.
+
+    It is the holder (the ``owner``, else the ``claim``, each when present and not empty) of the latest
+    claim-bearing ``item.state`` strictly before the hand-off: the claim the ledger's loop writer checks before it
+    writes one. A state that names nobody is passed over. No such state, or a holder that is not a string, is
+    None. It is never read from today's row or from a later stamp.
+    """
+
+    for event in reversed(events[:index]):
+        if event.get("kind") != "item.state":
+            continue
+        for name in ("owner", "claim"):
+            value = event["payload"].get(name)
+            if value is None or value == "":
+                continue
+            return value if type(value) is str else None
+    return None
+
+
+def _protects(events: Sequence[Mapping[str, Any]], since: int, holder: str) -> bool:
+    """Whether a hand-off that overlapped the life of the pass whose record is ``events[since]`` protects that
+    pass's holder ``holder`` (design 6.8).
+
+    Each such hand-off (``_hand_offs`` with ``since``) protects the holder it was handed under
+    (``_historical_holder``). When that is ``holder``, by exact equality whatever the name (a default
+    ``ticket-pass/<id>`` included), or cannot be established, the pass never releases a lease under its holder. A
+    hand-off handed under another holder protects nothing of this pass.
+    """
+
+    for index in _hand_offs(events, since):
+        historical = _historical_holder(events, index)
+        if historical is None or historical == holder:
+            return True
+    return False
+
+
 def _ledger_card(
     events: Sequence[Mapping[str, Any]], key: str, title: str,
 ) -> tuple[dict[str, Any], Any, dict[str, Any] | None]:
@@ -1969,7 +2183,12 @@ def _ledger_card(
     holder that the live pass wrote after its record (the ``item.state``
     keyed ``ticket-lease/K/<pass>/<revision>``, as a resume writes when it
     takes the lease again) makes it ``taken``, so the pass releases it at its
-    end. An item that was closed
+    end. A pass whose holder a hand-off that overlapped its life was handed
+    under (``_protects``: open when the pass began or written since, its done
+    no matter) reads ``joined`` whatever its record says or it took since: that
+    holder name is the parent's for the rest of the pass's life, after the
+    handback too, and no end path of the pass releases a lease under it (design
+    6.8). A hand-off under another holder changes nothing. An item that was closed
     once reads ``closed``; its close stamp is marked ``close`` only when the
     close is trusted, so an outside status write is refused ``close_invalid``
     and never resumed.
@@ -1978,6 +2197,7 @@ def _ledger_card(
     where = f"ledger item {key}"
     card = _blank_card(key, title)
     live: dict[str, Any] | None = None
+    start = 0  # the index of the live pass's record: where the pass that holds a lease began
     pass_key = re.compile(rf"ticket-pass/{re.escape(key)}/([0-9a-f]+)/(claimed|released)")
     lease_key = re.compile(rf"ticket-lease/{re.escape(key)}/([0-9a-f]+)/[^/]+")
     states: list[int] = []
@@ -1996,7 +2216,7 @@ def _ledger_card(
             record = _fold_record(card, payload["text"], key, where)
             if record is not None:
                 card["pass"] = {name: record[name] for name in ("id", "host", "started_at")}
-                live = {"shape": "lease", "holder": record["holder"], "lease": record["lease"]}
+                live, start = {"shape": "lease", "holder": record["holder"], "lease": record["lease"]}, index
         elif kind == "item.stopped":
             stops.append(index)
             card["stamps"].append(
@@ -2014,9 +2234,18 @@ def _ledger_card(
                 wrote = lease_key.fullmatch(event.get("idempotency_key") or "")
                 if wrote and wrote[1] == card["pass"]["id"] and payload.get("owner") == live["holder"]:
                     live = {**live, "lease": "taken"}
+    if live is not None and live["shape"] == "lease" and _protects(events, start, live["holder"]):
+        # The one rule every end path reads (design 6.8): a hand-off that overlapped the pass's life under the pass's
+        # own holder name keeps that name the parent's for the rest of the pass's life, so no end path releases it.
+        live = {**live, "lease": "joined"}
     if card["status"] == "closed" and _trusted_close(events, states, stops, key):
         card["stamps"][-1]["close"] = True
     _check_card_shape(card, key, where)
+    # A parent's hand-off, derived from the item's loop events on every read and never from a record (design 6.8).
+    # A problem hand-off gives no field and no refusal here: only an open through the hand-off source refuses it.
+    handoff, _ = _handoff_outcome(events, key)
+    if handoff is not None:
+        card["handoff"] = handoff
     return card, events[states[-1]]["payload"].get("blocked_by") if states else None, live
 
 
@@ -2113,10 +2342,13 @@ class LedgerStore:
         self._row: Mapping[str, Any] | None = None
         self._live: dict[str, Any] | None = None
         self._read_token: str | None = None
-        # The bound pass's holder and whether it took or joined the lease (None for a claim of the old shape).
-        # The holder an open names is never kept here: it travels with that open's claim or join (``apply``).
-        self._holder: str | None = None
-        self._lease: str | None = None
+        # No holder and no lease is kept here. The holder an open names travels with that open's claim or join
+        # (``apply``), and the end reads the pass's holder and lease from a fresh read (``_release_lease``).
+        # The item's hand-off as last read (design 6.8): the open hand-off, or the refusal an open through the
+        # hand-off source gives; and whether the item has an open loop intent of a version other than 1.
+        self._handoff: dict[str, Any] | None = None
+        self._handoff_problem: StoreUnavailable | None = None
+        self._handed_off = False
         # Threads sharing this handle take turns; a binding event binds under it.
         self._threads = threading.RLock()
 
@@ -2463,13 +2695,46 @@ class LedgerStore:
             row = self._ticket_row()
             if row is None:
                 card, token, item, live = _blank_card(self.key, self.title), NO_TOKEN, {}, None
+                handoff, problem = _handoff_outcome([], self.key)
+                handed_off = False
             else:
                 events = self._data(self._run("export-item", self.key), "read")["events"]
                 card, blocked, live = _ledger_card(events, self.key, self.title)
                 token = str(row["revision"])
                 item = {"owner": row.get("owner"), "claim": row.get("claim"), "blocked_by": blocked}
+                handoff, problem = _handoff_outcome(events, self.key)
+                handed_off = _handed_off(events)
             self._card, self._item, self._row, self._live, self._read_token = card, item, row, live, token
+            self._handoff, self._handoff_problem, self._handed_off = handoff, problem, handed_off
             return copy.deepcopy(card), token
+
+    def hand_off(self) -> dict[str, Any]:
+        """The item's open hand-off as this handle's last read found it; else the refusal it gives (design 6.8).
+
+        Only an open through the hand-off source calls it. ``read`` itself never refuses over a hand-off.
+        """
+
+        if self._handoff is None:
+            raise self._handoff_problem or _handoff_refused("handoff_not_managed", self.key, "the item was not read")
+        return copy.deepcopy(self._handoff)
+
+    @property
+    def handed_off(self) -> str | None:
+        """When the last read found an open loop intent of a version other than 1, the item's lease holder as read
+        (``no holder`` when the row names none); else None. Every source but the hand-off source is refused there."""
+
+        if not self._handed_off:
+            return None
+        row = self._row or {}
+        holder = row.get("owner") or row.get("claim")
+        return holder if _is_text(holder) else "no holder"
+
+    def _leased_live(self, holder: str) -> bool:
+        """Whether the item's row, as last read, is leased live to ``holder``: recorded and read ``claimed``, by it."""
+
+        row = self._row or {}
+        on_row = row.get("owner") or row.get("claim")
+        return row.get("recorded_status") == "claimed" and row.get("status") == "claimed" and on_row == holder
 
     def _ticket_row(self, ask: str | None = None) -> Mapping[str, Any] | None:
         """The item's ``query --item`` row, or None when the ledger holds no such item.
@@ -2666,7 +2931,9 @@ class LedgerStore:
             lines.extend([f"## {entry['field']}", *entry["diff"]])
         return "\n".join(lines)
 
-    def apply(self, token: str, events: Sequence[tuple[str, Any]], *, holder: str | None = None) -> str:
+    def apply(
+        self, token: str, events: Sequence[tuple[str, Any]], *, holder: str | None = None, handoff: bool = False,
+    ) -> str:
         """Land every event or none, only while the item's revision is still ``token``.
 
         A used handle is refused ``handle_used`` for a binding event before any
@@ -2683,6 +2950,12 @@ class LedgerStore:
         own argument, never state kept on the handle, so two opens racing on
         one handle each claim as the holder they named. A holder that is not a
         name is refused ``holder_invalid`` before any CLI call.
+
+        ``handoff`` is true for the claim or join of an open through the
+        hand-off source (design 6.8), and travels the same way. Such a claim or
+        join never writes a lease: where the item is not leased live to the
+        holder, so the pass would have to take the lease, it is refused
+        ``handoff_not_leased`` and nothing is written.
         """
 
         if holder is not None:
@@ -2701,7 +2974,10 @@ class LedgerStore:
                 return token
             if token != (self._read_token or NO_TOKEN):
                 raise _stale(self.key, f"the lease is decided on the item as read at revision {self._read_token or NO_TOKEN}, not {token}")
-            token = self._join(token, binding[1], holder) if joining else self._claim(token, events[0][1], holder)
+            if joining:
+                token = self._join(token, binding[1], holder, handoff)
+            else:
+                token = self._claim(token, events[0][1], holder, handoff)
             self._pass_id, self._ended = binding[1], None
             return token
 
@@ -2739,11 +3015,16 @@ class LedgerStore:
             payload["prior_holder"] = prior
         return self._element("item.state", payload, f"ticket-lease/{self.key}/{pass_id}/{token}")
 
-    def _claim(self, token: str, claim: Mapping[str, Any], given: str | None) -> str:
-        """A new pass's claim: one batch under ``token`` of the creation (on ``none``), the lease when taken, and the pass record."""
+    def _claim(self, token: str, claim: Mapping[str, Any], given: str | None, handoff: bool = False) -> str:
+        """A new pass's claim: one batch under ``token`` of the creation (on ``none``), the lease when taken, and the pass record.
+
+        Through the hand-off source the pass only joins: an item not leased live to the holder is ``handoff_not_leased``.
+        """
 
         holder = given or f"ticket-pass/{claim['id']}"
         take, prior = self._lease_decision(holder)
+        if handoff and not self._leased_live(holder):
+            raise _handoff_not_leased(self.key, holder, self._row)
         record = {**claim, "holder": holder, "lease": "taken" if take else "joined"}
         batch = [self._created()] if token == NO_TOKEN else []
         if take:
@@ -2753,12 +3034,11 @@ class LedgerStore:
         token = self._send(batch, token)
         self._card = _fold(self._card, [("claim", claim)])
         self._live = {"shape": "lease", "holder": holder, "lease": record["lease"]}
-        self._holder, self._lease = holder, record["lease"]
         if take:
             self._item = {"owner": holder, "claim": holder, "blocked_by": None}
         return token
 
-    def _join(self, token: str, pass_id: str, given: str | None) -> str:
+    def _join(self, token: str, pass_id: str, given: str | None, handoff: bool = False) -> str:
         """Continue the live pass ``pass_id``: its holder keeps, renews or takes back the lease; the old shape takes none.
 
         A pass record names the holder. Its live lease is kept with no write;
@@ -2766,10 +3046,15 @@ class LedgerStore:
         holder's live lease is ``lease_held``, and a holder the open named that
         is not the record's is ``holder_mismatch``. A resume that writes the
         lease has taken it, though its record says joined, so its end releases
-        it. A pass of the old shape
+        it, unless a hand-off that overlapped the pass's life was handed under
+        its holder (the fold, design 6.8). A pass of the old shape
         takes no lease and is ``lease_held`` while the item is claimed by
         anyone but the holder the open named (the default holder,
         ``ticket-pass/<pass id>``, when it named none); its claim stays.
+        Through the hand-off source a resume of either shape takes no lease:
+        an item not leased live to the holder is ``handoff_not_leased``. What
+        the resume took is never kept on the handle: its end decides from a
+        fresh read, whichever source resumed it.
         """
 
         live = self._live or {}
@@ -2778,62 +3063,68 @@ class LedgerStore:
             if given is not None and given != holder:
                 raise _holder_mismatch(self.key, given, holder)
             take, prior = self._lease_decision(holder)
-            lease = live["lease"]
+            if handoff and not self._leased_live(holder):
+                raise _handoff_not_leased(self.key, holder, self._row)
             if take:
                 token = self._send([self._lease_event(holder, prior, pass_id, token)], token)
                 self._item = {"owner": holder, "claim": holder, "blocked_by": None}
-                lease = "taken"
-                self._live = {**live, "lease": lease}
-            self._holder, self._lease = holder, lease
+                self._live = {**live, "lease": "taken"}
             return token
         holder = given or f"ticket-pass/{pass_id}"
         row = self._row or {}
         on_row = row.get("owner") or row.get("claim")
         if row.get("recorded_status", row.get("status")) == "claimed" and on_row != holder:
             raise _lease_held(self.key, on_row if _is_text(on_row) else "a claim that names no holder")
-        self._holder, self._lease = None, None
+        if handoff and not self._leased_live(holder):
+            raise _handoff_not_leased(self.key, holder, self._row)
         return token
 
     def release(self) -> None:
-        """End this handle's own pass; its pass-end lands, and a lease it took is released while it still holds it.
+        """End this handle's own pass; its pass-end lands, and a lease the pass took is released while it still holds it.
 
-        When the pass took the lease, a fresh read decides (``_release_lease``):
-        the pass-end and the lease's release travel in one batch under that
-        read's revision. Otherwise, or when that batch does not land, the
+        A bound handle always asks a fresh read (``_release_lease``), whatever
+        it took, joined or read before: when that read says the pass may
+        release, the pass-end and the lease's release travel in one batch under
+        that read's revision. Otherwise, or when that batch does not land, the
         pass-end is sent alone with no ``--expect-revision`` and any lease is
-        left to its expiry; a joined lease is never released. A failure is
-        reported and ignored. Releasing again sends the pass-end's key alone,
-        so the ledger replays the stored one and writes nothing.
+        left to its expiry. A failure is reported and ignored. Releasing again
+        sends the pass-end's key alone, so the ledger replays the stored one
+        and writes nothing.
         """
 
         with self._threads:
             mine = self._pass_id or self._ended
-            took, holder = self._lease == "taken", self._holder
-            self._pass_id, self._ended, self._lease = None, mine, None
+            bound = self._pass_id is not None
+            self._pass_id, self._ended = None, mine
             if mine is None:
                 return
-            if took and self._release_lease(mine, holder):
+            if bound and self._release_lease(mine):
                 return
             try:
                 self._send([self._released(mine)], None)
             except StoreUnavailable as exc:
                 print(f"ticket.py: the release of pass {mine} did not land: {exc}", file=sys.stderr)
 
-    def _release_lease(self, pass_id: str, holder: str | None) -> bool:
+    def _release_lease(self, pass_id: str) -> bool:
         """Send the pass-end and the lease's release under a fresh read's revision; True when that batch landed.
 
-        It is sent only when the fresh read shows ``pass_id`` still the live
-        pass, having taken the lease as ``holder`` (its record says ``taken``,
-        or it wrote the lease since), and the item's row still claimed by
-        ``holder``. Never raises.
+        The one release decision of every end path (``release`` and
+        ``clear_pass``), read now from ``export-item`` and ``query --item``,
+        never from this handle. It is sent only when that read shows
+        ``pass_id`` still the live pass with a lease record naming its holder
+        H, the pass having taken the lease as H (its record says ``taken``,
+        or it wrote the lease since) with no hand-off that overlapped its life
+        handed under H (the fold reads such a pass's lease as joined, design
+        6.8), and the item's row still recorded claimed by H. Never raises.
         """
 
         try:
             card, token = self.read()
             live, row = self._live or {}, self._row or {}
+            holder = live.get("holder")
             holds = (
                 card["pass"] is not None and card["pass"]["id"] == pass_id
-                and live.get("shape") == "lease" and live.get("lease") == "taken" and live.get("holder") == holder
+                and live.get("shape") == "lease" and live.get("lease") == "taken"
                 and row.get("recorded_status", row.get("status")) == "claimed"
                 and (row.get("owner") or row.get("claim")) == holder
             )
@@ -2849,7 +3140,9 @@ class LedgerStore:
         """A person's release of a crashed pass: refused unless ``pass_id`` is the live claim.
 
         The pass-end lands as ``release`` sends it, and the lease the pass took
-        is released with it only while the pass still holds it.
+        is released with it only when ``release``'s own fresh decision
+        (``_release_lease``) says so: this checks the live pass id and adds no
+        lease check of its own (design 6.8).
         """
 
         card, _ = self.read()
@@ -2861,8 +3154,7 @@ class LedgerStore:
                 + "; nothing was changed",
                 code="held" if live else "pass_ended",
             )
-        record = self._live or {}
-        if record.get("lease") == "taken" and self._release_lease(pass_id, record.get("holder")):
+        if self._release_lease(pass_id):
             return
         self._send([self._released(pass_id)], None)
 
@@ -3233,7 +3525,12 @@ class LedgerItemSource:
     def pull(self, key: str) -> Ticket:
         if not _KEY.fullmatch(key):
             raise TicketError(f"unsafe ticket key: {key!r}")
-        row = self._row(key, _ledger_read(self.cli, "query", "--item", key))
+        return self._ticket(key, _ledger_read(self.cli, "query", "--item", key))
+
+    def _ticket(self, key: str, answer: _Answer) -> Ticket:
+        """The ticket from the item's ``query`` answer, its spec read now and its links."""
+
+        row = self._row(key, answer)
         spec, body, criteria, recorded = self.read_spec(key, row["title"])
         ticket = Ticket.from_mapping(
             {
@@ -3281,6 +3578,124 @@ def ledger_item_source(key: str) -> LedgerItemSource | None:
         return None
     source._row(key, answer)
     return source
+
+
+# --- A parent's hand-off as the ticket source (design 6.8) -----------------
+
+# The ledger release whose ``export-item`` carries each loop event's payload version and whose loop writer records a
+# hand-off. The hand-off source refuses an older CLI, or one whose ``--version`` line cannot be read.
+HANDOFF_LEDGER_VERSION = (0, 7, 0)
+_VERSION_LINE = re.compile(r"ledger ([0-9]+)\.([0-9]+)\.([0-9]+)\n?")
+
+
+def _check_handoff_ledger(cli: str) -> None:
+    """Refuse ``handoff_ledger_too_old`` unless ``<cli> --version`` exits 0 printing ``ledger X.Y.Z`` at 0.7.0 or later.
+
+    The three numbers are compared as integers. Another shape, a suffix, a non-zero exit, output that is not text
+    and no answer within ``LEDGER_PROBE_TIMEOUT`` are the same refusal: a version line that cannot be read is too old.
+    """
+
+    _require_runnable(cli)
+    line = None
+    try:
+        result = subprocess.run(
+            [cli, "--version"], input="", capture_output=True, encoding="utf-8", timeout=LEDGER_PROBE_TIMEOUT, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        printed = f"nothing within {LEDGER_PROBE_TIMEOUT:g} seconds"
+    except (OSError, ValueError) as exc:
+        printed = f"nothing readable ({_one_line(exc)})"
+    else:
+        printed = f"{result.stdout!r} with exit status {result.returncode}"
+        line = _VERSION_LINE.fullmatch(result.stdout) if result.returncode == 0 else None
+    if line is None or tuple(int(part) for part in line.groups()) < HANDOFF_LEDGER_VERSION:
+        least = ".".join(str(part) for part in HANDOFF_LEDGER_VERSION)
+        raise StoreUnavailable(
+            f"the ledger CLI {cli} answered `--version` with {printed}, which is not `ledger X.Y.Z` at {least} or later, "
+            "so it may not read a parent's hand-off as the loop wrote it. Nothing was read or written; select a ledger "
+            f"CLI of release {least} or later.",
+            code="handoff_ledger_too_old",
+        )
+
+
+def _check_implementations(value: Any) -> Mapping[str, tuple[str, ...]]:
+    """The implementations an opener declares it runs, per seam; a ``TicketError`` before anything is read otherwise.
+
+    A mapping whose keys are among ``build``, ``review`` and ``outward``, each value one or more name tokens.
+    """
+
+    if value is None:
+        value = {}
+    if not isinstance(value, Mapping):
+        raise TicketError("the implementations an opener declares are a mapping of seam names to lists of names")
+    declared: dict[str, tuple[str, ...]] = {}
+    for seam, names in value.items():
+        if seam not in SEAMS:
+            raise TicketError(f"unknown seam: {seam!r}; the seams are {', '.join(SEAMS)}")
+        if type(names) not in (list, tuple) or not names:
+            raise TicketError(f"the implementations declared for the {seam} seam must be a non-empty list of names")
+        for name in names:
+            if not _is_handoff_name(name):
+                raise TicketError(
+                    f"the implementation {name!r} declared for the {seam} seam is not a name token (ASCII letters, "
+                    "digits, dot, underscore and hyphen, starting with a letter or digit, at most 64 characters)"
+                )
+        declared[seam] = tuple(names)
+    return MappingProxyType(declared)
+
+
+class HandoffSource(LedgerItemSource):
+    """A parent's hand-off as the ticket (design 6.8): the ledger-item source plus the hand-off's conditions.
+
+    Only a parent's adapter uses it, never ``/ticket <KEY>``. The ticket is the item's, read as the ledger-item source
+    reads it, after one ``<cli> --version`` call (``handoff_ledger_too_old`` below 0.7.0); an item the ledger does not
+    hold is ``handoff_not_managed``. ``implementations`` is what the opener runs for each seam beyond its default; the
+    open refuses a hand-off that names any other (``handoff_seam_unknown``). The controller and the seams are never
+    the opener's to give: they are the item's open hand-off event's own, read again at every read.
+    """
+
+    def __init__(self, cli: str | Path, implementations: Mapping[str, Sequence[str]] | None = None):
+        self.implementations = _check_implementations(implementations)
+        super().__init__(cli)
+
+    def pull(self, key: str) -> Ticket:
+        if not _KEY.fullmatch(key):
+            raise TicketError(f"unsafe ticket key: {key!r}")
+        _check_handoff_ledger(self.cli)
+        answer = _ledger_read(self.cli, "query", "--item", key)
+        if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+            raise _handoff_refused("handoff_not_managed", key, "the ledger holds no such item")
+        return self._ticket(key, answer)
+
+    def check(self, key: str, handoff: Mapping[str, Any]) -> None:
+        """Refuse ``handoff_seam_unknown`` unless every seam of ``handoff`` names its default or a declared name of that seam."""
+
+        for seam in SEAMS:
+            name = handoff["seams"][seam]
+            if name != SEAMS[seam] and name not in self.implementations.get(seam, ()):
+                raise _handoff_refused(
+                    "handoff_seam_unknown", key,
+                    f"its {seam} seam names the implementation {name}, which is neither the default ({SEAMS[seam]}) nor "
+                    f"one this opener declared it runs for {seam}; it is not run as the default either",
+                )
+
+
+def handoff_source(key: str, implementations: Mapping[str, Sequence[str]] | None = None) -> HandoffSource:
+    """The hand-off source for ledger item ``key`` through the CLI the store rule picks (design 6.8).
+
+    The declared implementations are checked first (``TicketError``). With the ledger off by the rule this is
+    ``handoff_no_ledger`` and no ledger call is made; a named CLI that fails the capability check is refused as
+    ``choose_store`` refuses it. Open it with ``choose_store`` for the same key and ``holder=`` the lease holder the
+    parent took the item as.
+    """
+
+    declared = _check_implementations(implementations)
+    if not _KEY.fullmatch(key):
+        raise TicketError(f"unsafe ticket key: {key!r}")
+    chosen = select_store()
+    if chosen.cli is None:
+        raise _handoff_refused("handoff_no_ledger", key, f"the ledger is off by the store rule ({chosen.reason})")
+    return HandoffSource(chosen.cli, declared)
 
 
 def _check_item_store(key: str, source: Any, store: Any) -> None:
@@ -3332,6 +3747,16 @@ _STORE_PHASE = {
 }
 
 
+def _handoff_line(handoff: Mapping[str, Any]) -> str:
+    """The reconciliation line of an open through the hand-off source: the controller, the seams, the operation and the event."""
+
+    seams = ", ".join(f"{seam} {handoff['seams'][seam]}" for seam in SEAMS)
+    return (
+        f"hand-off: controller {handoff['controller']}; seams {seams}; "
+        f"operation {handoff['operation_id']}, event {handoff['event_id']}"
+    )
+
+
 def _ends_on_failure(method):
     """Any failure past validation ends the pass and releases its claim, then raises.
 
@@ -3373,6 +3798,8 @@ class TicketPass:
         self._live = False
         # The lease holder this open named (None for the default); only the ledger store takes it.
         self._lease_holder: str | None = None
+        # True for an open through the hand-off source: its claim or join never takes a lease (design 6.8).
+        self._handoff = False
         self.reconciliation: tuple[str, ...] = ()
         self.resume_card: dict[str, Any] = card
 
@@ -3406,9 +3833,18 @@ class TicketPass:
         writes nothing more; a stopped or closed ticket is reported and takes
         no claim. Beyond that spec record the open writes nothing into a store:
         a new pass sends its claim, a join sends a ``join`` event.
+
+        Through the hand-off source (design 6.8) the holder is required. After
+        the card read the item's one open hand-off is checked
+        (``LedgerStore.hand_off``) and each of its seams must name the default
+        or an implementation the source declares (``handoff_seam_unknown``);
+        the claim or join never takes a lease (``handoff_not_leased``). Every
+        other source is refused ``handoff_source_required`` on an item with an
+        open loop intent of a version other than 1.
         """
 
-        if holder is not None:
+        handing_off = isinstance(source, HandoffSource)
+        if holder is not None or handing_off:
             _check_holder(holder)
         if store.pass_id is not None or store.ended is not None:
             raise _handle_used(key, store.pass_id or store.ended)
@@ -3422,6 +3858,12 @@ class TicketPass:
         if isinstance(store, LedgerStore) and not isinstance(source, LedgerItemSource):
             recorded, intake = store.record_spec(ticket)
         card, token = store.read()
+        handoff: dict[str, Any] | None = None
+        if handing_off:
+            handoff = store.hand_off()
+            source.check(key, handoff)
+        elif isinstance(store, LedgerStore) and store.handed_off is not None:
+            raise _handoff_source_required(key, store.handed_off)
         if isinstance(source, LedgerItemSource):
             source.confirm(ticket)
         elif recorded is not None:
@@ -3431,11 +3873,13 @@ class TicketPass:
         session = cls(ticket, store, card, token, identity)
         session._phase = state
         session._lease_holder = holder
+        session._handoff = handing_off
         notice = getattr(store, "leftover_notice", None)
         leftover = notice() if callable(notice) else None
         stored = getattr(store, "selection", None)
         session.reconciliation = (
             *((f"store: {stored}",) if stored else ()),
+            *((_handoff_line(handoff),) if handoff is not None else ()),
             *intake,
             *flags,
             *((leftover,) if leftover else ()),
@@ -3462,7 +3906,7 @@ class TicketPass:
         try:
             token = self._bind(self._token, [("claim", claim)])
         except StoreUnavailable as exc:
-            if exc.code in ("handle_used", "lease_held", "item_not_claimable"):
+            if exc.code in ("handle_used", "lease_held", "item_not_claimable", "handoff_not_leased"):
                 # Not a lost race: the handle was bound meanwhile, or the item's lease or status refuses the claim.
                 raise
             # A lost race: read once more and name the pass that won.
@@ -3477,7 +3921,7 @@ class TicketPass:
         """Send this open's claim or join; on the ledger store the holder it named travels with it, under its lock."""
 
         if isinstance(self.store, LedgerStore):
-            return self.store.apply(token, events, holder=self._lease_holder)
+            return self.store.apply(token, events, holder=self._lease_holder, handoff=self._handoff)
         return self.store.apply(token, events)
 
     @property

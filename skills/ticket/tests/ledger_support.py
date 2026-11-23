@@ -98,13 +98,17 @@ class FakeLedger:
         out = json.dumps({"data": None, "error": {"code": code, "message": message}, "ok": False}, sort_keys=True)
         self.script(verb, stdout=out + "\n", status=EXIT[code] if status is None else status, commit=commit)
 
-    def outside(self, kind, payload, actor="outsider", session="outside-session", key=None):
-        """An outsider's event, appended straight into the ledger under ``key`` or a random one."""
+    def outside(self, kind, payload, actor="outsider", session="outside-session", key=None, payload_version=1):
+        """An outsider's event, appended straight into the ledger under ``key`` or a random one.
+
+        ``payload_version`` is the event's payload version as the ledger stores it; None leaves the field out.
+        """
 
         def append(state):
             events = state["events"]
             events.append({
-                "id": (events[-1]["id"] if events else 0) + 1, "kind": kind, "payload": payload, "payload_version": 1,
+                "id": (events[-1]["id"] if events else 0) + 1, "kind": kind, "payload": payload,
+                **({} if payload_version is None else {"payload_version": payload_version}),
                 "item_id": KEY, "idempotency_key": key or secrets.token_hex(16), "actor": actor, "session": session,
             })
 
@@ -162,6 +166,67 @@ class FakeLedger:
         """The content hash of the item's current spec."""
 
         return [e for e in self.events() if e["item_id"] == item and e["kind"] == "item.spec"][-1]["payload"]["content_hash"]
+
+
+# --- The hand-off seed (matrix section O) ------------------------------------------------------------------
+# The loop's own events on an item, as ledger 0.7.0's loop writer gives them: ``take_item`` (``loop.managed`` and a
+# stamped claim), ``claim_operation`` (a ``loop.intent``, version 2 with a controller and seams, and with ``hand_off``
+# the holder's claim rewritten unstamped) and ``finish_operation`` (a ``loop.done`` and the claim stamped again).
+# On the fake they are planted straight into its state; on a real CLI the loop library beside it writes them.
+LIVE_STAMP = "2999-01-01T00:00:00.000Z"
+
+
+def plant_take(fake, holder, n=1):
+    """``take_item`` on the fake: ``loop.managed`` once, then the holder's stamped claim."""
+
+    if not any(event["kind"] == "loop.managed" for event in fake.events() if event["item_id"] == KEY):
+        fake.outside("loop.managed", {}, actor="loop", key=f"loop:{KEY}:managed")
+    fake.outside("item.state", {"status": "claimed", "claim": holder, "expires_at": LIVE_STAMP}, actor="loop",
+                 key=f"take:{KEY}:{n}")
+
+
+def plant_intent(fake, operation, operation_id, holder=None, payload=None, payload_version=1, hand_off=False):
+    """``claim_operation`` on the fake: the intent (``payload`` as given, else operation and id), then with
+    ``hand_off`` the holder's claim rewritten unstamped."""
+
+    body = {"operation": operation, "operation_id": operation_id} if payload is None else payload
+    fake.outside("loop.intent", body, actor="loop", key=f"loop:{KEY}:{operation}:{operation_id}:intent",
+                 payload_version=payload_version)
+    if hand_off:
+        fake.outside("item.state", {"status": "claimed", "claim": holder}, actor="loop",
+                     key=f"loop:{KEY}:{operation}:{operation_id}:hand-off")
+
+
+def plant_done(fake, operation, operation_id, holder, outcome="handback"):
+    """``finish_operation`` on the fake: the ``loop.done`` naming its intent, then the holder's claim stamped again."""
+
+    intent = [event for event in fake.events()
+              if event["kind"] == "loop.intent" and event["idempotency_key"] == f"loop:{KEY}:{operation}:{operation_id}:intent"]
+    payload = {"operation": operation, "operation_id": operation_id, "outcome": outcome,
+               "intent_event_id": intent[-1]["id"] if intent else 1}
+    fake.outside("loop.done", payload, actor="loop", key=f"loop:{KEY}:{operation}:{operation_id}:done")
+    fake.outside("item.state", {"status": "claimed", "claim": holder, "expires_at": LIVE_STAMP}, actor="loop",
+                 key=f"loop:{KEY}:{operation}:{operation_id}:restamp")
+
+
+def ledger_library(cli):
+    """``ledger.loop`` and ``ledger.store``'s ``open_ledger`` from the ledger package beside the CLI ``cli``, as H24
+    loads ``ledger.schema``: the hand-off seed on a real ledger is the loop writer's own, never a forged event."""
+
+    import importlib
+
+    path = Path(cli).resolve()
+    for root in (path.parent, path.parent.parent / "skills" / "_lib"):
+        if (root / "ledger" / "loop.py").is_file():
+            saved, quiet = list(sys.path), sys.dont_write_bytecode
+            sys.path.insert(0, str(root))
+            sys.dont_write_bytecode = True
+            try:
+                return importlib.import_module("ledger.loop"), importlib.import_module("ledger.store").open_ledger
+            finally:
+                sys.path[:] = saved
+                sys.dont_write_bytecode = quiet
+    raise AssertionError(f"no ledger/loop.py beside {path}")
 
 
 def open_ledger(cli, src, pass_id=None, handle=None, holder=None):
