@@ -304,7 +304,10 @@ def test_P6_the_presenting_pass_and_relay_are_required(repo, fake):
         assert not ticket._is_go(answer, "plan", KEY, card), "a role go must have non-empty relayed_by"
     for handoff in (None, [], "director", {"controller": "not a token"}, {"controller": 7}):
         card["handoff"] = handoff
-        assert not ticket._is_go(decision(session), "plan", KEY, card), "an unreadable handoff field is no controller"
+        answer = decision(session)
+        if isinstance(handoff, dict) and isinstance(handoff.get("controller"), str):
+            answer["who"] = handoff["controller"]
+        assert not ticket._is_go(answer, "plan", KEY, card), "an unreadable handoff field is no controller"
 
 
 def test_P7_a_handback_invalidates_the_waiting_pass_and_the_controllers_go(repo, backend):
