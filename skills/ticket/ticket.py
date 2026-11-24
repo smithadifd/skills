@@ -137,6 +137,10 @@ class GateRequired(TicketError):
     """A person has not explicitly approved the named gate."""
 
 
+def _role_go_refused(code: str, key: str, why: str) -> GateRequired:
+    return GateRequired(f"{code}: ticket {key}: {why}. Nothing was written; the pass stays live.")
+
+
 class StoreUnavailable(RuntimeError):
     """A refusal: nothing was written and the pass ends. ``code`` names the refusal."""
 
@@ -1056,13 +1060,23 @@ def _covers(record: Mapping[str, Any], identity: tuple[int, tuple[str, ...]]) ->
     return record.get("plan_revision") == revision and record.get("criteria") == list(criteria)
 
 
-def _is_go(decision: Mapping[str, Any], gate: str, key: str) -> bool:
-    """A person's settled ratification of ``gate`` on this ticket."""
+def _is_go(decision: Mapping[str, Any], gate: str, key: str, card: Mapping[str, Any]) -> bool:
+    """A person's go, or the open hand-off controller's go; relaying is attribution only."""
 
     source = decision.get("source")
+    handoff = card.get("handoff")
+    controller = handoff.get("controller") if isinstance(handoff, Mapping) else None
     return (
         decision.get("gate") == gate
-        and decision.get("who_kind") == "person"
+        and (
+            decision.get("who_kind") == "person"
+            or (
+                decision.get("who_kind") == "role"
+                and _is_handoff_name(controller)
+                and type(decision.get("who")) is str and decision["who"] == controller
+                and _is_text(decision.get("relayed_by"))
+            )
+        )
         and decision.get("standing") == "settled"
         and type(source) is dict and source.get("what") == "ratification"
         and {"type": "ticket", "id": key} in _items(decision.get("tags"))
@@ -1074,7 +1088,7 @@ def _has_go(card: Mapping[str, Any], gate: str, identity: tuple[int, tuple[str, 
     names the pass that presented the stored plan."""
 
     return any(
-        _is_go(decision, gate, key)
+        _is_go(decision, gate, key, card)
         and _covers(decision, identity)
         and (gate != "plan" or decision.get("pass") == card["plan"]["pass"])
         for decision in card["decisions"]
@@ -1226,7 +1240,7 @@ def _card_side_changes(card: Mapping[str, Any], identity: tuple[int, tuple[str, 
         if review.get("plan_revision") == revision and not _covers(review, identity):
             lines.append(f"review round {review['round']} reviewed other acceptance criteria than plan revision {revision} on the card")
     for decision in card["decisions"]:
-        if _is_go(decision, "plan", key) and decision.get("plan_revision") == revision and not _covers(decision, identity):
+        if _is_go(decision, "plan", key, card) and decision.get("plan_revision") == revision and not _covers(decision, identity):
             lines.append(f"the plan go of plan revision {revision} approved other acceptance criteria than the card's plan")
     return lines
 
@@ -2419,6 +2433,8 @@ class LedgerStore:
         self._handoff: dict[str, Any] | None = None
         self._handoff_problem: StoreUnavailable | None = None
         self._handed_off = False
+        # Refusal diagnostics only, never a controller or authority for a go.
+        self._role_go_problem: GateRequired | None = None
         # Threads sharing this handle take turns; a binding event binds under it.
         self._threads = threading.RLock()
 
@@ -2762,6 +2778,7 @@ class LedgerStore:
         """
 
         with self._threads:
+            events = []
             row = self._ticket_row()
             if row is None:
                 card, token, item, live = _blank_card(self.key, self.title), NO_TOKEN, {}, None
@@ -2776,6 +2793,20 @@ class LedgerStore:
                 handed_off = _handed_off(events)
             self._card, self._item, self._row, self._live, self._read_token = card, item, row, live, token
             self._handoff, self._handoff_problem, self._handed_off = handoff, problem, handed_off
+            self._role_go_problem = None
+            if handoff is None:
+                if problem is not None and problem.code in ("handoff_unreadable", "handoff_ambiguous"):
+                    self._role_go_problem = _role_go_refused(
+                        "role_go_controller_unreadable", self.key, f"{problem.code}: {problem}",
+                    )
+                elif problem is not None and problem.code in ("handoff_no_intent", "handoff_intent_v1"):
+                    # The reader proved there is no open v2 intent, so these ids are closed.
+                    closed = [event["payload"]["operation_id"] for event in events
+                              if event.get("kind") == "loop.intent" and event.get("payload_version") == 2]
+                    if closed:
+                        self._role_go_problem = _role_go_refused(
+                            "role_go_handoff_closed", self.key, f"the hand-off is closed ({', '.join(closed)})",
+                        )
             return copy.deepcopy(card), token
 
     def note_text(self, idempotency_key: str) -> str | None:
@@ -4237,6 +4268,53 @@ class TicketPass:
             decision["pass"] = self._pass_id
         self._write([("decision", decision)])
         return self._bind_recorded_go(gate, revision, decision)
+
+    @_ends_on_failure
+    def record_role_go(
+        self, gate: str, *, who: str, relayed_by: str, plan_revision: int, evidence: str, verbatim: str,
+    ) -> dict[str, Any]:
+        """Record the current controller's answer as one unbound decision, never an election."""
+
+        if gate not in GATES:
+            raise TicketError(f"unknown gate: {gate}")
+        self._require("plan_go" if gate == "plan" else "outward_go")
+        if not _is_text(evidence) or not _is_text(verbatim) or not _is_text(relayed_by):
+            raise TicketError("a role go record requires evidence, verbatim words and relayed_by")
+        if gate == "outward" and _declines(self._card, self._identity):
+            raise TicketError(_answered(self._identity[0]))
+        card = self._fresh()
+        handoff = card.get("handoff")
+        controller = handoff.get("controller") if isinstance(handoff, Mapping) else None
+        if not _is_handoff_name(controller):
+            if isinstance(self.store, LedgerStore) and self.store._role_go_problem is not None:
+                raise self.store._role_go_problem
+            raise _role_go_refused("role_go_no_handoff", self.key, "there is no open hand-off naming a controller")
+        if type(who) is not str or who != controller:
+            raise _role_go_refused("role_go_not_controller", self.key, f"role {who!r} is not controller {controller!r}")
+        revision, criteria = _identity(card)
+        if type(plan_revision) is not int or plan_revision != revision:
+            raise _role_go_refused(
+                "role_go_other_revision", self.key, f"answer names revision {plan_revision!r}, card has revision {revision}",
+            )
+        decision = {
+            "who": who,
+            "who_kind": "role",
+            "relayed_by": relayed_by.strip(),
+            "standing": "settled",
+            "source": {"what": "ratification", "ref": evidence.strip()},
+            "effect": f"The {gate} gate is approved for plan revision {revision}.",
+            "tags": [{"type": "ticket", "id": self.key}],
+            "verbatim": verbatim.strip(),
+            "phase": _STORE_PHASE[self._phase],
+            "evidence": evidence.strip(),
+            "gate": gate,
+            "plan_revision": revision,
+            "criteria": list(criteria),
+        }
+        if gate == "plan":
+            decision["pass"] = self._pass_id
+        self._write([("decision", decision)])
+        return {"bound": False, "reason": "role go"}
 
     @_ends_on_failure
     def approved(self, gate: str) -> bool:

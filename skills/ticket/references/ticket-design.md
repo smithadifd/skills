@@ -109,10 +109,13 @@ atomic with `append-many --expect-revision`.
 }
 ```
 
-- A **go decision** is a decision with `gate`, `plan_revision`, `criteria`, `who_kind: person`,
-  `standing: settled`, `source.what: ratification`, and a `ticket` tag naming the key. A plan go also
-  carries `pass`, the id of the pass that presented that plan (section 3.4). A go is never
-  recognized by matching the `effect` sentence; `effect` is prose for people.
+- A **go decision** is a decision with `gate`, `plan_revision`, `criteria`,
+  `standing: settled`, `source.what: ratification`, and a `ticket` tag naming the key.
+  It is either `who_kind: person`, unchanged, or `who_kind: role` with non-empty text
+  `relayed_by` and text `who` exactly equal to the fresh card's `handoff.controller` (6.9).
+  The hand-off field must be a mapping and its controller a name token (6.8); otherwise
+  there is no controller. A plan go also carries `pass`, the id of the pass that presented
+  that plan (section 3.4). A go is never recognized by matching the `effect` sentence.
 - **Stamps** are the human trail and the resume card: the point text, next skills and references at
   each stop. The derived state never depends on a stop stamp (D2 writes each stamp in the same `apply`
   as the record it describes, so a stamp is never missing). The one stamp the state reads is the close
@@ -416,13 +419,18 @@ revision N's card with its stored texts); `present_plan` is where the new texts 
 | `ask_draft_invalid` | the draft of an ad-hoc ask has no one-line title, no body, no criterion, or a criterion that is not one line of text (6.7); nothing was read or written | raised when the source is built |
 | `ask_item_not_ticket` | the item an ad-hoc ask lands on exists and is not a ticket (6.7); nothing was written | raised by the spec record, before it writes anything |
 | `url_link_conflict` | the item already has a `url` link to another address than the ticket's, and none to the ticket's (6.7); nothing was written | raised by the spec record, before the item, the link or the spec is written |
+| `role_go_no_handoff` | no open hand-off on the fresh card: a default pass, version 1 intent only, or the markdown store | `GateRequired`, writes nothing and keeps the pass live at its stop (6.9) |
+| `role_go_handoff_closed` | no open hand-off, and the reader proved the version 2 intent is closed | same; names the closed operation id |
+| `role_go_controller_unreadable` | the hand-off reader found an unreadable or ambiguous open hand-off | same; names the reader's refusal and reason |
+| `role_go_not_controller` | the caller's `who` is not text exactly equal to the card's controller | same; names both |
+| `role_go_other_revision` | the answer's plan revision is not the fresh card's whole-number plan revision | same; names both; checked after the controller |
 | `outside_repository` | `.ticket/` resolves outside the repository; nothing was written | markdown store, on every read and write |
 | `not_ignored` | the card or its lock is not git-ignored; no ignore file was changed and nothing was written | markdown store, before every write |
 | `lock_not_regular` | `.ticket/<key>.lock` exists but is not a regular file; it was not used and nothing was written | markdown store; the lock is opened without following a link, so a link at the lock path is `lock_unopenable` instead |
 | `lock_unopenable` | the lock file could not be opened as a regular file through the directory; the message carries the operating system's error | markdown store; a link or a directory at the lock path lands here |
 | `card_not_regular` | `.ticket/<key>.md` exists but is not a regular file (a link, a FIFO, a directory, a socket); it was not read and nothing was written | markdown store, on every read and write; an existing node at the card's path that is not a regular file is refused before it is opened (a no-follow `stat` through the verified `.ticket/` directory descriptor), the open itself follows no link, what it opened is checked once more (`fstat`) as the race check, and an open that fails with the error such a node gives (`ELOOP` for a link; `ENXIO`, `EOPNOTSUPP` or `ENOTSUP` for a socket) lands here from that error alone, with no second look at the path, as does one whose failure a second no-follow `stat` traces to a non-regular node still there; so a link, a FIFO, a directory or a socket at the card path is refused by whichever of the three sees it; any other error of the open (a permission error on a regular file) propagates |
 
-`GateRequired` (a `TicketError`) stays for a step taken before its go.
+`GateRequired` (a `TicketError`) stays for a step taken before its go and for the five role-go refusals above.
 
 ### 4.6 Flag texts (verbatim)
 
@@ -1249,8 +1257,8 @@ with no retry.
 **The seams.** After the open nothing else changes: the same phases, the same two hard stops, the same
 steps. Where a seam's name is not the default, the session does not run the default action for that seam:
 it does not dispatch `builder-core`, start a `reviewer`, or push. The caller that handed the item off runs
-its implementation. The gates are unchanged (`_is_go` counts only a person's settled go), so until the
-controller's go lands a hand-off pass reaches the plan go and waits for the person.
+its implementation. The two gates remain hard stops: either the person's settled go or the current
+hand-off controller's settled role go (6.9) may open them.
 
 **The lease.** 5.1's join is used unchanged: the same holder input, the same lease decision, the same pass
 record saying `joined`, `lease_held` for another holder, and a joined lease is never released. Where the
@@ -1289,6 +1297,52 @@ other source makes the same calls in the same order as before.
 
 **Versions.** The tests' fake answers `--version` with `ledger 0.7.0` and stores each planted event's
 payload version; the real-ledger rows seed the hand-off with the loop library beside the CLI.
+
+### 6.9 The controller's go
+
+`_is_go(decision, gate, key, card)` is the one authority predicate for every caller.
+It compares a role decision's `who`, as text and without trimming, case folding or
+prefix matching, with the `controller` of the card's derived `handoff` field.
+`relayed_by` names the seat that sent the answer, not an authority. The field comes
+only from 6.8's one reader on that weighing's card, never a pass record, lease,
+holder, note, target, environment or closed intent. The person half and plan
+coverage remain unchanged. No open hand-off means no role go on either store.
+The same controller's go survives a seat roll and a new hand-off to that role.
+A handback or a different controller makes it count for nothing; a person's new
+pass presents the plan again, with earlier review rounds still used.
+
+`session.record_role_go(gate, who=, relayed_by=, plan_revision=, evidence=, verbatim=)`
+records one answer at either stop. It first checks the gate, phase, non-empty
+evidence, words and relay, and any outward decline, just as `record_go` does.
+It then reads fresh (a changed revision is the existing `stale` that ends the
+pass), checks the hand-off, exact controller and answered plan revision in that
+order, and writes one `ticket-decision:v2` note under that read's revision.
+Its keys are the person's go's keys plus `relayed_by`; it never records a
+controller, hand-off, clock or hold, elects, or calls the person binder. Its
+result is `bound: false`. The five refusals in 4.5 write nothing, send no batch,
+name the ticket and leave the pass live. The store retains only refusal
+diagnostics from the read, not another controller: an unreadable/ambiguous
+reader outcome wins; a no-intent/version-1 outcome proves any v2 intent ids in
+that answer closed, which distinguishes a late answer from no hand-off.
+
+The ask names the ticket, gate, revision and presenting pass; the answer repeats
+them. An answer not typed by the person in this session uses this entry even
+when relaying the person's words. The controller sends a message rather than
+typing into the pane, whose unframed text can be captured as the person's prompt.
+Evidence cites the answer; cross-session quote verification is not added here.
+No answer writes nothing. The director owns the 15-minute wait: the pass adds
+no timer and no hold. An explicit role no or hold writes nothing in this release.
+Declines and merge rules are unchanged.
+
+**Failure path and concurrent writers.** This entry's only irreversible step
+is the existing atomic note batch. A stop before it writes nothing; a lost
+answer uses the store's existing batch-key readback, never another decision.
+A resumed pass reads the landed note by id and need not record it again.
+The loop, another pass handle or a generic writer can move the item between
+the fresh read and that batch: `--expect-revision` then refuses `stale` and no
+role note lands. The waiting pass ends as today. A new open reads the item
+again; there is no retry that silently applies an old answer to a new plan.
+
 
 ## 7. Non-goals
 
