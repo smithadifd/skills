@@ -491,7 +491,7 @@ Call `session.require_outward_go()` before each outward action; it reads the
 card fresh and refuses (`GateRequired`, or `stale` if the card changed).
 
 After PR publication, before close: `session.record_lane_receipts(paths,
-published_pr=<returned URL>)` passes handed lane documents unchanged.
+published_pr=<URL>)` passes lane documents unchanged.
 Never approval; failures continue. Setup: design 6.10.
 
 After the listed outward actions, call
