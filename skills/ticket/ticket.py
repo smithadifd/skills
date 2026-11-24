@@ -50,6 +50,7 @@ GATES = ("plan", "outward")
 CARD_SCHEMA = "ticket-card/v2"
 PLAN_SCHEMA = "ticket-plan-card/v2"
 MAX_REVIEW_ROUNDS = 3
+REVIEW_RECORD_TIMEOUT_SECONDS = 120
 # The three seams of a pass (TL4 one-item skill design, section 3), each with the name of its default
 # implementation: what this skill does when nothing else is selected. Build: dispatch builder-core with the
 # approved card. Review: a fresh reviewer, recorded by record_review. Outward: push and open a draft; the merge
@@ -4291,7 +4292,8 @@ class TicketPass:
             say("review receipts not recorded: pull request not published")
             return
         try:
-            self.require_outward_go()
+            # A receipt failure must not invoke the ordinary pass-ending wrapper.
+            TicketPass.require_outward_go.__wrapped__(self)
         except (TicketError, StoreUnavailable) as exc:
             say(f"review receipts not recorded: {_one_line(exc)}")
             return
@@ -4321,7 +4323,12 @@ class TicketPass:
                 say(f"review receipts not recorded: {document}: {_one_line(exc)}")
                 continue
             try:
-                result = subprocess.run([cli, "record"], input=payload, capture_output=True, check=False)
+                result = subprocess.run(
+                    [cli, "record"], input=payload, capture_output=True, check=False, timeout=REVIEW_RECORD_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                say(f"review receipt not recorded: {document}: timed out after {REVIEW_RECORD_TIMEOUT_SECONDS}s")
+                continue
             except OSError as exc:
                 say(f"review receipt not recorded: {document}: {_one_line(exc)}")
                 continue

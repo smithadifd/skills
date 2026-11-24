@@ -574,6 +574,9 @@ review strings. No new review lane or approval is introduced.
 | R4 | `test_R4_markdown_calls_nothing` | markdown calls nothing | M4 markdown guard dropped |
 | R5 | `test_R5_no_documents_calls_nothing` | no documents: one line, no call | empty-document guard dropped |
 | R6 | `test_R6_before_go_or_publication_noops` | before go or without publisher URL: no-op; after both: record | publication guard / outward check dropped |
+| R7 | `test_R7_store_read_failure_preserves_claim_and_close` | StoreUnavailable on read: one line, no writer/event, pass live, claim held, following close succeeds | fix M1 wrapped outward check; fix M3 re-raise StoreUnavailable |
+| R8 | `test_R8_stale_card_preserves_claim_and_ordinary_stale_refusal` | concurrent card write: one line, no writer/event, pass live, claim held; next close refuses stale as without receipts | fix M1 wrapped outward check |
+| R9 | `test_R9_timeout_continues_and_preserves_claim` | writer sleeps past patched timeout: diagnostic, next document recorded, pass live, claim held, close succeeds | fix M2 drop subprocess timeout |
 | Q7 | `test_config_only_and_already_recorded` | config selects writer, replay line unchanged | config key ignored |
 | Q8 | `test_unreadable_document_calls_nothing` | missing document: no call, diagnostic | missing-file handler raises |
 | Q9 | `test_unusable_setting_never_fails_pass` | off, relative or missing executable: no call, pass live | executable validation / opt-out dropped |
@@ -584,10 +587,10 @@ review strings. No new review lane or approval is introduced.
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
   H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 54 (G1 and G3 name L's, M's and
-  N's tests and add no mutation), P 21 (P15 names A–O and adds no test), Q 9. Total 381 rows. Nine carry no test with a mutation of their own in this release:
+  N's tests and add no mutation), P 21 (P15 names A–O and adds no test), Q 12. Total 384 rows. Nine carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), P15 (A–O),
   the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 372 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 375 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7, M12, M14 and M15 run on the
   fake CLI and also on a real ledger CLI when `LEDGER_REAL_CLI` names one, as do N2, N3, N4, N13, N15 and N16,
   and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22 to O42, G4 and G6. In P these are P1–P4, P5a (ledger),
