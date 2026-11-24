@@ -526,19 +526,57 @@ event unchanged as a whole and the row still claimed by its holder.
 | G5 | `test_G5_a_framed_note_never_gives_the_card_a_hand_off[a ticket-handoff note \| a pass record with a sixth key]` | the note on the item | `card_unreadable` | X27 the fold takes a hand-off from a framed note: the frame accepted and the field set from it (two sites; the frame alone is still caught by the shape check's refusal of a `handoff` key) |
 | G6 | `test_G6_the_release_command_on_a_live_hand_off_pass_writes_the_pass_end_only` (real), `test_G6_a_read_never_refuses_over_a_hand_off_so_a_crashed_pass_is_still_released` | a live hand-off pass; `ticket.py release K P` / the same after a second open hand-off makes the hand-off ambiguous | the pass-end only; the row stays claimed by the loop's holder and its latest claim unchanged / the read gives the pass and no `handoff` field, and the release lands | X29 `read` refuses a problem hand-off (the fold raises instead of leaving the field off) |
 
+## P. The controller's go
+
+`test_ticket_controller_go.py`, design 6.9. The section O helpers seed the same
+hand-off and lease; (real) rows run on the fake and on `LEDGER_REAL_CLI` when
+provided. `who` must exactly equal the fresh card's derived controller;
+`relayed_by` is non-empty attribution only. Every recording refusal asserts
+unchanged events (markdown: bytes), no fake `append-many`, and a live pass at
+the same stop. P1–P3 are red on origin/main for its gate behavior, not a missing
+entry. Y1–Y21 name the controller-go bar's mutations; Y22 pins the skill text and Y23 the role-go positive path.
+
+| ID | Test name | Setup | Expected | Mutation |
+|---|---|---|---|---|
+| P1 | `test_P1_the_controllers_plan_go_opens_the_gate_on_both_handles` (real) | hand-off pass at plan go; planted controller go | approved on original and fresh handles; begin build | Y23 controller branch dropped |
+| P2 | `test_P2_the_controllers_outward_go_opens_the_gate` (real) | outward stop; controller go | approved; outward allowed | Y23 (shared with P1) |
+| P3 | `test_P3_a_seat_roll_under_the_same_controller_keeps_the_go` (real) | plan go, pass ended, handback, another hand-off to same controller | new pass lands at build, no F8 | Y23 (shared with P1) |
+| P4 | `test_P4_the_entry_writes_one_unbound_decision_under_the_fresh_revision[plan \| outward]` (real) | each stop | one decision note, person's keys plus relay, fresh revision, no binder, gate open | Y19 entry calls binder |
+| P5a | `test_P5a_without_a_hand_off_the_entry_refuses_and_keeps_the_pass_live[default \| v1]` (real), `test_P5a_markdown_has_no_controller` | no hand-off on either store | `role_go_no_handoff` | Y14 absent hand-off allowed; Y20 refusal ends pass |
+| P5b | `test_P5b_after_a_handback_the_entry_names_the_closed_operation` (real) | handback before open | `role_go_handoff_closed`, operation id | Y15 closed reported as absent |
+| P5c | `test_P5c_only_the_exact_controller_may_be_recorded`, `test_P5c_a_previous_controller_cannot_record_on_the_next_hand_off` (real) | wrong token, case, space, prefix, look-alike, empty or non-text; old controller on next hand-off | `role_go_not_controller`, both names | Y16 comparison dropped / caller replaced by controller |
+| P5d | `test_P5d_the_entry_and_gate_read_the_live_hand_off_not_the_held_card[controller \| version \| doubled]` | fake intent edited in place, revision held fixed | gate shut; `role_go_controller_unreadable`, reader's reason | Y10 newest of two chosen; Y17 diagnostic dropped / held card used |
+| P5e | `test_P5e_an_answer_for_another_revision_is_not_recorded` | another revision or non-integer | `role_go_other_revision`, both revisions | Y18 revision comparison dropped |
+| P5f | `test_P5f_invalid_calls_write_nothing_and_do_not_read` | unknown gate, wrong phases, empty evidence/words/relay, outward decline | `TicketError` before a read; no write; live | validation branch dropped |
+| P6 | `test_P6_each_go_condition_alone_keeps_the_gate_shut`, `test_P6_the_presenting_pass_and_relay_are_required` | each wrong role from P5c, lean standing, reply source, missing tag, other revision/criteria/pass; missing relay; malformed field | each fault alone shuts the applicable gate | Y2 casefold/trim/prefix; Y3 relay compared; Y5 standing; Y6 source; Y7 tag; Y8 relay; shared coverage drops |
+| P7 | `test_P7_a_handback_invalidates_the_waiting_pass_and_the_controllers_go` (real) | hand-off closes after go | waiting pass stale; hand-off open refused; ledger-id pass at plan; role go counts for neither gate | Y9 closed controller counted |
+| P8 | `test_P8_a_different_controller_invalidates_the_earlier_gos_at_both_gates` (real) | next hand-off to another role | earlier gos open neither gate; new controller counts | Y4 constant controller |
+| P9 | `test_P9_P10_a_role_go_without_a_hand_off_opens_nothing[P9-version-one]` (real) | version 1 intent only | neither gate opens | Y1 role counts without hand-off |
+| P10 | `test_P9_P10_a_role_go_without_a_hand_off_opens_nothing[P10-no-handoff]` (real), unchanged E16[role] | no hand-off, ledger and markdown | neither gate opens | Y1 (shared with P9) |
+| P11 | `test_P11_a_note_target_and_closed_hand_off_are_not_the_controller` | closed hand-off, note, target name another role | decoy go shut; current controller go open | Y9 closed intent used |
+| P12 | `test_P12_the_controller_go_cannot_bypass_the_hand_off_source` (real) | controller gos; ledger-id open as loop holder or none | `handoff_source_required` before derivation; no write | Y21 other-source refusal dropped |
+| P13 | `test_P13_a_persons_go_is_unchanged_and_binds_even_on_a_hand_off` (real) | person prompt, with and without hand-off | person record unchanged, bound; both gates open | Y11 person requires hand-off; Y12 person writer emits role |
+| P14 | `test_P14_a_role_decline_shuts_outward_but_cannot_authorize_a_local_close` | controller decline beside controller outward go | outward shut; role no cannot authorize close-local | Y13 role counted by `_has_declined` |
+| P15 | A–O, including E16[role], L1–L3 and G2 | existing suite unchanged | every existing contract and both L2 digests unchanged | inherited mutations; no new test |
+| P16 | `test_P16_the_skill_explains_controller_answers_and_no_answer` | SKILL.md | entry, five refusals, role attribution and no-answer rule | Y22 role entry renamed in skill text |
+
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
   H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 54 (G1 and G3 name L's, M's and
-  N's tests and add no mutation). Total 351 rows. Eight carry no test with a mutation of their own in this release:
-  A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
-  F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 343 each have a test and a named mutation; H24's runs only
+  N's tests and add no mutation), P 21 (P15 names A–O and adds no test). Total 372 rows. Nine carry no test with a mutation of their own in this release:
+  A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), P15 (A–O),
+  the two evidence probes G9 and H19 (each has a test that pins its assumption and no
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 363 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7, M12, M14 and M15 run on the
   fake CLI and also on a real ledger CLI when `LEDGER_REAL_CLI` names one, as do N2, N3, N4, N13, N15 and N16,
-  and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22 to O42, G4 and G6.
+  and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22 to O42, G4 and G6. In P these are P1–P4, P5a (ledger),
+  P5b, P5c (previous controller), P7–P10, P12 and P13.
 - Mutations named: 1 per row (G32, L3, M3, M5, M9, M11, M15, N1, N9, N14, N16 and N22 name two, L2 and M16 two sites of one, N5 four, N7 three, N8 five; in section O, O1, O4, O16d, O22, O23, O30, O33 to O36, O40 and O43 name two, O7, O13, O24, O25, O27, O37 and O38 three, O26, O28 and O41 four, O11 six, O15 three sites of one, X27 two sites of one, and X28 three sites across O14, O17 and O18); the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's
   `ended` half (E11j, E11k) and E11q's step-(a) drop (E11q, E11r).
+- Section P mutation variants: Y2 casefold/trim/prefix separately; Y16 dropped
+  comparison/caller substitution separately; Y17 dropped diagnostic/held card
+  separately. P6 also shares the revision, criteria and presenting-pass drops.
