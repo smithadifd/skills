@@ -130,16 +130,26 @@ refused `acceptance_unparseable`, naming the line.
 
 ### A parent's hand-off as the ticket
 
-Only a parent's adapter uses it, never `/ticket <KEY>`:
-`ticket.handoff_source("<KEY>", implementations={"<seam>": ["<name>"]})`,
-opened with `holder=` the loop's holder; the pass joins that lease, never
-takes it. The card's `handoff` field and `seam_set(card)` give the controller
-and seams. Refused (design note 6.8): `handoff_no_ledger`,
-`handoff_ledger_too_old`, `handoff_not_managed`, `handoff_unreadable`,
-`handoff_ambiguous`, `handoff_intent_v1`, `handoff_no_intent`,
-`handoff_seam_unknown`, `handoff_not_leased`; other sources there,
-`handoff_source_required`. Where a seam's name is not the default, this
-session does not run the default action for that seam.
+Only a parent's adapter uses `ticket.handoff_source("<KEY>", implementations=)`,
+opened with `holder=` the loop's holder; it joins, never takes that lease.
+The card derives controller and seams from the open hand-off (design 6.8).
+Refused: `handoff_no_ledger`, `handoff_ledger_too_old`, `handoff_not_managed`,
+`handoff_unreadable`, `handoff_ambiguous`, `handoff_intent_v1`,
+`handoff_no_intent`, `handoff_seam_unknown`, `handoff_not_leased`;
+other sources: `handoff_source_required`. Where a seam's name is not the
+default, this session does not run the default action for that seam.
+
+#### The controller's go
+
+`session.record_role_go(gate, who=, relayed_by=, plan_revision=, evidence=, verbatim=)`
+records the fresh controller's go, never an election; relay is attribution.
+Refused: `role_go_no_handoff`, `role_go_handoff_closed`,
+`role_go_controller_unreadable`, `role_go_not_controller`,
+`role_go_other_revision`; no write, pass live.
+An answer that did not come from the person typing here is a role go.
+Answer by message, never pane typing (captured as the person's prompt).
+No answer writes nothing; no clock or hold.
+Read the [controller protocol](references/ticket-design.md#69-the-controllers-go).
 
 ### What an open records on the ledger store
 
@@ -151,30 +161,19 @@ reads the card. It runs one `ledger spec set <KEY>` with the ticket's title as
 when the ticket has no `url`; `ask:<12 hex>` for an ad-hoc ask). The ledger
 writes a new version only when that content or the source changed.
 
-- An unchanged ticket writes nothing, and the open prints nothing more.
-- A first version prints nothing. A later version N adds the output of
-  `ledger spec diff <KEY> N-1 N` to `session.reconciliation`, right after the
-  store line. It names each changed field (`title`, `body_md`, `acceptance`).
-  Read it to the person.
-- The tracker's status, update time and links are not part of the spec. A
-  status change alone writes no version, and nothing the open writes carries
-  the tracker's status.
-- A ticket with a `url` also gets that address as a `url` link on the item
-  (`item.linked`, relation `url`), so a reader finds the ticket without parsing
-  the spec's source. The open reads the item's links first, then writes the
-  link in the item's creation write, or alone under the revision it read. An
-  item that already links the address gets no second link, and a `url` link to
-  another address is refused `url_link_conflict` before anything is written.
-  A ticket with no `url`, and a ledger item as the ticket, write none.
-- When the ledger has no item for the key, the open creates it first, with the
-  same `item.created` event a claim sends. An item of another type is refused
-  `ledger_refused` before anything is written (`ask_item_not_ticket` for an
-  ad-hoc ask's item).
-- A `spec set` that fails, or answers what cannot be read, stops the open as
-  `spec_set_failed`. The refusal names the command and the ledger's answer and
-  stderr. The card is not read, so the pass never plans from a ticket the
-  ledger did not record. A description the ledger cannot take (an empty one)
-  stops the open the same way; it is never changed to fit.
+- Unchanged content writes nothing. A first version prints nothing; later
+  versions add `ledger spec diff <KEY> N-1 N` after the store line in
+  `session.reconciliation`. Read the changed fields to the person.
+- Tracker status, update time and links are not spec content; status alone
+  writes no version and is never recorded.
+- A ticket's `url` becomes an `item.linked` `url` link, in its creation batch
+  or alone under the read revision. An identical link writes nothing; another
+  address is `url_link_conflict`. No URL or a ledger-item source writes none.
+- A missing item is created as the claim would create it. Another type is
+  `ledger_refused` (`ask_item_not_ticket` for an ask), before any write.
+- An unreadable or refused `spec set` is `spec_set_failed`, naming the
+  command, answer and stderr. No card is read and no content is changed to
+  fit; an empty description is refused too. Full protocol: design note 6.6.
 - A `spec diff` that fails stops the open as `spec_diff_failed`, after the
   version was recorded. Run the command the refusal names to read the change;
   the next open records nothing and prints no diff.
