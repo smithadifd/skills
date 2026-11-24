@@ -23,6 +23,7 @@ import functools
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import secrets
@@ -503,10 +504,13 @@ class PlanCard:
     shows it next to the plan.
     """
 
-    def __init__(self, ticket: Ticket):
+    def __init__(self, ticket: Ticket, *, items: Sequence[str] | None = None):
         self.key = ticket.key
         self.title = ticket.title
         self._criteria = tuple(ticket.acceptance_criteria)
+        # Explicit planned parts, not acceptance criteria or the six workflow steps.
+        self.items = tuple(items) if items is not None else (ticket.title,)
+        _criteria_texts(self.items, "a plan card's items")
         self.steps = [PlanStep(name) for name in STEPS]
         self.diff_statement: str | None = None
         self.open_questions: list[str] = []
@@ -564,6 +568,7 @@ class PlanCard:
                 for step in self.steps
             ],
             "open_questions": list(self.open_questions),
+            "items": list(self.items),
             "ticket_status": ticket.status,
         }
         if self.diff_statement is not None:
@@ -582,6 +587,7 @@ class PlanCard:
         plan.key = snapshot["key"]
         plan.title = snapshot["title"]
         plan._criteria = tuple(snapshot["criteria"])
+        plan.items = tuple(snapshot.get("items", (snapshot["title"],)))
         plan.steps = [PlanStep(step["name"], step["status"], step.get("skip")) for step in snapshot["steps"]]
         plan.diff_statement = snapshot.get("diff_statement")
         plan.open_questions = list(snapshot["open_questions"])
@@ -618,6 +624,8 @@ class PlanCard:
             if passes:
                 line += f" (review round {passing['round']}: {passing['evidence']})"
             lines.append(line)
+        lines.extend(("", "## Items"))
+        lines.extend(f"- {item}" for item in self.items)
         lines.extend(("", "## Steps"))
         for step in self.steps:
             status = self.rendered_status(step)
@@ -805,7 +813,7 @@ def _validate_review(review: Any) -> None:
 
 _PLAN_FIELDS = frozenset(
     ("schema", "key", "title", "revision", "pass", "criteria", "steps", "diff_statement",
-     "open_questions", "ticket_status", "ticket_updated_at", "ticket_spec")
+     "open_questions", "items", "ticket_status", "ticket_updated_at", "ticket_spec")
 )
 
 
@@ -837,6 +845,8 @@ def _validate_plan(plan: Any, key: str) -> None:
     if "diff_statement" in plan and not _is_text(plan["diff_statement"]):
         raise TicketError("a plan snapshot's diff_statement must be non-empty text")
     _criteria_texts(plan.get("criteria"), "a plan snapshot's criteria")
+    if "items" in plan:
+        _criteria_texts(plan["items"], "a plan snapshot's items")
     _validate_steps(plan)
 
 
@@ -3492,6 +3502,32 @@ def choose_store(repo: str | Path, key: str, title: str) -> Store:
     return store
 
 
+def _loop_adapter_present() -> bool | None:
+    """Optional add-on discovery, like review-gate: env, topic override, shipped topic config.
+
+    Presence is an absolute executable path, not permission to run it. Unreadable
+    configuration is unknown (None), not evidence that the loop is absent.
+    """
+
+    try:
+        adapter = os.environ.get("TICKET_LOOP_ADAPTER", "").strip()
+        if not adapter:
+            shipped, problem = _LEDGER_RULE._read_object(_LEDGER_RULE.CONFIG_PATH, False, "ticket", True)
+            override, override_problem = _LEDGER_RULE._read_object(
+                Path(_LEDGER_RULE.OVERRIDE_PATH).expanduser(), False, "ticket", True,
+            )
+            if problem or override_problem:
+                return None
+            adapter = override.get("loop_adapter", shipped.get("loop_adapter"))
+        if adapter is None or adapter == "" or (isinstance(adapter, str) and adapter.lower() == "none"):
+            return False
+        if isinstance(adapter, str) and os.path.isabs(adapter) and os.path.isfile(adapter) and os.access(adapter, os.X_OK):
+            return True
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
 def _require_runnable(cli: str) -> None:
     """Refuse ``ledger_cli_moved`` when ``cli`` is an absolute path that is no longer an executable file.
 
@@ -4201,43 +4237,86 @@ class TicketPass:
             {"point": point, "phase": phase or _STORE_PHASE[self._phase], "next_skills": list(next_skills), "refs": list(refs), "close": close},
         )
 
-    def _write_boundary(
-        self, events: list[tuple[str, Any]], boundary: str, *, remaining_from: str | None = None,
-    ) -> None:
-        """Land an advisory stamp with this transition, then print it; never switch sessions."""
+    def _read_context(self) -> ContextReading | None:
+        """One shared reading guard for phase and plan-card advice; failures never block."""
 
-        prefix = f"Context bound after {boundary} (pass {self._pass_id}): "
-        line = None
-        if self._context_reading is not None and not any(
-            stamp["point"].startswith(prefix) for stamp in self._card["stamps"]
-        ):
-            try:
-                reading = self._context_reading()
-            except Exception:
-                reading = None
+        try:
+            reading = self._context_reading() if self._context_reading is not None else None
             if (
                 isinstance(reading, ContextReading)
                 and type(reading.used_tokens) is int and reading.used_tokens >= 0
                 and type(reading.window_tokens) is int and reading.window_tokens > 0
             ):
+                return reading
+        except Exception:
+            pass
+        return None
+
+    def _delegation_line(
+        self, plan: PlanCard, reading: ContextReading, costs: Mapping[str, int], floor: float,
+    ) -> str | None:
+        prefix = f"Delegation at plan card (pass {self._pass_id}): "
+        if len(plan.items) <= 1 or any(stamp["point"].startswith(prefix) for stamp in self._card["stamps"]):
+            return None
+        estimate = len(plan.items) * sum(costs[phase] for phase in ("build", "review"))
+        if reading.used_tokens + estimate > floor:
+            installed = _loop_adapter_present()
+            if installed is None:
+                return None
+            recommendation = (
+                "recommend a plan to file the parts as child-of items and hand them downstream to the loop, only after the plan go."
+                if installed else
+                "the loop is the add-on that would take these parts; any filing or hand-off needs the plan go."
+            )
+            return (
+                f"{prefix}{len(plan.items)} items implied; used {reading.used_tokens} + estimate {estimate} "
+                f"= {reading.used_tokens + estimate} tokens > bound {floor:.0f} "
+                f"({self._context_floor_fraction:g} of {reading.window_tokens}); {recommendation}"
+            )
+        return None
+
+    def _write_boundary(
+        self, events: list[tuple[str, Any]], boundary: str, *, remaining_from: str | None = None,
+        plan: PlanCard | None = None,
+    ) -> None:
+        """Land an advisory stamp with this transition, then print it; never switch sessions."""
+
+        prefix = f"Context bound after {boundary} (pass {self._pass_id}): "
+        lines: list[tuple[str, tuple[str, ...]]] = []
+        context_pending = not any(stamp["point"].startswith(prefix) for stamp in self._card["stamps"])
+        reading = self._read_context() if context_pending or plan is not None else None
+        if reading is not None:
+            try:
                 start = _COST_PHASES.index(remaining_from) if remaining_from else _COST_PHASES.index(boundary) + 1
                 costs = load_phase_costs()
+                floor = reading.window_tokens * self._context_floor_fraction
+                if not math.isfinite(floor) or floor <= 0:
+                    raise ValueError
+                if any(type(costs[phase]) is not int or costs[phase] < 0 for phase in _COST_PHASES):
+                    raise ValueError
                 remaining = sum(costs[phase] for phase in _COST_PHASES[start:])
                 projected = reading.used_tokens + remaining
-                floor = reading.window_tokens * self._context_floor_fraction
-                if projected > floor:
+                if context_pending and projected > floor:
                     line = (
                         f"{prefix}used {reading.used_tokens} + remaining {remaining} = {projected} tokens "
                         f"> floor {floor:.0f} ({self._context_floor_fraction:g} of {reading.window_tokens}); "
                         f"recommend handoff to a fresh session on {self.key} from its resume card {self.store.ref}."
                     )
-                    # A boundary without its own stop must keep the card's last stamp last.
-                    if self._card["stamps"] and not any(kind == "stamp" for kind, _ in events):
-                        events.append(("stamp", self._card["stamps"][-1]))
-                    events.insert(0, self._stamp(line, ("handoff", "ticket"), (self.store.ref,)))
+                    lines.append((line, ("handoff", "ticket")))
+                if plan is not None:
+                    delegation = self._delegation_line(plan, reading, costs, floor)
+                    if delegation is not None:
+                        lines.append((delegation, ("ticket",)))
+            except (OSError, ValueError, KeyError, TypeError, OverflowError):
+                lines = []
+        if lines:
+            # Advice precedes every stop; a boundary without a new stop preserves the last one.
+            if self._card["stamps"] and not any(kind == "stamp" for kind, _ in events):
+                events.append(("stamp", self._card["stamps"][-1]))
+            events[:0] = [self._stamp(line, skills, (self.store.ref,)) for line, skills in lines]
         if events:
             self._write(events)
-        if line is not None:
+        for line, _ in lines:
             print(line)
 
     # The steps (design 3.3).
@@ -4262,7 +4341,7 @@ class TicketPass:
         revision = self._identity[0] + 1 if self._identity else 1
         snapshot = plan.snapshot(revision, self._pass_id, self._ticket)
         point = PLAN_GO_POINT.format(revision=revision)
-        self._write_boundary([("plan", snapshot), self._stamp(point, ("ticket",), (self.store.ref,))], "plan")
+        self._write_boundary([("plan", snapshot), self._stamp(point, ("ticket",), (self.store.ref,))], "plan", plan=plan)
         self._identity = (revision, tuple(plan.acceptance_criteria))
         plan.review = None
         self._plan = plan
