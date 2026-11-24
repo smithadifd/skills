@@ -20,6 +20,9 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 
 ## Unreleased
 
+- `ticket` refuses plan-card items that are not a list or tuple before converting
+  them, so a bare string cannot count its characters as planned parts.
+
 - `ticket` counts the plan card's named parts and estimates build/review work
   against the shared context floor. Over-bound multi-item plans receive one
   durable delegation advisory per pass, tailored to loop adapter presence;
