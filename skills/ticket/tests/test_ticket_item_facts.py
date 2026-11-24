@@ -302,6 +302,52 @@ def test_P12b_a_key_conflict_from_a_write_that_raced_the_read_returns_false_and_
     assert len(_notes(fake, "ticket-review:v2 ")) == 1
 
 
+BUILT_BY = "built-by: harness=claude-code model=claude-sonnet-5-5 requested=sonnet source=seat round=1"
+
+
+def _fact_appears_after_the_read(fake, handle, *before):
+    """Make the fact appear on the item after ``handle``'s read of it and before its append: the ``before`` notes land
+    first, then another handle's builder note, byte for byte what the handle is about to send."""
+
+    read = handle.store.note_text
+
+    def racing(key):
+        found = read(key)
+        for text in before:
+            fake.outside("item.note", {"text": text, "source": ticket._LEDGER_WRITER})
+        fake.outside(
+            "item.note", {"text": BUILT_BY, "source": ticket._LEDGER_WRITER},
+            key=f"row-item:builder:{KEY}:r1:claude-sonnet-5-5",
+        )
+        return found
+
+    handle.store.note_text = racing
+
+
+def test_P13_a_fact_that_appears_after_the_read_is_not_adopted_past_events_the_pass_has_not_read(fake):
+    first = _at_build(fake)
+    resumed = open_ledger(fake, Source(), pass_id=first.pass_id)
+    held = resumed._token
+    # Another writer's event comes between this handle's revision and the fact; the ledger replays the fact with no revision check.
+    _fact_appears_after_the_read(fake, resumed, "an event this pass has not read")
+    with pytest.raises(ticket.StoreUnavailable) as caught:
+        resumed.record_build("claude-sonnet-5-5", harness="claude-code", requested="sonnet", source="seat")
+    assert caught.value.code == "stale"
+    assert resumed._token == held
+    assert len(_builders(fake)) == 1
+
+
+def test_P13b_a_fact_that_appears_right_after_the_held_revision_is_adopted_and_the_next_write_lands(fake):
+    first = _at_build(fake)
+    resumed = open_ledger(fake, Source(), pass_id=first.pass_id)
+    _fact_appears_after_the_read(fake, resumed)
+    answer = resumed.record_build("claude-sonnet-5-5", harness="claude-code", requested="sonnet", source="seat")
+    assert answer["written"] is True
+    assert resumed._token == str(fake.events()[-1]["id"])
+    changes(resumed)
+    assert len(_notes(fake, "ticket-review:v2 ")) == 1
+
+
 def test_P10_a_build_is_recorded_only_while_building(fake):
     session = open_ledger(fake, Source())
     before = fake.events()

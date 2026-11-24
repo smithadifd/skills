@@ -2796,6 +2796,26 @@ class LedgerStore:
                     return text if type(text) is str else ""
         return None
 
+    def directly_follows(self, held: str, token: str) -> bool:
+        """Whether, on a fresh export, the item's event ``token`` comes straight after its event ``held``.
+
+        The ledger's answer to ``append-many`` does not say whether an event is new or a stored one returned for
+        its key, and a stored one skips the revision check. A write made under ``--expect-revision`` ``held`` that
+        really appended is the next event after ``held``; one that is not was a replay of an event that came later,
+        with events between that the handle has not read. ``held`` of ``none`` means ``token`` is the item's first.
+        Like ``note_text`` it keeps nothing on this handle.
+        """
+
+        with self._threads:
+            answer = self._run("export-item", self.key)
+            if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+                return False
+            ids = [str(event.get("id")) for event in self._data(answer, "read")["events"]]
+        if token not in ids:
+            return False
+        index = ids.index(token)
+        return held == NO_TOKEN if index == 0 else ids[index - 1] == held
+
     def hand_off(self) -> dict[str, Any]:
         """The item's open hand-off as this handle's last read found it; else the refusal it gives (design 6.8).
 
@@ -4283,13 +4303,20 @@ class TicketPass:
             if stored == text:
                 return {"written": True, "key": key}
             return {"written": False, "reason": other}
+        held, events = self._token, [("builder", fact)]
         try:
-            self._write([("builder", fact)])
+            token = self.store.apply(held, events)
         except StoreUnavailable as exc:
             if exc.ledger_code == "conflict":
                 # A handle wrote the key with other text after the read above; the batch holds only this note.
                 return {"written": False, "reason": other}
             raise
+        if not self.store.directly_follows(held, token):
+            # A handle wrote the same fact after the read above, so the ledger replayed it without a revision check. Its id
+            # is not this pass's revision: events this pass has not read lie between, and the held token stays, so the
+            # next write is refused as stale.
+            raise _stale(self.key, "a builder fact written since the last read was replayed past events this pass has not read")
+        self._advance(token, events)
         return {"written": True, "key": key}
 
     @_ends_on_failure

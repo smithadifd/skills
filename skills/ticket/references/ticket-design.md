@@ -847,7 +847,11 @@ ticket record, so `_fold_record` reads each as an ordinary note and no reader of
   a note with the same text (from this handle or another) writes nothing and answers `written: True`, one with
   other text answers `written: False`, and neither moves the pass's token or ends it. A key conflict the
   ledger answers after that read is turned into the same `written: False`. The append that does go out is
-  the ordinary one under the held token, so a stale handle is refused as for any other write. The ticket skill has no record of the build result today, so the pass's
+  the ordinary one under the held token, so a stale handle is refused as for any other write. A fact that
+  another handle writes between the read and the append is replayed by the ledger with no revision check and
+  no mark on the answer, so the pass reads the item once more and takes the answered event as its token only
+  when that event comes straight after the revision it held; otherwise it keeps its token and is refused as
+  stale. The ticket skill has no record of the build result today, so the pass's
   caller names the identity; the markdown store never stores it.
 
 ### 6.3 Store selection

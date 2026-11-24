@@ -550,6 +550,8 @@ a build the facts count `decided` of at least 1, `builder` 1 and `builder_malfor
 | P11 | `test_P11_a_stale_handle_recording_a_fact_another_handle_wrote_is_refused_as_without_the_record` | handle B resumes the pass at build; A records the build and ends; another pass claims and writes; B records the same build, then a `changes` round (the control ledger runs the same without B's record) | B's token does not move; the review is refused with the same `stale` error as in the control; one builder note; the same event kinds as the control | `record_build` drops the read of the item, so the replay's event id becomes B's token |
 | P12 | `test_P12_a_resumed_handle_recording_other_text_for_one_round_and_model_returns_false_and_keeps_the_pass` | A records `requested` sonnet; a resumed handle records the same round and model with `requested` opus; then a `changes` round | `written` false, `already recorded`; no event and no append call; the pass stays live and the round lands; one builder note | `record_build` drops the read of the item (an append goes out); the stored-text comparison answers true for any text |
 | P12b | `test_P12b_a_key_conflict_from_a_write_that_raced_the_read_returns_false_and_keeps_the_pass` | as P12, with the handle's read of the item answering no note, so the append meets the ledger's key conflict | `written` false, `already recorded`; the last append answered `conflict`; no event; the round lands | `record_build` re-raises the conflict; `_send` drops the ledger code from the stale refusal it raises |
+| P13 | `test_P13_a_fact_that_appears_after_the_read_is_not_adopted_past_events_the_pass_has_not_read` | a resumed handle's read of the item answers no note; then another writer's note and the same builder note land, so the append is a replay | `record_build` raises `stale`; the handle's token is the one it held; one builder note | `record_build` takes the replayed event's id without the check that it comes straight after the held revision |
+| P13b | `test_P13b_a_fact_that_appears_right_after_the_held_revision_is_adopted_and_the_next_write_lands` | as P13 with the builder note alone landing, straight after the held revision | `written` true; the token is the note's id; a `changes` round lands | the check that the answered event comes straight after the held revision always fails |
 | P10 | `test_P10_a_build_is_recorded_only_while_building` | S0 on the ledger | `TicketError`; nothing written | `record_build` drops its phase check |
 
 ## Counts
@@ -558,10 +560,10 @@ a build the facts count `decided` of at least 1, `builder` 1 and `builder_malfor
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
   H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 54 (G1 and G3 name L's, M's and
-  N's tests and add no mutation), P 16. Total 367 rows. Eight carry no test with a mutation of their own in this release:
+  N's tests and add no mutation), P 18. Total 369 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 359 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 361 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7, M12, M14 and M15 run on the
   fake CLI and also on a real ledger CLI when `LEDGER_REAL_CLI` names one, as do N2, N3, N4, N13, N15 and N16,
   and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22 to O42, G4 and G6. Section P runs on the fake CLI only.
