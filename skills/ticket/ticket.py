@@ -140,6 +140,9 @@ class GateRequired(TicketError):
 class StoreUnavailable(RuntimeError):
     """A refusal: nothing was written and the pass ends. ``code`` names the refusal."""
 
+    # The ledger's own answer code when this refusal turns one of its answers into a stale write (else None).
+    ledger_code: str | None = None
+
     def __init__(self, message: str, *, code: str | None = None):
         super().__init__(message)
         self.code = code
@@ -2775,6 +2778,24 @@ class LedgerStore:
             self._handoff, self._handoff_problem, self._handed_off = handoff, problem, handed_off
             return copy.deepcopy(card), token
 
+    def note_text(self, idempotency_key: str) -> str | None:
+        """The text of the item note stored under ``idempotency_key`` on a fresh export, or None when there is none.
+
+        A look only: it keeps no card, token or row on this handle, so it moves the handle past nothing. An item the
+        ledger does not hold has no note. Any other failure to read is refused as ``read`` refuses it.
+        """
+
+        with self._threads:
+            answer = self._run("export-item", self.key)
+            if answer.ok is False and answer.code in _LEDGER_NO_ITEM:
+                return None
+            for event in self._data(answer, "read")["events"]:
+                if event.get("idempotency_key") == idempotency_key and event.get("kind") == "item.note":
+                    payload = event.get("payload")
+                    text = payload.get("text") if type(payload) is dict else None
+                    return text if type(text) is str else ""
+        return None
+
     def hand_off(self) -> dict[str, Any]:
         """The item's open hand-off as this handle's last read found it; else the refusal it gives (design 6.8).
 
@@ -3295,7 +3316,9 @@ class LedgerStore:
         if answer.ok:
             return str(answer.data["events"][-1]["id"])
         if answer.code in _LEDGER_RACES:
-            raise _stale(self.key, f"the ledger answered {answer.code}: {answer.message}")
+            race = _stale(self.key, f"the ledger answered {answer.code}: {answer.message}")
+            race.ledger_code = answer.code
+            raise race
         if answer.code == "usage":
             raise _ledger_incompatible(self.cli, f"{answer.code}: {answer.message}")
         if answer.code in _LEDGER_PERMANENT:
@@ -3869,8 +3892,6 @@ class TicketPass:
         self._identity = identity
         self._plan: PlanCard | None = None
         self._rounds = len(card["reviews"])
-        # The builder facts this handle wrote, key to text, so a second call for one round and model never meets the ledger's key conflict.
-        self._builder_facts: dict[str, str] = {}
         self._pass_id: str | None = None
         self._live = False
         # The lease holder this open named (None for the default); only the ledger store takes it.
@@ -4232,9 +4253,13 @@ class TicketPass:
         lane-result envelope, else ``seat``. The round is the review round this build goes into. Only the ledger
         store writes it: one ``item.note`` under ``row-item:builder:<item>:r<round>:<model>`` in the text
         ``row-item.sh facts`` counts. Fail closed: a result with no served model, a value outside the toolkit's
-        grammar, a store with no ledger, or a second fact for the same round and model with other text writes
-        nothing and returns ``written: False`` with the reason; it never raises for them. A model is never
-        invented. The same fact again writes nothing more.
+        grammar, a store with no ledger, or a second fact for the same round and model with other text, whether
+        this handle wrote the first or an earlier handle did (the ledger answering a key conflict), writes
+        nothing and returns ``written: False`` with the reason; it never raises for them and the pass stays
+        live. A model is never invented. The same fact again writes nothing more. The item is read fresh first,
+        and a note already under the key is never appended again, so a replay never moves this handle's revision;
+        a write that does go out is the ordinary one, under the held token, and a stale handle is refused as for
+        any other write.
         """
 
         self._require("build")
@@ -4251,17 +4276,20 @@ class TicketPass:
         if not isinstance(self.store, LedgerStore):
             return {"written": False, "reason": "no ledger"}
         key, text = _builder_key(self.key, fact), _builder_text(fact)
-        known = self._builder_facts.get(key)
-        if known is not None:
-            if known == text:
+        other = f"a builder fact for round {fact['round']} and model {model} is already recorded with other text"
+        stored = self.store.note_text(key)
+        if stored is not None:
+            # An earlier handle wrote it. Appending would replay it, and a replay answers an event this handle has not validated.
+            if stored == text:
                 return {"written": True, "key": key}
-            return {"written": False, "reason": f"a builder fact for round {fact['round']} and model {model} is already recorded with other text"}
-        held = self._token
-        self._write([("builder", fact)])
-        if held.isdigit() and self._token.isdigit() and int(self._token) < int(held):
-            # The ledger replayed a fact an earlier handle wrote and wrote nothing: the revision this pass held is still the live one.
-            self._token = held
-        self._builder_facts[key] = text
+            return {"written": False, "reason": other}
+        try:
+            self._write([("builder", fact)])
+        except StoreUnavailable as exc:
+            if exc.ledger_code == "conflict":
+                # A handle wrote the key with other text after the read above; the batch holds only this note.
+                return {"written": False, "reason": other}
+            raise
         return {"written": True, "key": key}
 
     @_ends_on_failure

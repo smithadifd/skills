@@ -843,10 +843,11 @@ ticket record, so `_fold_record` reads each as an ordinary note and no reader of
   `._@+-` into `%XX`. It fails closed: no served model, a model, requested model or harness outside the
   toolkit's grammar, a source that is neither `envelope` nor `seat`, or a store with no ledger writes nothing and
   returns `written: False` with the reason; a model is never invented. The key holds no random part, so a
-  repeat is a replay: the same handle's second call with the same text writes nothing, one with other text
-  is refused in the return rather than as the ledger's key conflict, and a replay of a fact another handle
-  wrote leaves the pass holding the revision it held (the ledger answers the old event's id, and the pass
-  does not take it as its token). The ticket skill has no record of the build result today, so the pass's
+  repeat is a replay, so the call reads the item fresh first and appends only when no note is under the key:
+  a note with the same text (from this handle or another) writes nothing and answers `written: True`, one with
+  other text answers `written: False`, and neither moves the pass's token or ends it. A key conflict the
+  ledger answers after that read is turned into the same `written: False`. The append that does go out is
+  the ordinary one under the held token, so a stale handle is refused as for any other write. The ticket skill has no record of the build result today, so the pass's
   caller names the identity; the markdown store never stores it.
 
 ### 6.3 Store selection

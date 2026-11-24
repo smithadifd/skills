@@ -237,6 +237,71 @@ def test_P9_a_fact_another_handle_already_wrote_replays_without_moving_the_pass_
     assert len(_notes(fake, "ticket-review:v2 ")) == 1
 
 
+def _replaced_pass(fake, record):
+    """A stale handle B on a pass A ended: A records the build (when ``record``), releases, another pass takes the claim.
+
+    Returns B and what B's next review does: ``(handle, refusal)``, the refusal being the exception it raised.
+    """
+
+    first = _at_build(fake)
+    stale = open_ledger(fake, Source(), pass_id=first.pass_id)
+    assert stale.phase == "build"
+    first.record_build("claude-sonnet-5-5", harness="claude-code", requested="sonnet")
+    first.end()
+    other = open_ledger(fake, Source())
+    assert other.pass_id != first.pass_id
+    other.record_tried("the next pass is working", outcome="green")
+    if record:
+        before = stale._token
+        stale.record_build("claude-sonnet-5-5", harness="claude-code", requested="sonnet")
+        assert stale._token == before
+    with pytest.raises(ticket.StoreUnavailable) as caught:
+        changes(stale)
+    return other, caught.value
+
+
+def test_P11_a_stale_handle_recording_a_fact_another_handle_wrote_is_refused_as_without_the_record(tmp_path):
+    fake, control = FakeLedger(tmp_path / "ledger"), FakeLedger(tmp_path / "control")
+    other, refusal = _replaced_pass(fake, record=True)
+    other_control, plain = _replaced_pass(control, record=False)
+    assert (type(refusal), refusal.code) == (type(plain), plain.code)
+    assert str(refusal) == str(plain)
+    # The fact is on the item once, nothing was appended for the stale handle, and the other pass still holds the claim.
+    assert len(_builders(fake)) == 1
+    assert [e["kind"] for e in fake.events()] == [e["kind"] for e in control.events()]
+    assert other.pass_id is not None and other.phase == other_control.phase
+
+
+def test_P12_a_resumed_handle_recording_other_text_for_one_round_and_model_returns_false_and_keeps_the_pass(fake):
+    first = _at_build(fake)
+    first.record_build("claude-sonnet-5-5", harness="claude-code", requested="sonnet")
+    resumed = open_ledger(fake, Source(), pass_id=first.pass_id)
+    before, sent = fake.events(), len(fake.appends())
+    answer = resumed.record_build("claude-sonnet-5-5", harness="claude-code", requested="opus")
+    assert answer["written"] is False and "already recorded" in answer["reason"]
+    # Nothing was written, nothing was even sent, and the pass is not ended.
+    assert fake.events() == before and len(fake.appends()) == sent
+    assert resumed.phase == "build"
+    changes(resumed)
+    assert len(_notes(fake, "ticket-review:v2 ")) == 1
+    assert len(_builders(fake)) == 1
+
+
+def test_P12b_a_key_conflict_from_a_write_that_raced_the_read_returns_false_and_keeps_the_pass(fake, monkeypatch):
+    first = _at_build(fake)
+    first.record_build("claude-sonnet-5-5", harness="claude-code", requested="sonnet")
+    resumed = open_ledger(fake, Source(), pass_id=first.pass_id)
+    # The fact lands after the handle's read of the item, so only the ledger's answer says it is there.
+    monkeypatch.setattr(resumed.store, "note_text", lambda key: None)
+    before = fake.events()
+    answer = resumed.record_build("claude-sonnet-5-5", harness="claude-code", requested="opus")
+    assert answer["written"] is False and "already recorded" in answer["reason"]
+    assert [call.code for call in fake.appends()][-1] == "conflict"
+    assert fake.events() == before
+    changes(resumed)
+    assert len(_notes(fake, "ticket-review:v2 ")) == 1
+
+
 def test_P10_a_build_is_recorded_only_while_building(fake):
     session = open_ledger(fake, Source())
     before = fake.events()
