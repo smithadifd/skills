@@ -1344,6 +1344,53 @@ role note lands. The waiting pass ends as today. A new open reads the item
 again; there is no retry that silently applies an old answer to a new plan.
 
 
+### 6.10 Optional lane receipts after publication
+
+Section 6's caller publishes the pull request; the state machine does not open
+one. After that action returns, call
+`session.record_lane_receipts(paths, published_pr=<returned URL>)`, before close.
+The URL is the caller's publication result, not a stored marker or proof of
+approval. With no URL the method no-ops; before the outward go it also no-ops
+with the outward check's reason. The outward check reads the card fresh, without
+the ordinary end-on-failure wrapper: a store read failure or stale card prints
+one not-recorded line, calls no writer and writes nothing. The pass stays live
+with its claim held. Its token is not refreshed: after a concurrent card write,
+the next ordinary write still refuses as stale, just as without this step.
+The writer independently verifies the document's PR item and link at write time.
+
+Discovery: nonblank `TICKET_REVIEW_GATE`, then `review_gate` in the topic
+override/shipped config (the ledger CLI's paths and precedence), otherwise off.
+`none` disables it. A selected writer must be an absolute executable file.
+No PATH search or capability call occurs. The process inherits `LEDGER_DB` and
+`PYTHONPATH`; the operator supplies the ledger plugin root there. The skill
+never imports the writer's Python, creates or links its PR item, or adds lanes.
+
+The runner that executed each lane supplies its writer-document path. The
+document grammar at this boundary is opaque bytes: no JSON parsing, field
+mapping, family derivation or re-serialization. In handed order, one process
+gets exactly `[<executable>, "record"]` and the file's unchanged bytes on stdin.
+The writer owns the document schema and its 65536-byte limit. Exit 0's own
+`written <PR URL> round=<n> lane=<lane>` or `already_recorded ...` line is printed
+unchanged, not parsed as evidence or approval. Nonzero prints
+`review receipt not recorded: <document path>: <first stderr line>` and continues;
+no stderr uses `exit <status>`. Each writer call has a 120-second timeout;
+`review receipt not recorded: <document path>: timed out after 120s` reports it
+and continues with the next document. Launch failure uses that same prefix and
+its one-line OS reason. Off, markdown, no documents, no publication, unusable
+config or writer print `review receipts not recorded: <reason>` and do nothing.
+An unreadable document prints that prefix with its path/reason, makes no call
+for that document, and continues. None of these recording failures fails the pass.
+
+No grants, waivers, merge records, PR-body lines or ticket card events are
+written. Concurrent document writers must finish their files before handing
+them over; each invocation reads the bytes once. Concurrent receipt writers
+and replay are the writer verb's responsibility. A timeout may leave a receipt
+already committed; it is not retried automatically. After a stop following any
+successful or ambiguous record, an explicit rerun hands the same documents back
+to the verb, whose `already_recorded` is printed unchanged; this step never
+automatically retries even an ambiguous failure. A stop before a call writes nothing for it;
+earlier successful calls are not rolled back. No remote branch is deleted.
+
 ## 7. Non-goals
 
 - Pulling the source during a live pass, or before each outward action.

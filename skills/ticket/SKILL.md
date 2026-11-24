@@ -490,6 +490,10 @@ request, tracker comment, status change, message, merge, release or deploy.
 Call `session.require_outward_go()` before each outward action; it reads the
 card fresh and refuses (`GateRequired`, or `stale` if the card changed).
 
+After PR publication, before close: `session.record_lane_receipts(paths,
+published_pr=<URL>)` passes lane documents unchanged.
+Never approval; failures continue. Setup: design 6.10.
+
 After the listed outward actions, call
 `session.close(point, refs=..., next_skills=..., worktree=<builder worktree>)`.
 It writes the close stamp and the closed status in one write, then ends the
