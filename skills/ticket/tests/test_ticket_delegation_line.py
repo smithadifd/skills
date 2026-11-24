@@ -70,6 +70,7 @@ def test_over_bound_with_loop_names_parts_estimate_bound_and_child_of(handles, a
     with pytest.raises(ticket.GateRequired):
         session.begin_build()
     go_plan(session)
+    assert session.store.read()[0]["stamps"][-1]["point"] == "Waiting at plan go for plan revision 1.", "delegation advice must leave the plan stop last even after its go"
     session.begin_build()
     passing(session)
     assert session.phase == "outward_go" and not session.approved("outward"), "advice cannot grant either go"
