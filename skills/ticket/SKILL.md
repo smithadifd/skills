@@ -426,9 +426,8 @@ card.
 pass that presented it, and stamps the stop in the same write. Show the person
 `session.plan.render()`: its `Claim:` line, above the acceptance criteria, is the
 live pass's claim (the pass id, host and start time `open` recorded), so the
-person sees which pass holds the ticket next to the plan. Present the card and
-stop. Do not edit product files or dispatch `builder-core` until the
-person approves, then record it from the same pass with
+person sees which pass holds the ticket. Present the card and stop. Do not
+edit product files or dispatch `builder-core` until the person approves, then record it from the same pass with
 `session.record_go("plan", evidence=<ref>, verbatim=<exact span copied from their prompt>)`.
 Pass `verbatim` as that exact span, not a paraphrase. Report the bound
 election, or the exact line `go recorded, not bound to a captured utterance`.
@@ -442,10 +441,11 @@ it opens nothing for other criteria or another revision.
 
 1. Give `builder-core` the ticket key, the approved card, the acceptance
    criteria, the repository's conventions, the branch boundary, and the exact
-   verification commands. Outward actions stay forbidden. Its report names the
-   worktree it built in; record it with `session.record_tried("builder-core
-   dispatch", outcome="worktree <path>, branch <name>")` and keep the path for
-   the close (section 6).
+   verification commands. Outward actions stay forbidden. Record the worktree
+   its report names with `session.record_tried("builder-core dispatch",
+   outcome="worktree <path>, branch <name>")` and keep the path for the close.
+   When it returns, call `session.record_build(<served model>, harness=<label>
+   [, requested=<model asked for>])`.
 2. Give a fresh-context `reviewer` the ticket, the approved card, the diff and
    prior findings. It checks the criteria first and the repository's
    standards second. When the target repository has `scripts/verify.sh`, the
@@ -529,8 +529,8 @@ path shell-quoted and never `--force`. Whether to run it is the person's
 call; the line never says removal is safe. A path that goes through a
 symbolic link is named with the link and no command. Until the person runs
 the command, a worktree under `.claude/worktrees/<name>` stays in the
-repository as an untracked folder. The close returns that one line for the
-close output; `ticket.tidy_worktree(<path>)` reads it again later.
+repository as an untracked folder. The close returns that line;
+`ticket.tidy_worktree(<path>)` reads it again later.
 
 ## More-information exits
 
@@ -558,7 +558,7 @@ Pass: <session.pass_id>
 
 At a go stop the pass is still live, so add one line: `Resume with
 open(..., pass_id=<that id>)`, from a fresh `choose_store` handle. A person who
-returns the next day gives that id back and continues the same pass. After a
+returns gives that id back to continue the pass. After a
 more-information exit, the review cap or close the pass has ended and released
 its claim: the next open takes a new claim and needs no id, and the line says
 that instead. Either way the `Pass:` line stays, even when the plan card

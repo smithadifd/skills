@@ -24,6 +24,10 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
   `review-gate record` after PR publication; recording refusals never retry
   or fail the pass, and receipts grant no approval.
 
+### The ticket pass writes its decisions and its builder as item facts
+
+On the ledger store, each recorded decision now also lands a `decided:` item note, the next element of the same batch, under its ordinary key plus `/decided`: `decided: <what was decided> (by <who>)` on one line (TL4 build row 5, CP1 3.5). The ticket-decision note beside it is unchanged, so the card and every reader of it are as before, and a retry of the batch writes the note once. `TicketPass.record_build(model, harness=, requested=, source=)` is new: while building, it writes who built the round as one item note under `row-item:builder:<item>:r<round>:<model>` with the text `built-by: harness=H model=M requested=R source=S round=N`, the grammar of the toolkit's `row-item.sh facts`, so after a decision and a build `facts` counts `decided` of at least 1, `builder` 1 and `builder_malformed` 0. It fails closed and raises nothing for a bad value: a result that names no served model, a value outside the grammar, or the markdown store writes nothing and returns `written: False` with the reason. The markdown store is unchanged. The ledger digest of `test_L2` moved, because a default pass to S6 records two decisions; the markdown digests did not. Section 6.2.5 of the design note gives the rules and section Q of the test matrix the tests; SKILL.md section 5 tells the pass to call `record_build` once the builder returns. No plugin or skill version changes.
+
 ### The ticket pass accepts its open hand-off controller's go
 
 A settled role go now opens a plan or outward gate only when its `who` exactly

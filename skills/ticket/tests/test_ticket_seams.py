@@ -20,10 +20,12 @@ DEFAULTS = {"build": "builder-core", "review": "reviewer", "outward": "push-and-
 # The sha256 of what a default pass to S6 wrote, measured on the code before the seams were named, with the
 # host, the clock, the random ids and the caller's ledger identity held fixed (``_fixed``). A change to what a
 # default pass writes moves it. The ledger digest was measured again once when the pass began to take the
-# ledger lease: its claim became the lease and a pass record where it had been one ``session.opened``.
+# ledger lease: its claim became the lease and a pass record where it had been one ``session.opened``. It was
+# measured again when each recorded decision began to get a ``decided:`` item note beside its ticket-decision
+# note (the two go decisions of S6 each add one event); the markdown digests did not move.
 MARKDOWN_CARD_SHA256 = "2d29ff9ebc6efce9a28ec5a21454d7380fbb3f0ec0ba606cfb90bdf4d254b98f"
 MARKDOWN_TOKEN = "4ef4daeed5681b20467d17f6ba895c6a04e42a40c12eb2472cf79c165ed1872d"
-LEDGER_EVENTS_SHA256 = "59e03f29c45ce03860538e6ae39ebf34ad83ca309b709c2b63b02e8a0a619340"
+LEDGER_EVENTS_SHA256 = "15f20da436faddfc2bedc18f1486653e30d35f6b813564a6c7495a6d7030b7ee"
 
 
 @pytest.fixture

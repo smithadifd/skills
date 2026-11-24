@@ -672,8 +672,9 @@ pass `P`, held token `R`, close token `T`:
 | `join` | no event, unless the record's lease has expired or was released: then the lease row above, alone (5.1); the handle binds to `P` under the store's own serialization, and a used handle is refused `handle_used` before any CLI call | `ticket-lease/K/P/R` |
 | `release` | `session.closed {outcome, source: W}`; with `item.state {status: "open", source: W}` under `--expect-revision` of a fresh read while the pass still holds the lease it took, else alone with no `--expect-revision` (5.1) | `ticket-pass/K/P/released`; `ticket-lease/K/P/R/released` |
 | `plan` | `item.note {text: "ticket-plan:v2 " + canonical JSON of the plan snapshot, source: W}` | ordinary |
-| `decision` | `item.note {text: "ticket-decision:v2 " + canonical JSON of the decision record, source: W}` | ordinary |
+| `decision` | `item.note {text: "ticket-decision:v2 " + canonical JSON of the decision record, source: W}`; then, next in the batch, `item.note {text: "decided: " + the record's effect + " (by " + its who + ")", source: W}` (6.2.5) | ordinary; ordinary + `/decided` |
 | `review` | `item.note {text: "ticket-review:v2 " + canonical JSON of the review record, source: W}` | ordinary |
+| `builder` (`record_build`) | `item.note {text: "built-by: harness=H model=M requested=R source=S round=N", source: W}` (6.2.5) | `row-item:builder:<enc(K)>:r<N>:<enc(M)>` |
 | `stamp` | `item.stopped {point, phase: <store phase>, skills: next_skills, refs, source: W}`; `close` is not a payload key: the normalizer derives it from the key on read | ordinary; the close stamp: `ticket-close/K/P/T/stop` |
 | `tried` | `item.tried {what, phase: <store phase>, outcome?, evidence?, source: W}`; an absent optional field is omitted, never sent as null | ordinary |
 | `closed` | `item.state {status: "closed", owner?, claim?, blocked_by?, source: W}`; `owner`, `claim` and `blocked_by` carried from the read when present, or from the lease the pass wrote | `ticket-close/K/P/T/state` |
@@ -728,11 +729,12 @@ mapping table:
 | `open(pass_id=P)` otherwise; `finish_orient`; `finish_research` | nothing | — |
 | `begin_build`; `require_outward_go`; `approved` | nothing (a `query` for the token comparison, then `export-item` only when equal) | — |
 | `present_plan` | `item.note` (plan), `item.stopped` (phase `plan`) | `R` |
-| `record_go("plan")` | `item.note` (decision); then, outside the batch, `elect` and `append decision.recorded` (fail closed) | `R` |
+| `record_go("plan")` | `item.note` (decision), `item.note` (decided:); then, outside the batch, `elect` and `append decision.recorded` (fail closed) | `R` |
 | `record_review("changes")`, rounds 1–2 | `item.note` (review) | `R` |
 | `record_review("changes")`, round 3 | `item.note` (review), `item.stopped` (phase `review`) | `R` |
 | `record_review("pass")` | `item.note` (review), `item.stopped` (phase `review`) | `R` |
-| `record_go("outward")` | `item.note` (decision); then, outside the batch, `elect` and `append decision.recorded` (fail closed) | `R` |
+| `record_go("outward")` | `item.note` (decision), `item.note` (decided:); then, outside the batch, `elect` and `append decision.recorded` (fail closed) | `R` |
+| `record_build`, a build result that names a served model | `item.note` (builder fact; nothing at all when it names none, or on the markdown store) | `R` |
 | `record_tried` | `item.tried` | `R` |
 | `more_info` | `item.stopped` (the store phase of the live phase) | `R` |
 | `close` | `item.stopped` (phase `close`, key `ticket-close/K/P/T/stop`), `item.state` (key `ticket-close/K/P/T/state`) | `R` |
@@ -829,6 +831,36 @@ refused. At open, a refused claim (`stale_revision` or `conflict`) re-reads once
   so no stamp is ever left without its state, and that is what makes D2 hold on the ledger. The ledger
   store requires a ledger CLI that has `append-many` and `--expect-revision`; the capability probe
   above refuses `ledger_incompatible` otherwise. The markdown store does not depend on it.
+
+#### 6.2.5 Item facts
+
+The pass writes two facts that the toolkit's `row-item.sh facts` counts (TL4 design 3, CP1 3.5). Neither is a
+ticket record, so `_fold_record` reads each as an ordinary note and no reader of the card changes.
+
+- **Decided.** `_batch` writes one `decided:` note for each `decision` event, as the next element after the
+  ticket-decision note, under the decision's ordinary key plus `/decided`. The text is `decided: ` and one line:
+  the record's `effect` and `(by <who>)`, with `, relayed by <relayed_by>` for a role's decision; each field is
+  folded to one line. A record with no text for `who` or `effect` gets no note and keeps its ticket-decision
+  note. The note is built in the store's mapping, not in `record_go`, so a controller's go that names its
+  controller as `who` states the controller. A retry of the batch repeats both keys and writes nothing twice.
+- **Built by.** `record_build(model, harness=, requested=, source=)`, called while building, writes one
+  `builder` event as one note under `row-item:builder:<enc(K)>:r<N>:<enc(model)>` with the text
+  `built-by: harness=H model=M requested=R source=S round=N`. `model` is the model the build result names as
+  served, `requested` the model asked for or `-`, `source` `envelope` or `seat`, and `N` the review round this
+  build goes into (the pass's recorded rounds plus one). `enc` turns every byte outside letters, digits and
+  `._@+-` into `%XX`. It fails closed: no served model, a model, requested model or harness outside the
+  toolkit's grammar, a source that is neither `envelope` nor `seat`, or a store with no ledger writes nothing and
+  returns `written: False` with the reason; a model is never invented. The key holds no random part, so a
+  repeat is a replay, so the call reads the item fresh first and appends only when no note is under the key:
+  a note with the same text (from this handle or another) writes nothing and answers `written: True`, one with
+  other text answers `written: False`, and neither moves the pass's token or ends it. A key conflict the
+  ledger answers after that read is turned into the same `written: False`. The append that does go out is
+  the ordinary one under the held token, so a stale handle is refused as for any other write. A fact that
+  another handle writes between the read and the append is replayed by the ledger with no revision check and
+  no mark on the answer, so the pass reads the item once more and takes the answered event as its token only
+  when that event comes straight after the revision it held; otherwise it keeps its token and is refused as
+  stale. The ticket skill has no record of the build result today, so the pass's
+  caller names the identity; the markdown store never stores it.
 
 ### 6.3 Store selection
 
