@@ -560,16 +560,34 @@ entry. Y1–Y21 name the controller-go bar's mutations; Y22 pins the skill text 
 | P15 | A–O, including E16[role], L1–L3 and G2 | existing suite unchanged | every existing contract and both L2 digests unchanged | inherited mutations; no new test |
 | P16 | `test_P16_the_skill_explains_controller_answers_and_no_answer` | SKILL.md | entry, five refusals, role attribution and no-answer rule | Y22 role entry renamed in skill text |
 
+## Q. Post-publication lane receipts
+
+`test_ticket_lane_records.py`, design 6.10. Every subprocess uses the fake
+record verb; hosted CI needs no review-gate. Documents are opaque bytes, not
+review strings. No new review lane or approval is introduced.
+
+| ID | Test | Expected | Mutation |
+|---|---|---|---|
+| R1 | `test_R1_off_calls_nothing` | no setting: one not-recorded line, no call, pass live | off branch dropped |
+| R2 | `test_R2_bytes_order_argv_and_env_precedence` | two unchanged stdin payloads in order, exactly `record`, environment beats config, own success lines, no card write | M2 re-serialize bytes; M3 ignore environment |
+| R3 | `test_R3_refusal_continues_and_pass_stays_live` | exit 2: first stderr line, next document recorded, pass live | M1 raise on refusal |
+| R4 | `test_R4_markdown_calls_nothing` | markdown calls nothing | M4 markdown guard dropped |
+| R5 | `test_R5_no_documents_calls_nothing` | no documents: one line, no call | empty-document guard dropped |
+| R6 | `test_R6_before_go_or_publication_noops` | before go or without publisher URL: no-op; after both: record | publication guard / outward check dropped |
+| Q7 | `test_config_only_and_already_recorded` | config selects writer, replay line unchanged | config key ignored |
+| Q8 | `test_unreadable_document_calls_nothing` | missing document: no call, diagnostic | missing-file handler raises |
+| Q9 | `test_unusable_setting_never_fails_pass` | off, relative or missing executable: no call, pass live | executable validation / opt-out dropped |
+
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
   H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 54 (G1 and G3 name L's, M's and
-  N's tests and add no mutation), P 21 (P15 names A–O and adds no test). Total 372 rows. Nine carry no test with a mutation of their own in this release:
+  N's tests and add no mutation), P 21 (P15 names A–O and adds no test), Q 9. Total 381 rows. Nine carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), P15 (A–O),
   the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 363 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 372 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7, M12, M14 and M15 run on the
   fake CLI and also on a real ledger CLI when `LEDGER_REAL_CLI` names one, as do N2, N3, N4, N13, N15 and N16,
   and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22 to O42, G4 and G6. In P these are P1–P4, P5a (ledger),

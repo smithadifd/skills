@@ -20,6 +20,10 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 
 ## Unreleased
 
+- `ticket` optionally hands lane runners' opaque writer documents to
+  `review-gate record` after PR publication; recording refusals never retry
+  or fail the pass, and receipts grant no approval.
+
 ### The ticket pass accepts its open hand-off controller's go
 
 A settled role go now opens a plan or outward gate only when its `who` exactly

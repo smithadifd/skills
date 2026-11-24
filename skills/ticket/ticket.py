@@ -4273,6 +4273,65 @@ class TicketPass:
         if not _outward_open(card, self._identity, self.key):
             raise GateRequired("an outward go is required before any outward action")
 
+    def record_lane_receipts(
+        self, documents: Sequence[str | Path], *, published_pr: str | None = None, say=print,
+    ) -> None:
+        """Optional section-6 hand-off; the caller supplies the publisher's returned PR URL.
+
+        Documents belong to the lane runner, not this pass. No card event,
+        retry, approval or receipt interpretation happens here.
+        """
+        if isinstance(self.store, MarkdownStore):
+            say("review receipts not recorded: markdown store")
+            return
+        if not documents:
+            say("review receipts not recorded: no documents handed")
+            return
+        if not published_pr:
+            say("review receipts not recorded: pull request not published")
+            return
+        try:
+            self.require_outward_go()
+        except (TicketError, StoreUnavailable) as exc:
+            say(f"review receipts not recorded: {_one_line(exc)}")
+            return
+        cli = os.environ.get("TICKET_REVIEW_GATE", "").strip()
+        if not cli:
+            # Same topic sources and precedence as the ledger CLI, but no PATH discovery.
+            shipped, problem = _LEDGER_RULE._read_object(
+                _LEDGER_RULE.CONFIG_PATH, False, "ticket", True,
+            )
+            override, override_problem = _LEDGER_RULE._read_object(
+                Path(_LEDGER_RULE.OVERRIDE_PATH).expanduser(), False, "ticket", True,
+            )
+            if problem or override_problem:
+                say("review receipts not recorded: topic config unreadable")
+                return
+            cli = override.get("review_gate", shipped.get("review_gate"))
+        if cli is None or cli == "" or (isinstance(cli, str) and cli.lower() == "none"):
+            say("review receipts not recorded: not configured")
+            return
+        if not isinstance(cli, str) or not os.path.isabs(cli) or not os.path.isfile(cli) or not os.access(cli, os.X_OK):
+            say("review receipts not recorded: review-gate must be an absolute executable path")
+            return
+        for document in documents:
+            try:
+                payload = Path(document).read_bytes()
+            except OSError as exc:
+                say(f"review receipts not recorded: {document}: {_one_line(exc)}")
+                continue
+            try:
+                result = subprocess.run([cli, "record"], input=payload, capture_output=True, check=False)
+            except OSError as exc:
+                say(f"review receipt not recorded: {document}: {_one_line(exc)}")
+                continue
+            if result.returncode:
+                lines = result.stderr.decode("utf-8", errors="replace").splitlines()
+                reason = lines[0] if lines else f"exit {result.returncode}"
+                say(f"review receipt not recorded: {document}: {reason}")
+                continue
+            say(result.stdout.decode("utf-8", errors="replace"), end="")
+
     @_ends_on_failure
     def close(
         self, point: str, *, refs: Sequence[str] = (), next_skills: Sequence[str] = (),
