@@ -230,34 +230,8 @@ Read it to the person; a machine that expected the ledger and sees `markdown`
 learns here what to fix (set `LEDGER_DB`, put `ledger` on `PATH`), and `none`
 in either setting is how to keep markdown on purpose.
 
-The ledger CLI contract. Every call is `<cli> --json <verb> ...` and the CLI
-prints one JSON envelope, `{"ok": true, "data": ...}` or
-`{"ok": false, "error": {"code": ..., "message": ...}}`:
-
-- `append-many <item> [--expect-revision <n>]` reads a JSON array of events on
-  stdin (each with `kind`, `payload`, `item_id` and an `idempotency_key`) and appends them
-  as one atomic batch; `data.events[-1].id` is the new revision. `append-many
-  --help` must exit 0 and name `--expect-revision`. A replayed key writes
-  nothing. The error codes `stale_revision` and `conflict` are lost races.
-- `query --item <item>` gives `data.items` rows with `item_id`, `type`,
-  `revision`, `owner` and `claim`; the codes `not_found` and `empty` mean no
-  such item.
-- `export-item <item>` gives `data.events` in id order, each with `id`, `kind`,
-  `payload` and `idempotency_key`.
-- For a ledger item as the ticket: `spec show <item>` gives `data` with
-  `item_id`, `version`, `content_hash`, `recorded_at`, `body_md` and
-  `acceptance`, where `no_spec` means the item has no spec. `links <item>` gives
-  `data.outgoing` rows with `rel` and `target` and `data.incoming` rows with
-  `rel` and `source`, where `empty` means no link names the item.
-- For a tracker, JSON-file or ad-hoc ask ticket: `spec set <item> --title=<t> --body=<b>
-  --acceptance=<a> --source=<s>` gives `data` with `item_id`, `version`,
-  `unchanged` and `event` (whose `payload` holds that `version` and its
-  `content_hash`), and writes a version only when the content or the source
-  changed; `spec diff <item> <from> <to>` gives `data.fields` rows with `field`
-  and `diff` lines. Ledger 0.1.22 has both. A ticket with a `url` also needs
-  `links <item>` (as above) and one `item.linked` event through `append-many`.
-- `usage` is an unknown command or flag. Codes such as `validation` and
-  `integrity` are permanent refusals.
+The ledger CLI's [command and envelope contract](references/ticket-design.md#62-ledger-store-second)
+lives in the design reference; this repository ships no ledger CLI.
 
 ## Moving markdown cards into the ledger
 
@@ -345,6 +319,19 @@ claim, 1 when it refused, and 2 when `TICKET_LEDGER_CLI` names an incompatible
 ledger CLI. It selects the store the same way `choose_store` does. With the ledger store it releases the claim on the ledger item and
 ignores `--repo`; it releases the lease that pass took by the same rule as the end.
 
+### Context at phase boundaries
+
+On each open, including resume, supply `context_reading=`: a callable returning
+`ticket.ContextReading(used_tokens, window_tokens)` or `None`. No portable meter
+ships here; absent/failed readings are silent. `context_floor_fraction=` is the
+person's fraction of the window; **0.8 is provisional**, pending owner review.
+Existing transitions check after orient, research, plan, build and review
+(before the outward go). Strict excess prints one advisory `handoff` line,
+durably once per boundary per pass; never switch automatically. If chosen,
+handoff the same item's card and live pass id, then resume with a fresh handle.
+See [the bound protocol](references/ticket-design.md#37-advisory-context-bound-at-phase-boundaries)
+and the shared named-phase seed table, [phase-costs.csv](phase-costs.csv).
+
 ## 1. Orient
 
 1. `TicketPass.open` pulls the ticket, reads the card and reports where the
@@ -369,9 +356,9 @@ Where a resume lands:
 | three review rounds and no passing one | `stopped` |
 | closed | `closed` |
 
-Orient and research are in-memory steps: they write nothing, so the card
-cannot say how far a pass got before its plan was presented. A resume with no
-plan on the card therefore repeats both. When the card shows an earlier pass (a
+Orient and research do not record phase progress (only a context warning may
+write a stamp), so the card cannot say how far a pass got before its plan was
+presented. A resume with no plan therefore repeats both. When the card shows an earlier pass (a
 stop stamp or a tried record) or the open joined a live pass, `reconciliation`
 says so, in one line starting `no plan is stored for this ticket, so orient and
 research start again`. Read it to the person, then redo orient and research; do
@@ -446,6 +433,8 @@ it opens nothing for other criteria or another revision.
    outcome="worktree <path>, branch <name>")` and keep the path for the close.
    When it returns, call `session.record_build(<served model>, harness=<label>
    [, requested=<model asked for>])`.
+   This call checks the build boundary even when no builder fact can be
+   recorded; supply the served model from the result, never invent one.
 2. Give a fresh-context `reviewer` the ticket, the approved card, the diff and
    prior findings. It checks the criteria first and the repository's
    standards second. When the target repository has `scripts/verify.sh`, the
@@ -470,7 +459,9 @@ A pass has three seams, each defaulting to what this section and section 6 descr
 
 Before you present it, read the target repository's remotes with
 `route = ticket.outward_route("<target-repo>")`, which runs `git remote` there
-and then.
+and then. The passing review has already checked the context bound here. Do
+not poll again while waiting for the outward go, or before individual outward
+actions.
 
 - `route.propose_push` is true: show the final diff summary, verification
   evidence, the evidence for each criterion, the decisions, and every proposed

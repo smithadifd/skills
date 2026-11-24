@@ -20,6 +20,12 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 
 ## Unreleased
 
+- `ticket` checks a host-supplied context reading at phase boundaries against
+  shared named-phase seed costs and a configurable, provisional 0.8 floor.
+  Over-floor recommendations use `handoff`, print once per boundary per pass
+  across resume, and never switch sessions or grant approval. Unavailable
+  readings stay silent.
+
 - `ticket` optionally hands lane runners' opaque writer documents to
   `review-gate record` after PR publication; recording refusals never retry
   or fail the pass, and receipts grant no approval.

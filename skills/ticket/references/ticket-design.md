@@ -183,9 +183,10 @@ a new ticket).
 
 `_derive` runs once per open and gives the resume state. A live pass then holds its phase in memory
 and moves it with the steps of section 3.3; between writes the phase is never re-derived from the card,
-and the card is trusted only through the held token (section 3.5). Three transitions are in-memory
-only and write nothing: `finish_orient` (`orient` → `research`), `finish_research` (`research` →
-`plan`) and `begin_build` (`plan_go` → `build`). What a resume derives after each live phase:
+and the card is trusted only through the held token (section 3.5). Three transitions
+record no phase progress: `finish_orient` (`orient` → `research`),
+`finish_research` (`research` → `plan`) and `begin_build` (`plan_go` → `build`).
+The first two may write an advisory context stamp (section 3.7). What a resume derives:
 
 | Live phase, reached by | Card | A resume derives |
 |---|---|---|
@@ -198,9 +199,10 @@ only and write nothing: `finish_orient` (`orient` → `research`), `finish_resea
 | `plan` after a changed resume (section 4.4) | S1–S4 with the change | `plan` again, with the same flags, until `present_plan` lands |
 | `stopped`; `closed` | S5; S6 | the same; not live |
 
-Why the repeat is stated and not avoided. Recording how far a pass got would need a write at
-`finish_orient` and `finish_research`, which the design keeps off the card (E17, E21, and the ledger's
-one-`append-many`-per-step mapping in 6.2.2), so it would change the store contract. The card therefore
+Why the repeat is stated and not avoided. Recording how far a pass got would need
+phase-progress records at `finish_orient` and `finish_research`, which the design
+keeps off the card (E17, E21, and the ledger's one-`append-many`-per-step mapping
+in 6.2.2). Advisory context stamps record no progress. The card therefore
 cannot say what an earlier pass found, and a resume says that plainly instead of redoing the two steps
 unannounced: F13 (4.6), in `reconciliation`, when the card has no plan and shows an earlier pass (a stop
 stamp or a `tried` record) or the open joined a live pass (`pass_id` given). A blank card opened with no
@@ -227,7 +229,7 @@ are store-neutral (section 6).
 |---|---|---|---|---|
 | `open(key, source, store)` | source pulled first; the card derives to a non-terminal state; no live pass | `claim {id, host, started_at}` | the resume state; the pass holds the token the claim returned | the same |
 | `open(..., pass_id=P)` | `card.pass.id == P` | nothing (a join writes nothing) | the resume state; the pass holds the read | the same |
-| `finish_orient`, `finish_research` | live `orient` → `research` → `plan` | nothing | in-memory | `orient` (S0) |
+| `finish_orient`, `finish_research` | live `orient` → `research` → `plan` | only an over-floor context stamp, when due (3.7) | in-memory progress | `orient` (S0) |
 | `present_plan(plan)` | live `plan`; `plan.criteria == source.criteria` in order | `plan {revision: I.revision + 1 (or 1), pass: P, ...}`, `stamp {point: "Waiting at plan go for plan revision N.", phase: plan, next_skills: [ticket], refs: [plan ref]}` | `plan_go` | `plan_go` (join); `plan` with F8 (new pass) |
 | `record_go("plan", evidence, verbatim)` | live `plan_go`; `card.plan.pass == P` | `decision {gate: plan, plan_revision, criteria, pass: P, ...}` | `plan_go` (approved) | `build` |
 | `begin_build()` | live `plan_go`; a fresh read equal to the held token; `_has_go(card, "plan", I)` | nothing | `build`; `GateRequired` without the go | `build` |
@@ -311,6 +313,45 @@ closed card's render is the same live and reopened.
 The last message of a session states the pass id too. That message is written by the model, so no
 function in `ticket.py` shapes it; SKILL.md ("The final message") carries the instruction, and the id is
 `session.pass_id`, which stays readable after the pass ends.
+
+### 3.7 Advisory context bound at phase boundaries
+
+`TicketPass.open(context_reading=, context_floor_fraction=)` accepts a host
+reader of `ContextReading(used_tokens, window_tokens)` and the person's floor
+fraction (provisional default `CONTEXT_FLOOR_FRACTION = 0.8`, pending owner
+review). No portable context reading source ships here. An absent reader,
+`None`, invalid token counts or a reader exception is silent and cannot block
+the pass. The reader is called only at phase boundaries, never on open,
+ordinary records, approval, outward actions or close.
+
+`phase-costs.csv` has `phase,estimated_tokens` rows for orient, research, plan,
+build, review, outward and close; `load_phase_costs()` returns estimates by
+phase name for this check and plan-card consumers. The seed allocates the
+measured upper bounds: 350k through build, 250k for tests/QA, follow-ups and
+cleanup, from observed ranges of 300–350k and 100–250k on a 1M window.
+Individual phase allocations are provisional; replacement by measurements
+and a seat-meter display are outside this change.
+
+`finish_orient`, `finish_research`, `present_plan`, `record_build` (even without
+a ledger) and `record_review` check used tokens plus the still-ahead phase
+costs. A changes verdict includes another build and review; the terminal cap
+does not recommend resuming a stopped pass. A passing review is the check
+before the outward go. Strictly greater than `window_tokens * floor_fraction`
+prints one advisory line with boundary, numbers and the recommendation to use
+`handoff` for a fresh session on the same item from its resume card.
+
+The existing stamp format records that exact line with pass id and boundary;
+no new card schema or ledger record kind is needed. The check suppresses a
+boundary whose prefix is already stamped for this pass, even across resume,
+re-plan or review rounds. A new pass may print it again. Warnings join the
+plan/review transition's atomic write; orient, research and the returned-build
+notification write only their advisory stamp. Stop stamps remain last.
+The stamp lands before printing: a crash in between can omit console output,
+but cannot repeat it on resume. Context stamps never prove phase progress,
+switch sessions, end the pass, or supply approval. A fresh session chosen by
+the person resumes the live pass id with a new store handle.
+
+
 
 ## 4. The resume rules
 
@@ -661,6 +702,35 @@ The binder in `record_go` is the one exception: after the ticket-decision note l
 `ledger elect` then one `ledger append --kind decision.recorded` (source_event_id = the election)
 outside the batch. Those writes never gate the go; a failure leaves the note in place and reports
 `bound=False`.
+
+The ledger CLI contract. Every call is `<cli> --json <verb> ...` and the CLI
+prints one JSON envelope, `{"ok": true, "data": ...}` or
+`{"ok": false, "error": {"code": ..., "message": ...}}`:
+
+- `append-many <item> [--expect-revision <n>]` reads a JSON array of events on
+  stdin (each with `kind`, `payload`, `item_id` and an `idempotency_key`) and appends them
+  as one atomic batch; `data.events[-1].id` is the new revision. `append-many
+  --help` must exit 0 and name `--expect-revision`. A replayed key writes
+  nothing. The error codes `stale_revision` and `conflict` are lost races.
+- `query --item <item>` gives `data.items` rows with `item_id`, `type`,
+  `revision`, `owner` and `claim`; the codes `not_found` and `empty` mean no
+  such item.
+- `export-item <item>` gives `data.events` in id order, each with `id`, `kind`,
+  `payload` and `idempotency_key`.
+- For a ledger item as the ticket: `spec show <item>` gives `data` with
+  `item_id`, `version`, `content_hash`, `recorded_at`, `body_md` and
+  `acceptance`, where `no_spec` means the item has no spec. `links <item>` gives
+  `data.outgoing` rows with `rel` and `target` and `data.incoming` rows with
+  `rel` and `source`, where `empty` means no link names the item.
+- For a tracker, JSON-file or ad-hoc ask ticket: `spec set <item> --title=<t> --body=<b>
+  --acceptance=<a> --source=<s>` gives `data` with `item_id`, `version`,
+  `unchanged` and `event` (whose `payload` holds that `version` and its
+  `content_hash`), and writes a version only when the content or the source
+  changed; `spec diff <item> <from> <to>` gives `data.fields` rows with `field`
+  and `diff` lines. Ledger 0.1.22 has both. A ticket with a `url` also needs
+  `links <item>` (as above) and one `item.linked` event through `append-many`.
+- `usage` is an unknown command or flag. Codes such as `validation` and
+  `integrity` are permanent refusals.
 
 Mapping of events to ledger kinds, the writer name `W` in each payload's `source`, ticket key `K`,
 pass `P`, held token `R`, close token `T`:

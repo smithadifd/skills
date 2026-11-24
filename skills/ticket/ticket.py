@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import csv
 import dataclasses
 import errno
 import fcntl
@@ -37,7 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterator, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
 # The store phases, shared by both stores (design section 2).
 PHASES = ("orient", "plan", "build", "review", "close")
@@ -63,6 +64,26 @@ SEAMS = MappingProxyType(
         "outward": "push-and-open-draft",
     }
 )
+# Provisional default pending owner review; callers may set context_floor_fraction on open.
+CONTEXT_FLOOR_FRACTION = 0.8
+_COST_PHASES = (*STEPS, "close")
+
+
+@dataclass(frozen=True)
+class ContextReading:
+    """Current session usage, supplied by the host; no host-specific meter is read here."""
+
+    used_tokens: int
+    window_tokens: int
+
+
+def load_phase_costs() -> dict[str, int]:
+    """Shared seed estimates keyed by phase name, also read by plan-card consumers."""
+
+    with Path(__file__).with_name("phase-costs.csv").open(encoding="utf-8", newline="") as source:
+        return {row["phase"]: int(row["estimated_tokens"]) for row in csv.DictReader(source)}
+
+
 NO_TOKEN = "none"
 # The installed script, so a recovery command runs from the target repository.
 _SCRIPT = os.path.abspath(__file__)
@@ -3950,12 +3971,16 @@ class TicketPass:
         self._lease_holder: str | None = None
         # True for an open through the hand-off source: its claim or join never takes a lease (design 6.8).
         self._handoff = False
+        self._context_reading: Callable[[], ContextReading | None] | None = None
+        self._context_floor_fraction = CONTEXT_FLOOR_FRACTION
         self.reconciliation: tuple[str, ...] = ()
         self.resume_card: dict[str, Any] = card
 
     @classmethod
     def open(
         cls, key: str, source: TicketSource, store: Store, *, pass_id: str | None = None, holder: str | None = None,
+        context_reading: Callable[[], ContextReading | None] | None = None,
+        context_floor_fraction: float = CONTEXT_FLOOR_FRACTION,
     ) -> "TicketPass":
         """Open a pass: a new one claims the ticket; ``pass_id`` continues that live pass.
 
@@ -4024,6 +4049,8 @@ class TicketPass:
         session._phase = state
         session._lease_holder = holder
         session._handoff = handing_off
+        session._context_reading = context_reading
+        session._context_floor_fraction = context_floor_fraction
         notice = getattr(store, "leftover_notice", None)
         leftover = notice() if callable(notice) else None
         stored = getattr(store, "selection", None)
@@ -4174,14 +4201,54 @@ class TicketPass:
             {"point": point, "phase": phase or _STORE_PHASE[self._phase], "next_skills": list(next_skills), "refs": list(refs), "close": close},
         )
 
+    def _write_boundary(
+        self, events: list[tuple[str, Any]], boundary: str, *, remaining_from: str | None = None,
+    ) -> None:
+        """Land an advisory stamp with this transition, then print it; never switch sessions."""
+
+        prefix = f"Context bound after {boundary} (pass {self._pass_id}): "
+        line = None
+        if self._context_reading is not None and not any(
+            stamp["point"].startswith(prefix) for stamp in self._card["stamps"]
+        ):
+            try:
+                reading = self._context_reading()
+            except Exception:
+                reading = None
+            if (
+                isinstance(reading, ContextReading)
+                and type(reading.used_tokens) is int and reading.used_tokens >= 0
+                and type(reading.window_tokens) is int and reading.window_tokens > 0
+            ):
+                start = _COST_PHASES.index(remaining_from) if remaining_from else _COST_PHASES.index(boundary) + 1
+                costs = load_phase_costs()
+                remaining = sum(costs[phase] for phase in _COST_PHASES[start:])
+                projected = reading.used_tokens + remaining
+                floor = reading.window_tokens * self._context_floor_fraction
+                if projected > floor:
+                    line = (
+                        f"{prefix}used {reading.used_tokens} + remaining {remaining} = {projected} tokens "
+                        f"> floor {floor:g} ({self._context_floor_fraction:g} of {reading.window_tokens}); "
+                        f"recommend handoff to a fresh session on {self.key} from its resume card {self.store.ref}."
+                    )
+                    events.insert(0, self._stamp(line, ("handoff", "ticket"), (self.store.ref,)))
+        if events:
+            self._write(events)
+        if line is not None:
+            print(line)
+
     # The steps (design 3.3).
 
+    @_ends_on_failure
     def finish_orient(self) -> None:
         self._require("orient")
+        self._write_boundary([], "orient")
         self._phase = "research"
 
+    @_ends_on_failure
     def finish_research(self) -> None:
         self._require("research")
+        self._write_boundary([], "research")
         self._phase = "plan"
 
     @_ends_on_failure
@@ -4192,7 +4259,7 @@ class TicketPass:
         revision = self._identity[0] + 1 if self._identity else 1
         snapshot = plan.snapshot(revision, self._pass_id, self._ticket)
         point = PLAN_GO_POINT.format(revision=revision)
-        self._write([("plan", snapshot), self._stamp(point, ("ticket",), (self.store.ref,))])
+        self._write_boundary([("plan", snapshot), self._stamp(point, ("ticket",), (self.store.ref,))], "plan")
         self._identity = (revision, tuple(plan.acceptance_criteria))
         plan.review = None
         self._plan = plan
@@ -4362,6 +4429,7 @@ class TicketPass:
         """
 
         self._require("build")
+        self._write_boundary([], "build")
         if not _is_text(model):
             return {"written": False, "reason": "the build result names no served model"}
         fact = {
@@ -4431,7 +4499,10 @@ class TicketPass:
             events.append(self._stamp(OUTWARD_GO_POINT.format(round=number), ("ticket",), refs, phase="review"))
         elif number == MAX_REVIEW_ROUNDS:
             events.append(self._stamp(CAP_POINT, ("ticket", "review"), refs, phase="review"))
-        self._write(events)
+        if verdict == "pass" or number < MAX_REVIEW_ROUNDS:
+            self._write_boundary(events, "review", remaining_from="outward" if verdict == "pass" else "build")
+        else:
+            self._write(events)
         self._rounds = number
         if verdict == "pass":
             self._plan.review = review
@@ -5182,6 +5253,9 @@ def import_repo(repo: str | Path, cli: str, *, dry_run: bool = False, say=print)
 
 __all__ = [
     "SEAMS",
+    "CONTEXT_FLOOR_FRACTION",
+    "ContextReading",
+    "load_phase_costs",
     "FileTicketSource",
     "GateRequired",
     "LedgerStore",
