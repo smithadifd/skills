@@ -504,13 +504,14 @@ class PlanCard:
     shows it next to the plan.
     """
 
-    def __init__(self, ticket: Ticket, *, items: Sequence[str] | None = None):
+    def __init__(self, ticket: Ticket, *, items: list[str] | tuple[str, ...] | None = None):
         self.key = ticket.key
         self.title = ticket.title
         self._criteria = tuple(ticket.acceptance_criteria)
         # Explicit planned parts, not acceptance criteria or the six workflow steps.
-        self.items = tuple(items) if items is not None else (ticket.title,)
-        _criteria_texts(self.items, "a plan card's items")
+        items = items if items is not None else (ticket.title,)
+        _criteria_texts(items, "a plan card's items")
+        self.items = tuple(items)
         self.steps = [PlanStep(name) for name in STEPS]
         self.diff_statement: str | None = None
         self.open_questions: list[str] = []

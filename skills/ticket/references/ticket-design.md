@@ -356,9 +356,10 @@ the person resumes the live pass id with a new store handle.
 
 `PlanCard(ticket, items=[...])` names each intended item or part, renders them
 under `Items`, and persists that ordered list in the plan snapshot. The count
-is `len(plan.items)`, never criteria, steps, links or prose heuristics. Omitted
-items, including older snapshots, mean one item named by the ticket title.
-One item never produces delegation advice.
+is `len(plan.items)`, never criteria, steps, links or prose heuristics. Explicit
+items must be a non-empty list or tuple of non-empty text; a bare string is
+refused before conversion. Omitted items, including older snapshots, mean one
+item named by the ticket title. One item never produces delegation advice.
 
 `present_plan` reuses the boundary's single guarded reading, named-phase
 `load_phase_costs()` and floor. Estimate = item count × (build + review):
@@ -382,9 +383,6 @@ The pass's conditional store token serializes writers; a failed write prints
 nothing, and a crash after the write may omit output but cannot repeat it.
 Stop/outward-go stamps stay last. This advice never files children, dispatches,
 switches sessions or grants either go; child filing is a plan for approval.
-
-
-
 
 ## 4. The resume rules
 

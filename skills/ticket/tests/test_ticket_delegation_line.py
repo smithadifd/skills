@@ -12,6 +12,15 @@ from ticket_support import KEY, Source, go_plan, passing, store
 PARTS = ("Change the consumer", "Migrate the stored records")
 
 
+@pytest.mark.parametrize(
+    "items", ["abc", {"part": "Change the consumer"}, {"Change the consumer"}, 7],
+    ids=["bare-string", "mapping", "set", "integer"],
+)
+def test_plan_items_refuse_non_list_or_tuple(items):
+    with pytest.raises(ticket.TicketError, match="a plan card's items must be a list"):
+        ticket.PlanCard(Source().pull(KEY), items=items)
+
+
 @pytest.fixture(params=["markdown", "ledger"])
 def handles(request, repo, tmp_path):
     if request.param == "ledger":
