@@ -1,8 +1,9 @@
-"""Matrix section P: the item facts a ticket pass writes on the ledger store.
+"""Matrix section Q: the item facts a ticket pass writes on the ledger store.
 
 A recorded decision also becomes one ``decided:`` item note, and a build result that names a served model
 becomes one builder note, in the grammar the toolkit's ``row-item.sh facts`` counts. Neither is a ticket
 record, so the card and every reader of it are unchanged. Every row runs on the fake ledger CLI.
+F10 is the joint row with the controller's go (matrix section P): it uses that file's and the hand-off file's helpers.
 """
 
 import json
@@ -13,6 +14,8 @@ import pytest
 
 import ticket
 from ledger_support import FakeLedger, build_ledger, open_ledger
+from test_ticket_controller_go import at_stop, record_role
+from test_ticket_handoff import Fake, handed_off
 from ticket_support import KEY, Source, build, card_bytes, changes, go_plan, present
 
 # The grammar below is copied from the toolkit's scripts/row_item.py (BUILT_BY_RE, BUILDER_KEY_REST_RE, MODEL_RE
@@ -354,3 +357,34 @@ def test_P10_a_build_is_recorded_only_while_building(fake):
     with pytest.raises(ticket.TicketError):
         session.record_build("claude-sonnet-5-5", harness="claude-code")
     assert fake.events() == before
+
+
+@pytest.mark.parametrize("gate", ["plan", "outward"])
+def test_F10_a_controllers_go_writes_one_decided_note_naming_the_controller_and_the_relay_never_the_person(
+    repo, tmp_path, monkeypatch, gate,
+):
+    handoff = Fake(tmp_path)
+    monkeypatch.setenv("TICKET_LEDGER_CLI", str(handoff.path))
+    handed_off(handoff)
+    session = at_stop(repo, handoff, gate)
+    prior = len(_notes(handoff.fake, DECIDED_PREFIX))
+    before = handoff.events()
+    record_role(session, gate)
+    revision = session._identity[0]
+    landed = handoff.events()[len(before):]
+    # Exactly the ticket-decision note and one decided note beside it, as the next event under its key plus /decided.
+    assert [event["kind"] for event in landed] == ["item.note", "item.note"]
+    decision, decided = landed
+    assert decision["payload"]["text"].startswith("ticket-decision:v2 ")
+    record = json.loads(decision["payload"]["text"].split(" ", 1)[1])
+    assert (record["who"], record["who_kind"], record["relayed_by"]) == ("director", "role", "relay-seat-1")
+    assert decided["id"] == decision["id"] + 1
+    assert decided["idempotency_key"] == decision["idempotency_key"] + "/decided"
+    # It names the controller as who and the relay as relayed by, and never the person record_go would name.
+    text = decided["payload"]["text"]
+    assert text == (
+        f"decided: The {gate} gate is approved for plan revision {revision}. (by director, relayed by relay-seat-1)"
+    )
+    assert "the person" not in text
+    assert len(_notes(handoff.fake, DECIDED_PREFIX)) == prior + 1
+    assert facts(handoff.events())[2] == prior + 1

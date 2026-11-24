@@ -124,7 +124,10 @@ def test_P4_the_entry_writes_one_unbound_decision_under_the_fresh_revision(repo,
     result = record_role(session, gate)
     assert result["bound"] is False, "a role go reports no election binding"
     landed = backend.events()[len(before):]
-    assert [event["kind"] for event in landed] == ["item.note"], "a role go writes exactly one decision note"
+    assert [event["kind"] for event in landed] == ["item.note", "item.note"], (
+        "a role go writes one decision note and the decided note beside it"
+    )
+    assert landed[1]["payload"]["text"].startswith("decided: "), "the second note is the decided note"
     assert landed[0]["payload"]["text"].startswith("ticket-decision:v2 ")
     assert record_of(landed[0]) == decision(session, gate), "the role note has the person's keys plus relayed_by only"
     assert [args[0] for args in calls] == ["query", "export-item", "append-many"], "the entry reads fresh and writes once"
@@ -143,10 +146,14 @@ def test_P4_a_lost_batch_answer_resumes_the_single_landed_go(repo, fake):
     mark = len(fake.events())
     fake.fake.script("append-many", commit=True, stdout="", status=0)
     record_role(session)
-    assert [event["kind"] for event in fake.events()[mark:]] == ["item.note"]
+    assert [event["kind"] for event in fake.events()[mark:]] == ["item.note", "item.note"]
+    assert fake.events()[mark:][1]["payload"]["text"].startswith("decided: "), "the second note is the decided note"
     resumed = open_handoff(repo, declared=DECLARED, pass_id=session.pass_id)
     assert resumed.phase == "build"
-    assert [event["kind"] for event in fake.events()[mark:]] == ["item.note"], "resume must not repeat the decision"
+    assert [event["kind"] for event in fake.events()[mark:]] == ["item.note", "item.note"], (
+        "resume must not repeat the decision"
+    )
+    assert fake.events()[mark:][1]["payload"]["text"].startswith("decided: "), "the second note is the decided note"
 
 
 def test_P4_another_writer_between_read_and_batch_is_stale_then_a_new_pass_reads_again(repo, fake):
