@@ -526,19 +526,42 @@ event unchanged as a whole and the row still claimed by its holder.
 | G5 | `test_G5_a_framed_note_never_gives_the_card_a_hand_off[a ticket-handoff note \| a pass record with a sixth key]` | the note on the item | `card_unreadable` | X27 the fold takes a hand-off from a framed note: the frame accepted and the field set from it (two sites; the frame alone is still caught by the shape check's refusal of a `handoff` key) |
 | G6 | `test_G6_the_release_command_on_a_live_hand_off_pass_writes_the_pass_end_only` (real), `test_G6_a_read_never_refuses_over_a_hand_off_so_a_crashed_pass_is_still_released` | a live hand-off pass; `ticket.py release K P` / the same after a second open hand-off makes the hand-off ambiguous | the pass-end only; the row stays claimed by the loop's holder and its latest claim unchanged / the read gives the pass and no `handoff` field, and the release lands | X29 `read` refuses a problem hand-off (the fold raises instead of leaving the field off) |
 
+## P. Item facts
+
+`test_ticket_item_facts.py`. Each recorded decision gets a `decided:` item note beside its ticket-decision note, and a
+build result that names a served model gets one builder note (design 6.2.5). The fake ledger CLI throughout; the grammar
+of the toolkit's `row-item.sh facts` is copied into the test file as a fixture. P1, P3 and P9 also pin the acceptance: after a decision and
+a build the facts count `decided` of at least 1, `builder` 1 and `builder_malformed` 0.
+
+| ID | Test name | Setup | Expected | Mutation |
+|---|---|---|---|---|
+| P1 | `test_P1_a_recorded_decision_writes_one_decided_note_beside_the_unchanged_decision_note` | S2[0] on the fake ledger | one ticket-decision note, unchanged, and one `decided:` note as the next event, keyed by the decision's key plus `/decided`, the text `decided: The plan gate is approved for plan revision 1. (by the person)`; the batch has exactly those two elements | `_batch` drops the decided note; the decided note reuses the ordinary key |
+| P1b | `test_P1b_the_decided_note_is_one_line_and_names_who_relayed_a_role_decision` | `_batch` of a decision whose `who` and `effect` hold newlines and tabs, with `relayed_by` | one line, `(by <who>, relayed by <relayed_by>)` | `_decided_text` drops the line fold |
+| P2 | `test_P2_replaying_the_same_batch_writes_no_second_decided_note` | the decision's `append-many` call sent again byte for byte | the events are equal; one `decided:` note | the decided note is sent with no idempotency key |
+| P3 | `test_P3_a_recorded_build_writes_one_builder_note_in_the_toolkits_grammar` | S2[0], `record_build`; a `changes` round; `record_build` again | the key and text match the copied grammar and the toolkit's key-to-text agreement, round 1 then round 2, `requested` `-` when none is named; `facts` counts builder 2, malformed 0 | the text carries `model=` the requested id; the round is not the next review round's |
+| P4 | `test_P4_a_model_outside_the_safe_key_set_is_encoded_in_the_key_and_verbatim_in_the_text` | model `vendor/model:v1+x@2` | key `...:r1:vendor%2Fmodel%3Av1+x@2`, text verbatim | `_enc` leaves the byte as is |
+| P5 | `test_P5_a_build_result_with_no_usable_model_writes_no_builder_note_and_raises_nothing[<model>]` (seven models: none, empty, blank, two words, leading dash, 201 characters, not text) | S2[0], `record_build` | `written` false with a reason; no event; the next write lands | a missing model is written as `unknown` |
+| P5b | `test_P5b_a_value_outside_the_toolkits_grammar_writes_no_builder_note[<fields>]` (five: harness with a space, empty, none; requested with a space; source `lane`) | S2[0], `record_build` | `written` false; no event | `_validate_builder` drops that field's check |
+| P5c | `test_P5c_the_markdown_store_writes_no_builder_note_and_no_byte` | S2[0] on the markdown store | `{written: False, reason: no ledger}`; the card's bytes equal | `record_build` writes on a store that is not the ledger |
+| P6 | `test_P6_no_decided_note_is_written_for_any_other_record_kind` | a plan, a tried record, a go, a review round | one `decided:` note, the go's | `_batch` writes a decided note for every record kind |
+| P7 | `test_P7_a_decision_missing_what_the_note_states_gets_no_decided_note_and_keeps_its_own` | `_batch` of a decision with a blank `who` / a blank `effect` | only the ticket-decision note | `_decided_text` drops the missing-field test |
+| P8 | `test_P8_a_second_fact_for_one_round_and_model_with_other_text_writes_nothing_and_raises_nothing` | `record_build` twice with one text, then once with another `requested` | the repeat and the other text write nothing; the other text answers `written` false, `already recorded`; the pass goes on | `record_build` drops the handle's own record of what it wrote (the ledger's key conflict ends the pass) |
+| P9 | `test_P9_a_fact_another_handle_already_wrote_replays_without_moving_the_pass_back` | pass A records the fact, then a `tried` record (so the fact is no longer the item's newest event); a second handle joins and records the fact again, then a `changes` round | no event written; the round lands | `record_build` takes the replayed event's id as the pass's token |
+| P10 | `test_P10_a_build_is_recorded_only_while_building` | S0 on the ledger | `TicketError`; nothing written | `record_build` drops its phase check |
+
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
   H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 54 (G1 and G3 name L's, M's and
-  N's tests and add no mutation). Total 351 rows. Eight carry no test with a mutation of their own in this release:
+  N's tests and add no mutation), P 13. Total 364 rows. Eight carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by
   F3), the two evidence probes G9 and H19 (each has a test that pins its assumption and no
-  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 343 each have a test and a named mutation; H24's runs only
+  production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 356 each have a test and a named mutation; H24's runs only
   when `LEDGER_CLI` names the ledger CLI, whose `validate_payload` it imports. M1, M3, M5, M7, M12, M14 and M15 run on the
   fake CLI and also on a real ledger CLI when `LEDGER_REAL_CLI` names one, as do N2, N3, N4, N13, N15 and N16,
-  and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22 to O42, G4 and G6.
-- Mutations named: 1 per row (G32, L3, M3, M5, M9, M11, M15, N1, N9, N14, N16 and N22 name two, L2 and M16 two sites of one, N5 four, N7 three, N8 five; in section O, O1, O4, O16d, O22, O23, O30, O33 to O36, O40 and O43 name two, O7, O13, O24, O25, O27, O37 and O38 three, O26, O28 and O41 four, O11 six, O15 three sites of one, X27 two sites of one, and X28 three sites across O14, O17 and O18); the `_source_differences` four and the `_has_go` criteria mutation are
+  and O1, O3, O4, O9, O10, O14, O15, O16a, O16b, O22 to O42, G4 and G6. Section P runs on the fake CLI only.
+- Mutations named: 1 per row (P1 and P3 name two, G32, L3, M3, M5, M9, M11, M15, N1, N9, N14, N16 and N22 name two, L2 and M16 two sites of one, N5 four, N7 three, N8 five; in section O, O1, O4, O16d, O22, O23, O30, O33 to O36, O40 and O43 name two, O7, O13, O24, O25, O27, O37 and O38 three, O26, O28 and O41 four, O11 six, O15 three sites of one, X27 two sites of one, and X28 three sites across O14, O17 and O18); the `_source_differences` four and the `_has_go` criteria mutation are
   shared across the rows that say so, as are E11i's entry-check drop (E11i, E11l, E11n), E11j's
   `ended` half (E11j, E11k) and E11q's step-(a) drop (E11q, E11r).
