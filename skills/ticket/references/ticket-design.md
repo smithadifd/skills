@@ -323,6 +323,7 @@ review). No portable context reading source ships here. An absent reader,
 `None`, invalid token counts or a reader exception is silent and cannot block
 the pass. The reader is called only at phase boundaries, never on open,
 ordinary records, approval, outward actions or close.
+A reader failure is silent, but a store failure while writing the advisory stamp ends the pass like any other store failure.
 
 `phase-costs.csv` has `phase,estimated_tokens` rows for orient, research, plan,
 build, review, outward and close; `load_phase_costs()` returns estimates by

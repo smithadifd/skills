@@ -89,6 +89,13 @@ def test_floor_fraction_scales_with_window(handles, capsys):
     session.end()
 
 
+def test_large_window_floor_prints_integer_tokens(handles, capsys):
+    session = opened(handles, lambda: ticket.ContextReading(1_500_000, 2_000_000))
+    session.finish_orient()
+    assert "tokens > floor 1600000 (0.8 of 2000000)" in capsys.readouterr().out, "floor must print integer tokens, not exponent notation"
+    session.end()
+
+
 def test_same_boundary_on_resumed_pass_does_not_print_again(handles, capsys):
     reading = lambda: ticket.ContextReading(700_000, 1_000_000)
     session = opened(handles, reading)
@@ -122,6 +129,43 @@ def test_unavailable_reading_is_silent_and_pass_continues(handles, capsys, kind)
     go_outward(session)
     session.close("Published after the person's outward go.")
     assert session.phase == "closed"
+
+
+@pytest.mark.parametrize("reading", [
+    ticket.ContextReading(True, 10**6),
+    ticket.ContextReading(-5, 10**6),
+    ticket.ContextReading(7*10**5, 0),
+], ids=["bool-used", "negative-used", "zero-window"])
+def test_malformed_reading_is_silent_and_unstamped(handles, capsys, reading):
+    # Remaining orient costs alone exceed this floor, even with a negative count.
+    session = opened(handles, lambda: reading, context_floor_fraction=0.5)
+    before = session.store.read()[0]["stamps"]
+    session.finish_orient()
+    assert capsys.readouterr().out == "", "malformed context reading must print nothing"
+    assert session.store.read()[0]["stamps"] == before, "malformed context reading must write no stamp"
+    assert session.phase == "research" and session.live
+    session.end()
+
+
+@pytest.mark.parametrize("verdict,last_point", [
+    ("pass", "Waiting at outward go after review round 1."),
+    ("changes", "Waiting at plan go for plan revision 1."),
+])
+def test_over_floor_review_keeps_stop_stamp_last(handles, capsys, verdict, last_point):
+    available = False
+    session = opened(handles, lambda: ticket.ContextReading(700_000, 1_000_000) if available else None)
+    reach(session, "build")
+    available = True
+    if verdict == "pass":
+        passing(session)
+    else:
+        session.record_review("changes", evidence="reviews/r1.md", findings=["Fix the behavior."])
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("Context bound after review"), "review must cross the context floor"
+    stamps = session.store.read()[0]["stamps"]
+    assert stamps[-1]["point"] == last_point, "context advisory must not replace the last stop or outward-go stamp"
+    assert stamps[0]["point"] == line, "context stamp must precede the existing stop stamps"
+    session.end()
 
 
 def test_estimates_load_by_phase_name():

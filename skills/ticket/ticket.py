@@ -4228,7 +4228,7 @@ class TicketPass:
                 if projected > floor:
                     line = (
                         f"{prefix}used {reading.used_tokens} + remaining {remaining} = {projected} tokens "
-                        f"> floor {floor:g} ({self._context_floor_fraction:g} of {reading.window_tokens}); "
+                        f"> floor {floor:.0f} ({self._context_floor_fraction:g} of {reading.window_tokens}); "
                         f"recommend handoff to a fresh session on {self.key} from its resume card {self.store.ref}."
                     )
                     events.insert(0, self._stamp(line, ("handoff", "ticket"), (self.store.ref,)))
