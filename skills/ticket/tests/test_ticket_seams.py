@@ -23,9 +23,11 @@ DEFAULTS = {"build": "builder-core", "review": "reviewer", "outward": "push-and-
 # ledger lease: its claim became the lease and a pass record where it had been one ``session.opened``. It was
 # measured again when each recorded decision began to get a ``decided:`` item note beside its ticket-decision
 # note (the two go decisions of S6 each add one event); the markdown digests did not move.
-MARKDOWN_CARD_SHA256 = "2d29ff9ebc6efce9a28ec5a21454d7380fbb3f0ec0ba606cfb90bdf4d254b98f"
-MARKDOWN_TOKEN = "4ef4daeed5681b20467d17f6ba895c6a04e42a40c12eb2472cf79c165ed1872d"
-LEDGER_EVENTS_SHA256 = "15f20da436faddfc2bedc18f1486653e30d35f6b813564a6c7495a6d7030b7ee"
+# All three digests were measured again and moved when the plan card began to store the plan's named items
+# for the delegation line.
+MARKDOWN_CARD_SHA256 = "3a52505b0e6d3f16627678262d6f3983b967b7ae7a3d1e3ca28e65f043374c70"
+MARKDOWN_TOKEN = "db8e94dfe840a977241961590245c82fe3f9ff60c86e2c8eea3b14e1982107a3"
+LEDGER_EVENTS_SHA256 = "d92dea5cc52fed52593848a0ddbb28dee50540333398026378331b3f46d6bbc2"
 
 
 @pytest.fixture

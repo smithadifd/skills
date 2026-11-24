@@ -321,16 +321,14 @@ ignores `--repo`; it releases the lease that pass took by the same rule as the e
 
 ### Context at phase boundaries
 
-On each open, including resume, supply `context_reading=`: a callable returning
-`ticket.ContextReading(used_tokens, window_tokens)` or `None`. No portable meter
-ships here; absent/failed readings are silent. `context_floor_fraction=` is the
-person's fraction of the window; **0.8 is provisional**, pending owner review.
-Existing transitions check after orient, research, plan, build and review
-(before the outward go). Strict excess prints one advisory `handoff` line,
-durably once per boundary per pass; never switch automatically. If chosen,
-handoff the same item's card and live pass id, then resume with a fresh handle.
-See [the bound protocol](references/ticket-design.md#37-advisory-context-bound-at-phase-boundaries)
-and the shared named-phase seed table, [phase-costs.csv](phase-costs.csv).
+On every open/resume, supply `context_reading=` returning
+`ticket.ContextReading(used_tokens, window_tokens)` or `None`; unusable readings
+are silent. `context_floor_fraction=` defaults to provisional 0.8.
+Strict excess after orient, research, plan, build or review prints advice
+once per boundary per pass, including resume; never switch automatically.
+Multi-item plans may also print one delegation line; filing needs the plan go.
+See [the protocol](references/ticket-design.md#37-advisory-context-bound-at-phase-boundaries)
+and [shared phase costs](phase-costs.csv).
 
 ## 1. Orient
 
@@ -390,9 +388,9 @@ findings with file-line or URL evidence, and reconcile conflicting ones. Then
 
 ## 3. Plan card
 
-Create `ticket.PlanCard(session.ticket)`. It carries every acceptance
-criterion of the ticket, in the ticket's order, and the six steps orient,
-research, plan, build, review and outward:
+Create `ticket.PlanCard(session.ticket, items=[<each item or part the plan names>])`.
+Omit `items` for one item (the ticket title); do not count criteria or steps.
+It carries the ticket's criteria in order and the six steps:
 
 - `plan.skip_step(name, reason)` records `skip: <reason>`; a skip without a
   reason is refused.

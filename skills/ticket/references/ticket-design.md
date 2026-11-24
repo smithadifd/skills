@@ -352,6 +352,38 @@ but cannot repeat it on resume. Context stamps never prove phase progress,
 switch sessions, end the pass, or supply approval. A fresh session chosen by
 the person resumes the live pass id with a new store handle.
 
+#### Delegation at the plan card
+
+`PlanCard(ticket, items=[...])` names each intended item or part, renders them
+under `Items`, and persists that ordered list in the plan snapshot. The count
+is `len(plan.items)`, never criteria, steps, links or prose heuristics. Omitted
+items, including older snapshots, mean one item named by the ticket title.
+One item never produces delegation advice.
+
+`present_plan` reuses the boundary's single guarded reading, named-phase
+`load_phase_costs()` and floor. Estimate = item count × (build + review):
+the work still ahead until the outward go, excluding publication and close.
+Strict excess of used + estimate over the floor prints one line:
+`Delegation at plan card (pass <id>): <count> items implied; used <used> + estimate <estimate> = <total> tokens > bound <bound> (<fraction> of <window>); <recommendation>`.
+The loop-present recommendation proposes filing parts as `child-of` items
+and handing them downstream only after the plan go; otherwise it names the
+loop as the add-on that would take them. No output parser consumes this line.
+
+Loop presence follows the optional review-gate add-on pattern: nonblank
+`TICKET_LOOP_ADAPTER`, then `loop_adapter` in the topic override, then shipped
+topic config. An absolute executable path means present; unset/empty/`none`
+(case-insensitive) means absent. Invalid paths or unreadable config mean
+unknown, so no delegation line or stamp. Detection never executes the adapter.
+Unusable readings, costs or floor also stay silent without blocking.
+
+The exact line is stamped atomically before the plan stop, once per pass,
+including resume and re-plan; the existing context-bound line is independent.
+The pass's conditional store token serializes writers; a failed write prints
+nothing, and a crash after the write may omit output but cannot repeat it.
+Stop/outward-go stamps stay last. This advice never files children, dispatches,
+switches sessions or grants either go; child filing is a plan for approval.
+
+
 
 
 ## 4. The resume rules

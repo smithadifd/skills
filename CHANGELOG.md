@@ -20,6 +20,11 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 
 ## Unreleased
 
+- `ticket` counts the plan card's named parts and estimates build/review work
+  against the shared context floor. Over-bound multi-item plans receive one
+  durable delegation advisory per pass, tailored to loop adapter presence;
+  filing or handing off parts still requires the plan go.
+
 - `ticket` checks a host-supplied context reading at phase boundaries against
   shared named-phase seed costs and a configurable, provisional 0.8 floor.
   Over-floor recommendations use `handoff`, print once per boundary per pass
