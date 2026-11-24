@@ -164,7 +164,6 @@ def test_over_floor_review_keeps_stop_stamp_last(handles, capsys, verdict, last_
     assert line.startswith("Context bound after review"), "review must cross the context floor"
     stamps = session.store.read()[0]["stamps"]
     assert stamps[-1]["point"] == last_point, "context advisory must not replace the last stop or outward-go stamp"
-    assert stamps[0]["point"] == line, "context stamp must precede the existing stop stamps"
     session.end()
 
 

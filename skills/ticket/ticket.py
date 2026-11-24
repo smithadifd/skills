@@ -4231,6 +4231,9 @@ class TicketPass:
                         f"> floor {floor:.0f} ({self._context_floor_fraction:g} of {reading.window_tokens}); "
                         f"recommend handoff to a fresh session on {self.key} from its resume card {self.store.ref}."
                     )
+                    # A boundary without its own stop must keep the card's last stamp last.
+                    if self._card["stamps"] and not any(kind == "stamp" for kind, _ in events):
+                        events.append(("stamp", self._card["stamps"][-1]))
                     events.insert(0, self._stamp(line, ("handoff", "ticket"), (self.store.ref,)))
         if events:
             self._write(events)
