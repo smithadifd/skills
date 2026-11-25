@@ -2127,16 +2127,50 @@ def _issues_findings(issues: str) -> list[dict]:
     return findings
 
 
-def test_sub_bullets_fold_into_their_parent_finding():
+@pytest.mark.parametrize("indent", ["  ", "    "], ids=["two-spaces", "four-spaces"])
+def test_sub_bullets_fold_into_their_parent_finding(indent):
     findings = _issues_findings(
-        "- `a.py:1` — parent issue\n  - first sub point\n  - second sub point"
+        "- `a.py:1` — parent issue\n"
+        f"{indent}- first sub point\n"
+        f"{indent}  continued evidence\n\n"
+        f"{indent}- second sub point\n"
+        f"{indent}closing explanation"
     )
     assert len(findings) == 1
     assert findings[0]["file"] == "a.py"
     assert findings[0]["line"] == 1
     assert findings[0]["description"] == (
-        "parent issue - first sub point - second sub point"
+        "parent issue - first sub point continued evidence - second sub point "
+        "closing explanation"
     )
+
+
+def test_pr_1586_round_two_issues_stay_one_located_finding():
+    issues = (FIXTURES / "pr-1586-claude-empirical-r2-issues.md").read_text(encoding="utf-8")
+    verdict, findings = review_phase.parse_claude_fresh(
+        f"## Verdict: REQUEST CHANGES\n\n{issues}"
+    )
+    assert verdict == "changes_requested"
+    assert len(findings) == 1
+    finding = findings[0]
+    assert (finding["rule"], finding["file"], finding["line"], finding["severity"]) == (
+        "issue", "skills/orchestrate/design_tier.py", 1222, "error"
+    )
+    expected_description = " ".join(
+        line.strip() for line in issues.splitlines()[1:] if line.strip()
+    ).removeprefix("- `skills/orchestrate/design_tier.py:1222` — ")
+    assert finding["description"] == expected_description
+
+
+def test_two_top_level_issues_keep_their_nested_evidence_separate():
+    findings = _issues_findings(
+        "- `a.py:1` — first issue\n  - first evidence\n"
+        "- second issue\n    - second evidence"
+    )
+    assert [(f["file"], f["line"], f["description"]) for f in findings] == [
+        ("a.py", 1, "first issue - first evidence"),
+        (None, None, "second issue - second evidence"),
+    ]
 
 
 def test_a_tab_counts_as_one_character_of_indent():
