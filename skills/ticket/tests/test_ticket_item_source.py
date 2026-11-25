@@ -207,6 +207,7 @@ def test_a_spec_changed_after_a_passing_round_or_the_close_flags_as_a_criteria_e
     passing(session)
     if stage == "S6":
         go_outward(session)
+        session.record_pull_request("example/repo#14")
         session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     else:
         session.end()

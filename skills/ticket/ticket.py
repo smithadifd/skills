@@ -97,6 +97,8 @@ _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _HANDOFF_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # A pass id is hex (design section 2); no length is fixed.
 _PASS_ID = re.compile(r"[0-9a-f]+")
+# PR links accept exactly owner/repo#N: ASCII GitHub-style names and a positive decimal number.
+_PULL_REQUEST = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*#[1-9][0-9]*")
 # What a stamp or a review may point at: a path (absolute, or relative with a
 # directory or an extension, optionally :line or :start-end), a PR or issue
 # (owner/repo#N or #N), a branch (branch:<name>), a commit SHA, or a store
@@ -774,6 +776,10 @@ def _validate_decision(decision: Any) -> None:
             raise TicketError(f"unknown gate: {decision['gate']!r}")
         _whole(decision.get("plan_revision"), "a go decision's plan_revision")
         _criteria_texts(decision.get("criteria"), "a go decision's criteria")
+        if "round" in decision:
+            _whole(decision["round"], "an outward go's round")
+            if decision["gate"] != "outward":
+                raise TicketError("only an outward go names a review round")
     if "declined" in decision:
         # A declined go carries no `gate` key, so no reader, this one or an older one, counts it as a go.
         if decision["declined"] != "outward":
@@ -927,6 +933,9 @@ def _validate_event(kind: str, value: Any, key: str) -> None:
         _validate_join(value)
     elif kind == "builder":
         _validate_builder(value)
+    elif kind == "pr":
+        if type(value) is not str or not _PULL_REQUEST.fullmatch(value):
+            raise TicketError("pr_invalid: a pull request reference must be owner/repo#N")
     elif kind != "closed":
         raise TicketError(f"unknown event: {kind!r}")
 
@@ -1027,6 +1036,8 @@ def _fold_event(card: dict[str, Any], kind: str, value: Any) -> None:
         card["reviews"].append(copy.deepcopy(value))
     elif kind == "tried":
         card["tried"].append(copy.deepcopy(value))
+    elif kind == "pr":
+        card["pr"] = value
     elif kind == "closed":
         card["status"] = "closed"
     elif kind == "join":
@@ -1150,9 +1161,18 @@ def _has_declined(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]]
 
 
 def _outward_open(card: Mapping[str, Any], identity: tuple[int, tuple[str, ...]], key: str) -> bool:
-    """The outward go covers the plan and no decline does: a declined go never allows an outward action."""
+    """A non-declined go covers the plan and final round; legacy roundless goes precede a PR only."""
 
-    return _has_go(card, "outward", identity, key) and not _declines(card, identity)
+    final = _passing_final(card, identity)
+    return final is not None and not _declines(card, identity) and any(
+        _is_go(decision, "outward", key, card)
+        and _covers(decision, identity)
+        and (
+            decision.get("round") == final["round"]
+            or ("round" not in decision and not card.get("pr"))
+        )
+        for decision in card["decisions"]
+    )
 
 
 def _answered(revision: int) -> str:
@@ -2334,6 +2354,10 @@ def _ledger_card(
             if record is not None:
                 card["pass"] = {name: record[name] for name in ("id", "host", "started_at")}
                 live, start = {"shape": "lease", "holder": record["holder"], "lease": record["lease"]}, index
+        elif kind == "item.linked" and payload.get("rel") == "pr":
+            # The first recorded PR stays the pass's reference; later links never rewrite closed history.
+            if card.get("pr") is None:
+                card["pr"] = payload.get("target")
         elif kind == "item.stopped":
             stops.append(index)
             card["stamps"].append(
@@ -2363,6 +2387,8 @@ def _ledger_card(
     handoff, _ = _handoff_outcome(events, key)
     if handoff is not None:
         card["handoff"] = handoff
+    if any(event["kind"] == "loop.managed" for event in events):
+        card["loop_managed"] = True
     return card, events[states[-1]]["payload"].get("blocked_by") if states else None, live
 
 
@@ -2459,6 +2485,8 @@ class LedgerStore:
         self._row: Mapping[str, Any] | None = None
         self._live: dict[str, Any] | None = None
         self._read_token: str | None = None
+        # Diagnostics for that revision only; a closed export can hide its newest event.
+        self._newest_event: Mapping[str, Any] | None = None
         # No holder and no lease is kept here. The holder an open names travels with that open's claim or join
         # (``apply``), and the end reads the pass's holder and lease from a fresh read (``_release_lease``).
         # The item's hand-off as last read (design 6.8): the open hand-off, or the refusal an open through the
@@ -2825,6 +2853,7 @@ class LedgerStore:
                 handoff, problem = _handoff_outcome(events, self.key)
                 handed_off = _handed_off(events)
             self._card, self._item, self._row, self._live, self._read_token = card, item, row, live, token
+            self._newest_event = next((event for event in reversed(events) if str(event["id"]) == token), None)
             self._handoff, self._handoff_problem, self._handed_off = handoff, problem, handed_off
             self._role_go_problem = None
             if handoff is None:
@@ -3365,6 +3394,8 @@ class LedgerStore:
                 decided = _decided_text(value) if kind == "decision" else None
                 if decided is not None:
                     batch.append(self._element("item.note", {"text": decided}, f"{ordinary}/decided"))
+            elif kind == "pr":
+                batch.append(self._element("item.linked", {"rel": "pr", "target": value}, ordinary))
             elif kind == "builder":
                 batch.append(self._element("item.note", {"text": _builder_text(value)}, _builder_key(key, value)))
             elif kind == "stamp":
@@ -4212,7 +4243,17 @@ class TicketPass:
 
         card, token = self.store.read()
         if token != self._token:
-            raise _stale(self.key, "a fresh read differs from the card this pass holds")
+            detail = "the card on disk changed" if isinstance(self.store, MarkdownStore) else "a fresh read differs from the card this pass holds"
+            if isinstance(self.store, LedgerStore):
+                newest = self.store._newest_event
+                writer = (
+                    f"event {newest['id']} written by actor={newest.get('actor') or '-'} "
+                    f"session={newest.get('session') or '-'}"
+                ) if newest is not None else "the newest event is not in the export"
+                detail = (
+                    f"a fresh read found revision {token}, expected {self._token} ({writer})"
+                )
+            raise _stale(self.key, detail)
         return card
 
     def _write(self, events: list[tuple[str, Any]]) -> None:
@@ -4417,6 +4458,8 @@ class TicketPass:
         }
         if gate == "plan":
             decision["pass"] = self._pass_id
+        else:
+            decision["round"] = self._card["reviews"][-1]["round"]
         self._write([("decision", decision)])
         return self._bind_recorded_go(gate, revision, decision)
 
@@ -4464,6 +4507,8 @@ class TicketPass:
         }
         if gate == "plan":
             decision["pass"] = self._pass_id
+        else:
+            decision["round"] = card["reviews"][-1]["round"]
         self._write([("decision", decision)])
         return {"bound": False, "reason": "role go"}
 
@@ -4559,7 +4604,11 @@ class TicketPass:
         findings: Sequence[str] = (),
         reviewer: str = "fresh-context reviewer",
     ) -> None:
-        self._require("build")
+        self._require("build", "outward_go")
+        if self._phase == "outward_go":
+            card = self._fresh()
+            if not card.get("pr") or verdict != "changes" or self._rounds >= MAX_REVIEW_ROUNDS:
+                raise TicketError("late_review_refused: only changes on a recorded pull request may start a fix round below the cap")
         revision, criteria = self._identity
         number = self._rounds + 1
         review = {
@@ -4587,12 +4636,14 @@ class TicketPass:
         else:
             self._write(events)
         self._rounds = number
+        self._plan.review = review if verdict == "pass" else None
         if verdict == "pass":
-            self._plan.review = review
             self._phase = "outward_go"
         elif number == MAX_REVIEW_ROUNDS:
             self._phase = "stopped"
             self.end()
+        else:
+            self._phase = "build"
 
     @_ends_on_failure
     def require_outward_go(self) -> None:
@@ -4668,21 +4719,56 @@ class TicketPass:
                 continue
             say(result.stdout.decode("utf-8", errors="replace"), end="")
 
+    def _require_unmanaged(self, card: Mapping[str, Any]) -> None:
+        if card.get("loop_managed"):
+            raise GateRequired(f"ticket {self.key}: this step belongs to the loop; its adapter links the pull request and closes the item at merge.")
+
+    @_ends_on_failure
+    def record_pull_request(self, ref: str) -> None:
+        """Record the published PR and review stop atomically; replaying that reference writes nothing."""
+
+        self._require("outward_go")
+        card = self._fresh()
+        if not _outward_open(card, self._identity, self.key):
+            raise GateRequired("an outward go is required before recording a pull request")
+        self._require_unmanaged(card)
+        _validate_event("pr", ref, self.key)
+        if card.get("pr") == ref:
+            return
+        if card.get("pr") is not None:
+            raise TicketError(f"pr_conflict: ticket {self.key} already records {card['pr']}")
+        self._write([("pr", ref), self._stamp(
+            f"Pull request {ref} recorded; waiting for merge or close.", ("ticket",), (ref,), phase="review",
+        )])
+
     @_ends_on_failure
     def close(
         self, point: str, *, refs: Sequence[str] = (), next_skills: Sequence[str] = (),
         worktree: str | Path | None = None,
     ) -> str | None:
-        """Close after the outward actions: the close stamp and the closed status in one write, then the pass ends.
+        """Close only after the recorded pull request reads merged or closed live.
 
         Then the builder's ``worktree``, when given, is named and kept
         (``tidy_worktree``); the line it returns is for the close output.
         """
 
         self._require("outward_go")
-        if not _outward_open(self._card, self._identity, self.key):
+        card = self._fresh()
+        if not _outward_open(card, self._identity, self.key):
             raise GateRequired("an outward go is required before close")
-        self._write([self._stamp(point, next_skills, refs, phase="close", close=True), ("closed", None)])
+        self._require_unmanaged(card)
+        ref = card.get("pr")
+        if ref is None:
+            raise TicketError(f"pr_required: ticket {self.key} has no recorded pull request")
+        # Validate caller input before adding the mandatory close evidence.
+        _validate_stamp(self._stamp(point, next_skills, refs, phase="close", close=True)[1])
+        state = pull_request_state(ref)
+        if state not in ("MERGED", "CLOSED"):
+            raise TicketError(f"pr_open: ticket {self.key}: pull request {ref} is open or unreadable")
+        outcome = "merged" if state == "MERGED" else "closed unmerged"
+        close_point = f"{point} Pull request {ref}: {outcome}."
+        close_refs = tuple(refs) if ref in refs else (*refs, ref)
+        self._write([self._stamp(close_point, next_skills, close_refs, phase="close", close=True), ("closed", None)])
         self._phase = "closed"
         self.end()
         return tidy_worktree(worktree)
@@ -4732,6 +4818,10 @@ class TicketPass:
         """
 
         self._require("outward_go")
+        card = self._fresh()
+        self._require_unmanaged(card)
+        if card.get("pr") is not None:
+            raise TicketError(f"pr_recorded: ticket {self.key} records pull request {card['pr']}; close only after it merges or closes")
         if not _has_declined(self._card, self._identity, self.key) or _has_go(self._card, "outward", self._identity, self.key):
             raise GateRequired("a kept-local close requires the person's declined outward go and no outward go")
         point = KEPT_LOCAL_POINT.format(revision=self._identity[0])
@@ -4819,6 +4909,26 @@ def outward_route(repo: str | Path) -> OutwardRoute:
     if result.returncode != 0:
         return OutwardRoute(None, _one_line(result.stderr) or f"git remote exited {result.returncode}")
     return OutwardRoute(tuple(line.strip() for line in result.stdout.splitlines() if line.strip()))
+
+
+def pull_request_state(ref: str) -> str:
+    """Read gh's live JSON state; a missing reader, failed command or unreadable answer is OPEN."""
+
+    if type(ref) is not str or not _PULL_REQUEST.fullmatch(ref):
+        return "OPEN"
+    repository, number = ref.split("#")
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", number, "--repo", repository, "--json", "state"],
+            capture_output=True, text=True, check=False, timeout=REVIEW_RECORD_TIMEOUT_SECONDS,
+        )
+        if result.returncode:
+            return "OPEN"
+        answer = json.loads(result.stdout)
+        state = answer.get("state") if type(answer) is dict else None
+        return state if state in ("MERGED", "CLOSED") else "OPEN"
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return "OPEN"
 
 
 def _git_line(path: str, *args: str) -> tuple[int, str, str]:
@@ -5126,6 +5236,8 @@ def _import_batch(card: Mapping[str, Any]) -> list[dict[str, Any]]:
         live = card["pass"]
         purpose = f"ticket pass {live['id']} on {live['host']} at {live['started_at']}"
         batch.append(element("session.opened", {"purpose": purpose}, f"ticket-pass/{key}/{live['id']}/claimed"))
+    if card.get("pr") is not None:
+        batch.append(element("item.linked", {"rel": "pr", "target": card["pr"]}, ordinary()))
     if card["plan"] is not None:
         batch.append(element("item.note", {"text": f"ticket-plan:v{_RECORD_VERSION} {_canonical(card['plan'])}"}, ordinary()))
     for kind, name in (("decision", "decisions"), ("review", "reviews")):

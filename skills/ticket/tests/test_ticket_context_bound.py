@@ -127,6 +127,7 @@ def test_unavailable_reading_is_silent_and_pass_continues(handles, capsys, kind)
     assert capsys.readouterr().out == "", "unavailable context must print nothing"
     assert session.phase == "outward_go" and session.live, "unavailable context must not block the pass"
     go_outward(session)
+    session.record_pull_request("example/repo#14")
     session.close("Published after the person's outward go.")
     assert session.phase == "closed"
 
@@ -205,6 +206,7 @@ def test_reader_runs_only_at_boundaries(handles, capsys):
     assert len(calls) == 5, "only the five completed phase boundaries read context"
     capsys.readouterr()
     go_outward(session)
+    session.record_pull_request("example/repo#14")
     session.require_outward_go()
     session.close("Published after approval.")
     assert len(calls) == 5, "approval, outward actions and close add no boundary polling"

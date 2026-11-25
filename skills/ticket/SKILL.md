@@ -307,8 +307,12 @@ when an exception leaves a `with TicketPass.open(...) as session:` block, or
 on any refusal. On the ledger the end releases the lease the pass took, in one
 write with the pass's end, only while a fresh read shows the pass still holds
 it; a joined lease stays with its holder. A `TicketError` (a wrong step, an invalid value, or
-`GateRequired`) writes nothing and leaves the pass live. After a pass ends,
-every step refuses with `pass_ended`.
+`GateRequired`) writes nothing and leaves the pass live.
+An open or unreadable pull request and a managed stop are `TicketError`s too:
+the pass stays live. For a loop-managed item, linking, `close` and `close_local`
+stop with one line naming the ticket and saying the step belongs to the loop;
+the loop adapter links its pull request and closes the item at merge.
+After a pass ends, every step refuses with `pass_ended`.
 
 A session that crashed leaves its claim, and the ticket stays refused. When
 the person confirms that session is gone, release it with
@@ -483,43 +487,25 @@ After PR publication, before close: `session.record_lane_receipts(paths,
 published_pr=<URL>)` passes lane documents unchanged.
 Never approval; failures continue. Setup: design 6.10.
 
-After the listed outward actions, call
-`session.close(point, refs=..., next_skills=..., worktree=<builder worktree>)`.
-It writes the close stamp and the closed status in one write, then ends the
-pass.
+Follow the [close protocol](references/ticket-design.md#611-close-at-merge-and-kept-local)
+for each step:
 
-When the person says no to the outward actions, or takes the kept-local close,
-record their words with
-`session.record_outward_declined(evidence=..., verbatim=<exact span copied from their prompt>)`.
-The no is a ticket decision of its own, bound to the captured utterance the
-way a go is. Report the bound election, or the exact line
-`declined go recorded, not bound to a captured utterance`. The binding never
-gates the close. From then on nothing leaves the machine:
-`require_outward_go()` refuses, `approved("outward")` is false, and a later
-`record_go("outward")` is refused. Then call
-`session.close_local(refs=..., next_skills=..., worktree=<builder worktree>)`.
-It writes the kept-local close stamp, `Closed kept local: the person declined
-the outward go for plan revision <N>, so nothing was pushed or opened.`, and
-the closed status in one write, then ends the pass. It refuses
-(`GateRequired`) without the recorded no. Close the ticket only through
-`close` or `close_local`: never a ledger status written by hand, and never a
-note in place of the person's words. A resume that finds the no already
-recorded lands at `outward_go`; call `close_local` (a second no is refused).
-
-Both closes take the builder's worktree, the path `builder-core` reported
-(section 5). The worktree is named and kept: the close never removes, moves
-or writes anything there. After the close the line names the path, says when
-it sits under the target repository's `.claude/worktrees`, names its branch
-(a builder agent's `worktree-agent-*` too) as left in place, not deleted, and
-says what `git status --porcelain --ignored --untracked-files=all` listed
-there: nothing, a short summary, or that it could not be read. It ends with
-the command the person may run, `git worktree remove <path>`, with the given
-path shell-quoted and never `--force`. Whether to run it is the person's
-call; the line never says removal is safe. A path that goes through a
-symbolic link is named with the link and no command. Until the person runs
-the command, a worktree under `.claude/worktrees/<name>` stays in the
-repository as an untracked folder. The close returns that line;
-`ticket.tidy_worktree(<path>)` reads it again later.
+- Immediately after publication, call `session.record_pull_request("owner/repo#N")`
+  with a fresh outward go; `pr_invalid` and `pr_conflict` refuse.
+- Publication is not close. Call `session.close(point, refs=..., next_skills=...,
+  worktree=<builder worktree>)` after merge or abandonment. Refusals, in order:
+  no outward go for the final round, a managed item, `pr_required`, `pr_open`.
+  Read live with `gh pr view`; the stamp says `merged` or `closed unmerged`.
+- A late `changes` review starts a fix round; after it passes, record a
+  new outward go naming that round. Invalid late reviews are `late_review_refused`.
+- When the person declines, record
+  `session.record_outward_declined(evidence=..., verbatim=<exact span copied from their prompt>)`.
+  Report the bound election, or `declined go recorded, not bound to a captured utterance`.
+  Nothing then leaves the machine. Call `session.close_local(refs=..., next_skills=...,
+  worktree=<builder worktree>)`; without the no it is `GateRequired`, with a PR `pr_recorded`.
+- The worktree is named and kept. Give its returned status and branch line and
+  `git worktree remove <path>`, never `--force`; `.claude/worktrees/<name>` stays
+  until the person runs it. The close never removes it.
 
 ## More-information exits
 
@@ -553,8 +539,11 @@ its claim: the next open takes a new claim and needs no id, and the line says
 that instead. Either way the `Pass:` line stays, even when the plan card
 already showed the id.
 
-After a close, say how the ticket closed: through the outward actions, or kept
-local with nothing pushed. Give the worktree line the close returned (the
+While a pull request is open, unreadable, or awaiting a new go after a fix
+round, say the pass is still live and give the recorded pull request and the
+resume command. Report the managed stop as its one plain line.
+After a close, say whether the pull request merged, closed unmerged, or the
+ticket was kept local with nothing pushed. Give the worktree line the close returned (the
 path, its branch, what `git status` listed, and the `git worktree remove`
 command for the person to run), so no builder worktree is left in the
 repository unnamed. A worktree under `.claude/worktrees/<name>` stays until

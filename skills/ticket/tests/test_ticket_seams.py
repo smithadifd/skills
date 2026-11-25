@@ -25,9 +25,11 @@ DEFAULTS = {"build": "builder-core", "review": "reviewer", "outward": "push-and-
 # note (the two go decisions of S6 each add one event); the markdown digests did not move.
 # All three digests were measured again and moved when the plan card began to store the plan's named items
 # for the delegation line.
-MARKDOWN_CARD_SHA256 = "3a52505b0e6d3f16627678262d6f3983b967b7ae7a3d1e3ca28e65f043374c70"
-MARKDOWN_TOKEN = "db8e94dfe840a977241961590245c82fe3f9ff60c86e2c8eea3b14e1982107a3"
-LEDGER_EVENTS_SHA256 = "d92dea5cc52fed52593848a0ddbb28dee50540333398026378331b3f46d6bbc2"
+# Close-at-merge remeasures all three: outward decisions name their round, the card records its PR,
+# a link/review-stop batch precedes close, and the close stamp records the live PR outcome.
+MARKDOWN_CARD_SHA256 = "8e85413f298874277d0dadfe27459eff109e115adc37b7e9d0d432e1985a3960"
+MARKDOWN_TOKEN = "53a7efc41497ebd1859b2f082995a93f2de3a6024e5183c8f85bf34148428653"
+LEDGER_EVENTS_SHA256 = "b3df5489484c124366cf4e9f5218d3206deffede5557c34e4a95c6364dc62fbe"
 
 
 @pytest.fixture

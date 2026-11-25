@@ -96,6 +96,18 @@ def test_an_open_card_with_a_live_pass_replays_equal_and_resumes_on_the_ledger(r
     resumed.end()
 
 
+def test_a_linked_markdown_card_imports_with_its_pull_request(repo, fake, capsys):
+    build(repo, Source(), "S4", rounds=1)
+    before = read_card(repo)
+    assert before["pr"] == "example/repo#14"
+    code, lines, _ = run(capsys, "import-cards", str(repo))
+    assert (code, lines) == (0, [f"imported {KEY}"])
+    after = ledger_card(fake, KEY, TITLE)
+    assert after == before
+    assert after["pr"] == "example/repo#14"
+    assert not card_path(repo).exists()
+
+
 def test_a_closed_pass_with_no_close_stamp_still_replays_equal(repo, fake, capsys):
     card = fixture_card()
     card["stamps"][-1]["close"] = False

@@ -216,7 +216,7 @@ def ledger_library(cli):
     import importlib
 
     path = Path(cli).resolve()
-    for root in (path.parent, path.parent.parent / "skills" / "_lib"):
+    for root in (path.parent, path.parent.parent, path.parent.parent / "skills" / "_lib"):
         if (root / "ledger" / "loop.py").is_file():
             saved, quiet = list(sys.path), sys.dont_write_bytecode
             sys.path.insert(0, str(root))
@@ -263,7 +263,9 @@ def build_ledger(cli, src, stage, rounds=0):
         return session
     go_outward(session)
     if stage == "S4":
+        session.record_pull_request("example/repo#14")
         return session
+    session.record_pull_request("example/repo#14")
     session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     return session
 

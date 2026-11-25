@@ -157,6 +157,7 @@ def test_G32_a_stop_writer_arriving_during_the_close_save_is_refused_stale_and_t
     session.begin_build()
     passing(session)
     go_outward(session)
+    session.record_pull_request("example/repo#14")
     other = open_pass(repo, src, pass_id=session.pass_id)  # joined before the close, holds the pre-close token
     outcome = []
 
@@ -179,7 +180,7 @@ def test_G32_a_stop_writer_arriving_during_the_close_save_is_refused_stale_and_t
     card = read_card(repo)
     assert card["status"] == "closed"
     assert card["stamps"][-1]["close"] is True
-    assert card["stamps"][-1]["point"] == "Ticket pass complete."
+    assert card["stamps"][-1]["point"] == "Ticket pass complete. Pull request example/repo#14: merged."
     assert [stamp for stamp in card["stamps"] if stamp["point"].startswith("waiting on")] == []
 
 

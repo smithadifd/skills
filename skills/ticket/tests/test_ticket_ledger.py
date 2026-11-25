@@ -199,7 +199,7 @@ def test_H8_a_close_lands_under_the_bound_keys(fake):
     token = stop["idempotency_key"].split("/")[3]
     assert stop == {
         "kind": "item.stopped", "item_id": KEY, "idempotency_key": f"ticket-close/{KEY}/{pass_id}/{token}/stop",
-        "payload": {"point": "Ticket pass complete.", "phase": "close", "skills": ["ticket"], "refs": ["example/repo#14"],
+        "payload": {"point": "Ticket pass complete. Pull request example/repo#14: merged.", "phase": "close", "skills": ["ticket"], "refs": ["example/repo#14"],
                     "source": WRITER},
     }
     holder = f"ticket-pass/{pass_id}"
@@ -296,6 +296,7 @@ def test_H12_later_notes_links_and_session_records_leave_a_close_trusted(fake, l
     before = fake.events()
     resumed = open_ledger(fake, src)
     assert resumed.phase == "closed"
+    assert resumed.resume_card["pr"] == "example/repo#14", "later links must not replace the recorded PR"
     assert resumed.live is False
     assert fake.events() == before
 
@@ -440,13 +441,52 @@ def test_H20_a_review_round_and_its_stamp_land_together_or_not_at_all(fake):
     assert session.live is False
 
 
+
+
 def test_H21_a_stale_write_names_the_newest_writer(fake):
     session = build_ledger(fake, Source(), "S4", 1)
     fake.outside("item.note", note("see PR 12"), actor="other-agent", session="other-session")
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",))
+    assert excinfo.value.code == "stale"
     assert "actor=other-agent" in str(excinfo.value)
     assert "session=other-session" in str(excinfo.value)
+    assert closed_states(fake) == []
+
+
+@pytest.mark.parametrize("kind", ["item.note", "item.stopped"])
+def test_H21b_an_outside_write_during_pr_read_refuses_at_append(fake, monkeypatch, kind):
+    src = Source()
+    session = build_ledger(fake, src, "S4", 1)
+    held = session._token
+    before, appends = fake.events(), len(fake.appends())
+
+    def state(ref):
+        assert ref == "example/repo#14"
+        payload = note("Concurrent note.") if kind == "item.note" else {
+            "point": "Waiting on the person.", "phase": "review", "skills": [], "refs": [],
+        }
+        fake.outside(kind, payload, actor="during-read-agent", session="during-read-session")
+        return "MERGED"
+
+    monkeypatch.setattr(ticket, "pull_request_state", state)
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        session.close("Ticket pass complete.", refs=("example/repo#14",))
+    assert refusal(excinfo) == "stale"
+    assert "actor=during-read-agent" in str(excinfo.value)
+    assert "session=during-read-session" in str(excinfo.value)
+    refused = fake.appends()[appends]
+    assert refused.code == "stale_revision"
+    assert refused.argv[-2:] == ["--expect-revision", held]
+    assert kinds(refused.batch) == ["item.stopped", "item.state"]
+    assert keyed(after(fake, before)[1:]) == released(session)
+    assert closed_states(fake) == []
+    assert not any(event["kind"] == "item.stopped" and event["payload"]["phase"] == "close"
+                   for event in fake.events())
+    assert session.live is False
+    resumed = open_ledger(fake, src)
+    assert resumed.phase == "outward_go"
+    assert resumed.approved("outward") is True
 
 
 def test_H22_a_key_conflict_is_stale_not_success(fake):
@@ -586,7 +626,7 @@ def test_H24_every_batch_the_store_builds_passes_the_ledger_schema(tmp_path):
                         assert "close" not in element["payload"]
                     kinds_sent.add(element["kind"])
     assert kinds_sent == {
-        "item.created", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
+        "item.created", "item.linked", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
 
 
 def _ledger_validate_payload():
@@ -597,7 +637,7 @@ def _ledger_validate_payload():
     """
 
     cli = Path(LEDGER_CLI).resolve()
-    for root in (cli.parent, cli.parent.parent / "skills" / "_lib"):
+    for root in (cli.parent, cli.parent.parent, cli.parent.parent / "skills" / "_lib"):
         if (root / "ledger" / "schema.py").is_file():
             saved = list(sys.path)
             sys.path.insert(0, str(root))

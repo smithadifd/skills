@@ -949,7 +949,7 @@ def test_F1_close_writes_the_stamp_and_the_closed_status_in_one_write(repo):
     assert writes == [["stamp", "closed"]]
     card = read_card(repo)
     assert card["stamps"][-1] == {
-        "point": "Done.", "phase": "close", "next_skills": ["ticket", "review"],
+        "point": "Done. Pull request example/repo#14: merged.", "phase": "close", "next_skills": ["ticket", "review"],
         "refs": ["example/repo#14", "branch:ek-14"], "close": True,
     }
     assert (card["status"], card["pass"]) == ("closed", None)
@@ -1075,7 +1075,9 @@ def test_F4_a_closed_card_is_reported_closed_with_its_point_and_refs(repo):
     session = open_pass(repo, src)
     assert session.phase == "closed"
     stamp = session.resume_card["stamps"][-1]
-    assert (stamp["point"], stamp["refs"], stamp["next_skills"]) == ("Ticket pass complete.", ["example/repo#14"], ["ticket"])
+    assert (stamp["point"], stamp["refs"], stamp["next_skills"]) == (
+        "Ticket pass complete. Pull request example/repo#14: merged.", ["example/repo#14"], ["ticket"],
+    )
 
 
 def test_F5_a_write_between_the_close_read_and_the_close_is_refused(repo):
@@ -1358,6 +1360,7 @@ def test_SK36_a_closed_card_renders_every_step_complete_or_skipped_never_pending
     session.begin_build()
     passing(session)
     go_outward(session)
+    session.record_pull_request("example/repo#14")
     session.close("Ticket pass complete.", refs=("example/repo#14",))
     rendered = session.plan.render()
     assert _statuses(rendered) == {
