@@ -326,6 +326,7 @@ def test_a_closed_ticket_edited_after_close_records_the_version_and_stays_closed
     session.begin_build()
     passing(session)
     go_outward(session)
+    session.record_pull_request("example/repo#14")
     session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     write_ticket(path, description=EDITED, acceptance_criteria=[A, B_EDITED])
     reopened = open_ticket(repo, src)

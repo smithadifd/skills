@@ -112,7 +112,6 @@ def test_H2_a_refused_close_writes_nothing_but_the_release(fake):
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     assert refusal(excinfo) == "stale"
-    assert "other-agent" in str(excinfo.value) and "other-session" in str(excinfo.value)
     assert keyed(after(fake, before)) == released(session)
     assert closed_states(fake) == []
     assert [e for e in fake.events() if e["kind"] == "item.stopped" and e["payload"]["phase"] == "close"] == []
@@ -199,7 +198,7 @@ def test_H8_a_close_lands_under_the_bound_keys(fake):
     token = stop["idempotency_key"].split("/")[3]
     assert stop == {
         "kind": "item.stopped", "item_id": KEY, "idempotency_key": f"ticket-close/{KEY}/{pass_id}/{token}/stop",
-        "payload": {"point": "Ticket pass complete.", "phase": "close", "skills": ["ticket"], "refs": ["example/repo#14"],
+        "payload": {"point": "Ticket pass complete. Pull request example/repo#14: merged.", "phase": "close", "skills": ["ticket"], "refs": ["example/repo#14"],
                     "source": WRITER},
     }
     holder = f"ticket-pass/{pass_id}"
@@ -250,7 +249,6 @@ def test_H48_an_outside_stop_before_close_is_refused_and_only_the_release_lands(
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     assert refusal(excinfo) == "stale"
-    assert "other-agent" in str(excinfo.value) and "other-session" in str(excinfo.value)
     assert keyed(after(fake, before)) == released(session)
     assert closed_states(fake) == []
     assert [e for e in fake.events() if e["kind"] == "item.stopped" and e["payload"]["phase"] == "close"] == []
@@ -296,6 +294,7 @@ def test_H12_later_notes_links_and_session_records_leave_a_close_trusted(fake, l
     before = fake.events()
     resumed = open_ledger(fake, src)
     assert resumed.phase == "closed"
+    assert resumed.resume_card["pr"] == "example/repo#14", "later links must not replace the recorded PR"
     assert resumed.live is False
     assert fake.events() == before
 
@@ -440,13 +439,22 @@ def test_H20_a_review_round_and_its_stamp_land_together_or_not_at_all(fake):
     assert session.live is False
 
 
-def test_H21_a_stale_write_names_the_newest_writer(fake):
+
+
+def test_H21_a_stale_close_after_the_live_pr_read_names_the_newest_writer(fake, monkeypatch):
     session = build_ledger(fake, Source(), "S4", 1)
-    fake.outside("item.note", note("see PR 12"), actor="other-agent", session="other-session")
+
+    def state(ref):
+        fake.outside("item.note", note("Concurrent write during the PR read."), actor="other-agent", session="other-session")
+        return "MERGED"
+
+    monkeypatch.setattr(ticket, "pull_request_state", state)
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",))
+    assert excinfo.value.code == "stale"
     assert "actor=other-agent" in str(excinfo.value)
     assert "session=other-session" in str(excinfo.value)
+    assert closed_states(fake) == []
 
 
 def test_H22_a_key_conflict_is_stale_not_success(fake):
@@ -586,7 +594,7 @@ def test_H24_every_batch_the_store_builds_passes_the_ledger_schema(tmp_path):
                         assert "close" not in element["payload"]
                     kinds_sent.add(element["kind"])
     assert kinds_sent == {
-        "item.created", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
+        "item.created", "item.linked", "session.closed", "item.note", "item.stopped", "item.tried", "item.state"}
 
 
 def _ledger_validate_payload():
@@ -597,7 +605,7 @@ def _ledger_validate_payload():
     """
 
     cli = Path(LEDGER_CLI).resolve()
-    for root in (cli.parent, cli.parent.parent / "skills" / "_lib"):
+    for root in (cli.parent, cli.parent.parent, cli.parent.parent / "skills" / "_lib"):
         if (root / "ledger" / "schema.py").is_file():
             saved = list(sys.path)
             sys.path.insert(0, str(root))

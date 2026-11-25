@@ -41,6 +41,8 @@ def decision(session, gate="plan", **changes):
     }
     if gate == "plan":
         answer["pass"] = session.pass_id
+    elif session.review_round:
+        answer["round"] = session.review_round
     return {**answer, **changes}
 
 

@@ -27,6 +27,13 @@ def private_tmp(tmp_path, monkeypatch):
     # here; a test that wants an identity sets it itself.
     monkeypatch.delenv("LEDGER_SESSION", raising=False)
     monkeypatch.delenv("LEDGER_AGENT", raising=False)
+    # Every legacy close fixture observes an actual offline gh executable, never the host's authenticated CLI.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"state":"MERGED"}\'\n', encoding="utf-8")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
     return tmp_path
 
 

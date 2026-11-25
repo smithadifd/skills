@@ -611,13 +611,36 @@ review strings. No new review lane or approval is introduced.
 | R11 | `test_unreadable_document_calls_nothing` | missing document: no call, diagnostic | missing-file handler raises |
 | R12 | `test_unusable_setting_never_fails_pass` | off, relative or missing executable: no call, pass live | executable validation / opt-out dropped |
 
+## S. Close at merge (contract B1–B11)
+
+`test_ticket_close_at_merge.py`; B labels here are the close-gate contract's,
+not section B's resume labels. Fake ledger throughout; B8 also runs on the
+real CLI when `LEDGER_REAL_CLI` names it, seeded through `ledger.loop.take_item`.
+Legacy kept-local and closed-card resume contracts remain covered by K and A.
+
+| Contract | Test | Expected | Mutation |
+|---|---|---|---|
+| B1 | `test_B1_link_requires_go_and_is_atomic_idempotent_and_conflict_checked` | fresh go; one link/stop write; replay no-op; another PR `pr_conflict` | drop gate; drop conflict; drop replay return; split batch |
+| B1 grammar | `test_B1_reference_grammar_names_near_misses` | exact owner/repo#N only; whitespace, bullet, fence, URL, bare or incomplete reference `pr_invalid` | bypass reference validation |
+| B2 | `test_B2_close_reads_live_state_and_records_outcome`, `test_B2_closed_unmerged_is_distinct` | live OPEN refuses despite planted merged cache, no write, pass live; live MERGED/CLOSED closes with reference and outcome | skip live read; conflate CLOSED with MERGED |
+| B3 | `test_B3_unreadable_state_fails_closed` | missing gh, nonzero, bad JSON or shape/case reads open, `pr_open` | unreadable reads merged |
+| B4 | `test_B4_close_requires_recorded_pr` | `pr_required`, no write, pass live | remove missing-PR check |
+| B5 | `test_B5_fix_round_spends_old_go_and_new_go_names_final_round` | late changes returns to build; passing fix round requires new go naming its round | remove round comparison |
+| B6 | `test_B6_legacy_roundless_go_only_before_pr` | roundless legacy go works only before PR | count roundless go after PR |
+| B7 | `test_B7_late_review_refusals_and_cap`, `test_B7_late_third_changes_stops` | no PR, late pass or fourth round refused; late third changes stops | remove each late-review condition or cap |
+| B8 (real) | `test_B8_managed_close_is_a_live_write_free_stop` | both closes: one-line loop-owned stop, no append, pass live, item open | remove managed check at each close |
+| B9 | `test_B9_managed_pr_link_is_a_live_write_free_stop` | same managed stop before link; no append | remove link's managed check |
+| B10 | A, K and L2 | legacy resume and kept-local unchanged; default digests remeasured for PR/round evidence | inherited mutations |
+| B11 | `test_B11_skill_documents_close_gate_and_fix_round` | section 6, One live pass and final message name the protocol | drop new skill instructions |
+| Concurrent writer | `test_B1_a_concurrent_link_writer_cannot_land_half_a_step` | revision race lands neither link nor stop; rerun and replay consistent | omit expected revision |
+
 ## Counts
 
 - Card states: 7 (S0–S6). Source-edit kinds: 4 (reorder, text edit, added, removed) plus `none`,
   plus the three duplicate kinds of 4.2 (duplicate added, removed, moved) at S1.
 - Rows: A 48 (the four impossible S0 cells folded into A0.1–4), B 6, C 19, D 8, E 55, F 9, G 32,
   H 39, I 26, K 14, L 3, M 16 (M2 and M13 name H1's and L2's tests), N 22, O 54 (G1 and G3 name L's, M's and
-  N's tests and add no mutation), P 21 (P15 names A–O and adds no test), Q 19 (the item facts, with the joint row Q14), R 12 (lane receipts). Total 403 rows. Nine carry no test with a mutation of their own in this release:
+  N's tests and add no mutation), P 21 (P15 names A–O and adds no test), Q 19 (the item facts, with the joint row Q14), R 12 (lane receipts), S 13 (close-at-merge contracts and concurrency). Total 416 rows. Nine carry no test with a mutation of their own in this release:
   A0.1–4 (impossible by construction), I18, I19, I23, I24 (removed by construction), I21 (covered by F3), P15 (A–O),
   the two evidence probes G9 and H19 (each has a test that pins its assumption and no
   production mutation; H19's runs against the real ledger CLI when `LEDGER_CLI` names it). The other 394 each have a test and a named mutation; H24's runs only

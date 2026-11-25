@@ -358,6 +358,11 @@ def append_many(state, item, expect, stdin):
                     5,
                 )
             pending = None
+        managed = any(event["kind"] == "loop.managed" for event in of_item(events, item))
+        if managed and element["kind"] == "item.linked" and element["payload"].get("rel") == "pr":
+            raise Refusal("validation", "reserved-transition:loop-pr", 3)
+        if managed and element["kind"] == "item.state" and element["payload"].get("status") == "closed":
+            raise Refusal("validation", "reserved-transition:loop-close", 3)
         event = {
             "id": (events[-1]["id"] if events else 0) + 1, "kind": element["kind"], "payload": element["payload"],
             "payload_version": element.get("payload_version", 1), "item_id": item, "idempotency_key": key,

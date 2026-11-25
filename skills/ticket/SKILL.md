@@ -307,8 +307,12 @@ when an exception leaves a `with TicketPass.open(...) as session:` block, or
 on any refusal. On the ledger the end releases the lease the pass took, in one
 write with the pass's end, only while a fresh read shows the pass still holds
 it; a joined lease stays with its holder. A `TicketError` (a wrong step, an invalid value, or
-`GateRequired`) writes nothing and leaves the pass live. After a pass ends,
-every step refuses with `pass_ended`.
+`GateRequired`) writes nothing and leaves the pass live.
+An open or unreadable pull request and a managed stop are `TicketError`s too:
+the pass stays live. For a loop-managed item, linking, `close` and `close_local`
+stop with one line naming the ticket and saying the step belongs to the loop;
+the loop adapter links its pull request and closes the item at merge.
+After a pass ends, every step refuses with `pass_ended`.
 
 A session that crashed leaves its claim, and the ticket stays refused. When
 the person confirms that session is gone, release it with
@@ -483,10 +487,37 @@ After PR publication, before close: `session.record_lane_receipts(paths,
 published_pr=<URL>)` passes lane documents unchanged.
 Never approval; failures continue. Setup: design 6.10.
 
-After the listed outward actions, call
+Immediately after publication, call `session.record_pull_request("owner/repo#N")`.
+The reference grammar is exactly ASCII owner/repo#N, with a positive decimal
+number and no whitespace, bullet, fence, URL or bare `#N`; near misses are
+`pr_invalid`. The link (`rel: pr`) and a review-phase stop land in one write.
+The same reference again writes nothing; another is `pr_conflict`. This step
+requires a fresh outward go and never links a loop-managed item.
+
+Publication is not close. After merge or abandonment, call
 `session.close(point, refs=..., next_skills=..., worktree=<builder worktree>)`.
-It writes the close stamp and the closed status in one write, then ends the
-pass.
+Refusals, in order: no outward go for the final round, no recorded PR
+(`pr_required`), a managed item, then an open or unreadable PR (`pr_open`).
+`gh pr view N --repo owner/repo --json state` reads the recorded PR live at
+close, never a caller's state or cache. Missing gh, a failed command and
+unreadable JSON all read as open. The atomic close stamp carries the PR and
+says `merged` or `closed unmerged`; only then does the pass end.
+
+After publication, a late `changes` review starts a fix round and returns to
+build; a late `pass`, a late review with no PR, or a fourth round is
+`late_review_refused`. All rounds count toward three; third-round changes stop
+the pass. After the passing fix round, record a new outward go before any
+further outward action or close. Both person and controller outward goes name
+the final review `round`. A legacy go with no round counts only before a PR
+is recorded; it authorizes nothing once the card has a PR.
+
+A refusal writes nothing and leaves the pass live. Other item writers still
+race against the held revision, so a concurrent write refuses `stale`, never
+half-links or half-closes. After a stop, resume the same live pass by its id;
+after a successful link, replaying it is a no-op; after a successful close,
+an open reports closed and takes no claim. Push, publication and merge stay
+with the caller: after losing a response, read the remote before repeating
+the outward action. No step deletes a remote branch.
 
 When the person says no to the outward actions, or takes the kept-local close,
 record their words with
@@ -553,8 +584,11 @@ its claim: the next open takes a new claim and needs no id, and the line says
 that instead. Either way the `Pass:` line stays, even when the plan card
 already showed the id.
 
-After a close, say how the ticket closed: through the outward actions, or kept
-local with nothing pushed. Give the worktree line the close returned (the
+While a pull request is open, unreadable, or awaiting a new go after a fix
+round, say the pass is still live and give the recorded pull request and the
+resume command. Report the managed stop as its one plain line.
+After a close, say whether the pull request merged, closed unmerged, or the
+ticket was kept local with nothing pushed. Give the worktree line the close returned (the
 path, its branch, what `git status` listed, and the `git worktree remove`
 command for the person to run), so no builder worktree is left in the
 repository unnamed. A worktree under `.claude/worktrees/<name>` stays until

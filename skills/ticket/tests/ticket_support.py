@@ -254,7 +254,9 @@ def build(repo, src, stage, rounds=0):
         return session
     go_outward(session)
     if stage == "S4":
+        session.record_pull_request("example/repo#14")
         return session
+    session.record_pull_request("example/repo#14")
     session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     return session
 

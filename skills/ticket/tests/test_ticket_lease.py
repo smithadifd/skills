@@ -18,7 +18,7 @@ import pytest
 
 import ticket
 from ledger_support import FakeLedger, build_ledger, open_ledger
-from ticket_support import KEY, TITLE, Source, build, refusal
+from ticket_support import KEY, TITLE, Source, build, go_outward, refusal
 
 LEDGER_REAL_CLI = os.environ.get("LEDGER_REAL_CLI", "")
 # The backends a (real) row runs on: the fake always, and the real ledger CLI when LEDGER_REAL_CLI names one.
@@ -120,7 +120,10 @@ def old_shape_pass(repo, cli, stage, rounds=1):
     as an open records it, so a later open of the same ticket records nothing more.
     """
 
-    session = build(repo, Source(), stage, rounds)
+    # A historical pre-link card: keep the old claim fixture independent of the new S4 PR step.
+    session = build(repo, Source(), "S3" if stage == "S4" else stage, rounds)
+    if stage == "S4":
+        go_outward(session)
     assert ticket.import_repo(repo, str(cli), say=lambda line: None) == 0
     ticket.LedgerStore(cli, KEY, TITLE).record_spec(Source().pull(KEY))
     return session.pass_id
@@ -247,6 +250,7 @@ def test_M8_an_old_shape_pass_with_no_lease_resumes_takes_no_lease_and_closes(re
     resumed = open_ledger(fake.path, Source(), pass_id=pass_id)
     assert (resumed.phase, resumed.live) == ("outward_go", True)
     assert fake.events()[before:] == []
+    resumed.record_pull_request("example/repo#14")
     resumed.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     assert resumed.phase == "closed"
     assert states(fake.events()) == [{"status": "closed", "source": "ticket"}]
