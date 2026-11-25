@@ -112,6 +112,7 @@ def test_H2_a_refused_close_writes_nothing_but_the_release(fake):
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     assert refusal(excinfo) == "stale"
+    assert "other-agent" in str(excinfo.value) and "other-session" in str(excinfo.value)
     assert keyed(after(fake, before)) == released(session)
     assert closed_states(fake) == []
     assert [e for e in fake.events() if e["kind"] == "item.stopped" and e["payload"]["phase"] == "close"] == []
@@ -249,6 +250,7 @@ def test_H48_an_outside_stop_before_close_is_refused_and_only_the_release_lands(
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",), next_skills=("ticket",))
     assert refusal(excinfo) == "stale"
+    assert "other-agent" in str(excinfo.value) and "other-session" in str(excinfo.value)
     assert keyed(after(fake, before)) == released(session)
     assert closed_states(fake) == []
     assert [e for e in fake.events() if e["kind"] == "item.stopped" and e["payload"]["phase"] == "close"] == []
@@ -441,14 +443,9 @@ def test_H20_a_review_round_and_its_stamp_land_together_or_not_at_all(fake):
 
 
 
-def test_H21_a_stale_close_after_the_live_pr_read_names_the_newest_writer(fake, monkeypatch):
+def test_H21_a_stale_write_names_the_newest_writer(fake):
     session = build_ledger(fake, Source(), "S4", 1)
-
-    def state(ref):
-        fake.outside("item.note", note("Concurrent write during the PR read."), actor="other-agent", session="other-session")
-        return "MERGED"
-
-    monkeypatch.setattr(ticket, "pull_request_state", state)
+    fake.outside("item.note", note("see PR 12"), actor="other-agent", session="other-session")
     with pytest.raises(ticket.StoreUnavailable) as excinfo:
         session.close("Ticket pass complete.", refs=("example/repo#14",))
     assert excinfo.value.code == "stale"

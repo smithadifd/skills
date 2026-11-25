@@ -2485,6 +2485,8 @@ class LedgerStore:
         self._row: Mapping[str, Any] | None = None
         self._live: dict[str, Any] | None = None
         self._read_token: str | None = None
+        # Diagnostics for that revision only; a closed export can hide its newest event.
+        self._newest_event: Mapping[str, Any] | None = None
         # No holder and no lease is kept here. The holder an open names travels with that open's claim or join
         # (``apply``), and the end reads the pass's holder and lease from a fresh read (``_release_lease``).
         # The item's hand-off as last read (design 6.8): the open hand-off, or the refusal an open through the
@@ -2851,6 +2853,7 @@ class LedgerStore:
                 handoff, problem = _handoff_outcome(events, self.key)
                 handed_off = _handed_off(events)
             self._card, self._item, self._row, self._live, self._read_token = card, item, row, live, token
+            self._newest_event = next((event for event in reversed(events) if str(event["id"]) == token), None)
             self._handoff, self._handoff_problem, self._handed_off = handoff, problem, handed_off
             self._role_go_problem = None
             if handoff is None:
@@ -4240,7 +4243,18 @@ class TicketPass:
 
         card, token = self.store.read()
         if token != self._token:
-            raise _stale(self.key, "a fresh read differs from the card this pass holds")
+            detail = "the card on disk changed" if isinstance(self.store, MarkdownStore) else "a fresh read differs from the card this pass holds"
+            if isinstance(self.store, LedgerStore):
+                newest = self.store._newest_event
+                writer = (
+                    f"event {newest['id']} written by actor={newest.get('actor') or '-'} "
+                    f"session={newest.get('session') or '-'}"
+                ) if newest is not None else "the newest event is not in the export"
+                detail = (
+                    f"the ledger answered stale_revision: stale revision for item {self.key}: "
+                    f"expected {self._token}, current is {token} ({writer})"
+                )
+            raise _stale(self.key, detail)
         return card
 
     def _write(self, events: list[tuple[str, Any]]) -> None:
@@ -4743,10 +4757,10 @@ class TicketPass:
         card = self._fresh()
         if not _outward_open(card, self._identity, self.key):
             raise GateRequired("an outward go is required before close")
+        self._require_unmanaged(card)
         ref = card.get("pr")
         if ref is None:
             raise TicketError(f"pr_required: ticket {self.key} has no recorded pull request")
-        self._require_unmanaged(card)
         # Validate caller input before adding the mandatory close evidence.
         _validate_stamp(self._stamp(point, next_skills, refs, phase="close", close=True)[1])
         state = pull_request_state(ref)
@@ -4807,6 +4821,8 @@ class TicketPass:
         self._require("outward_go")
         card = self._fresh()
         self._require_unmanaged(card)
+        if card.get("pr") is not None:
+            raise TicketError(f"pr_recorded: ticket {self.key} records pull request {card['pr']}; close only after it merges or closes")
         if not _has_declined(self._card, self._identity, self.key) or _has_go(self._card, "outward", self._identity, self.key):
             raise GateRequired("a kept-local close requires the person's declined outward go and no outward go")
         point = KEPT_LOCAL_POINT.format(revision=self._identity[0])
@@ -4905,14 +4921,14 @@ def pull_request_state(ref: str) -> str:
     try:
         result = subprocess.run(
             ["gh", "pr", "view", number, "--repo", repository, "--json", "state"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=REVIEW_RECORD_TIMEOUT_SECONDS,
         )
         if result.returncode:
             return "OPEN"
         answer = json.loads(result.stdout)
         state = answer.get("state") if type(answer) is dict else None
         return state if state in ("MERGED", "CLOSED") else "OPEN"
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return "OPEN"
 
 
@@ -5221,6 +5237,8 @@ def _import_batch(card: Mapping[str, Any]) -> list[dict[str, Any]]:
         live = card["pass"]
         purpose = f"ticket pass {live['id']} on {live['host']} at {live['started_at']}"
         batch.append(element("session.opened", {"purpose": purpose}, f"ticket-pass/{key}/{live['id']}/claimed"))
+    if card.get("pr") is not None:
+        batch.append(element("item.linked", {"rel": "pr", "target": card["pr"]}, ordinary()))
     if card["plan"] is not None:
         batch.append(element("item.note", {"text": f"ticket-plan:v{_RECORD_VERSION} {_canonical(card['plan'])}"}, ordinary()))
     for kind, name in (("decision", "decisions"), ("review", "reviews")):

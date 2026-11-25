@@ -496,12 +496,13 @@ requires a fresh outward go and never links a loop-managed item.
 
 Publication is not close. After merge or abandonment, call
 `session.close(point, refs=..., next_skills=..., worktree=<builder worktree>)`.
-Refusals, in order: no outward go for the final round, no recorded PR
-(`pr_required`), a managed item, then an open or unreadable PR (`pr_open`).
+Refusals, in order: no outward go for the final round, a managed item, no
+recorded PR (`pr_required`), then an open or unreadable PR (`pr_open`).
 `gh pr view N --repo owner/repo --json state` reads the recorded PR live at
-close, never a caller's state or cache. Missing gh, a failed command and
-unreadable JSON all read as open. The atomic close stamp carries the PR and
-says `merged` or `closed unmerged`; only then does the pass end.
+close, never a caller's state or cache. Missing gh, a failed command,
+unreadable JSON and a read exceeding the review-record timeout all read as
+open. The atomic close stamp carries the PR and says `merged` or
+`closed unmerged`; only then does the pass end.
 
 After publication, a late `changes` review starts a fix round and returns to
 build; a late `pass`, a late review with no PR, or a fourth round is
@@ -532,7 +533,9 @@ gates the close. From then on nothing leaves the machine:
 It writes the kept-local close stamp, `Closed kept local: the person declined
 the outward go for plan revision <N>, so nothing was pushed or opened.`, and
 the closed status in one write, then ends the pass. It refuses
-(`GateRequired`) without the recorded no. Close the ticket only through
+(`GateRequired`) without the recorded no. It also refuses `pr_recorded`
+whenever the card holds a PR, including after criteria change and a new plan:
+only `close` may close that published work. Close the ticket only through
 `close` or `close_local`: never a ledger status written by hand, and never a
 note in place of the person's words. A resume that finds the no already
 recorded lands at `outward_go`; call `close_local` (a second no is refused).

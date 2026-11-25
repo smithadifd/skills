@@ -159,7 +159,7 @@ def test_E6_a_stale_token_refuses_every_write(repo, step):
     src = Source()
     session = _e6_live(repo, src, step)
     outside = _outsider_writes_tried(repo, src, session)
-    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+    with pytest.raises(ticket.StoreUnavailable, match="the card on disk changed") as excinfo:
         _e6_run(session, step)
     assert refusal(excinfo) == "stale"
     assert session.live is False

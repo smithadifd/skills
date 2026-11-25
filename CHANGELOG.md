@@ -21,6 +21,7 @@ Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0
 ## Unreleased
 
 - `ticket` records its PR atomically, closes only on live merged/closed state, leaves loop-managed items to the loop, and requires a fresh round-bound outward go after fixes.
+- `ticket` prevents kept-local closure of published work, preserves PR links on markdown import and writer diagnostics on stale reads, and bounds live PR reads by the review-record timeout.
 
 - `ticket` refuses plan-card items that are not a list or tuple before converting
   them, so a bare string cannot count its characters as planned parts.

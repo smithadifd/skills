@@ -161,7 +161,9 @@ def test_K3_a_kept_local_close_needs_the_persons_decline_and_no_go(repo, answer)
     if answer == "none yet":
         session = build(repo, src, "S3", 1)
     else:
-        build(repo, src, "S4", 1).end()
+        unpublished = build(repo, src, "S3", 1)
+        go_outward(unpublished)
+        unpublished.end()
         edit_card(repo, _add_decline("settled"))
         session = open_pass(repo, src)
     before = card_bytes(repo)

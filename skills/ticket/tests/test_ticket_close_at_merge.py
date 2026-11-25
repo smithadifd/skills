@@ -25,7 +25,7 @@ def approved(fake, rounds=1):
     return session
 
 
-def gh(monkeypatch, tmp_path, output='{"state":"OPEN"}', status=0):
+def gh(monkeypatch, tmp_path, output='{"state":"OPEN"}', status=0, delay=0):
     directory = tmp_path / "gh-bin"
     directory.mkdir(exist_ok=True)
     command = directory / "gh"
@@ -33,9 +33,9 @@ def gh(monkeypatch, tmp_path, output='{"state":"OPEN"}', status=0):
     # Absolute interpreter: even the missing-gh test may replace PATH with an empty directory.
     import sys
     command.write_text(
-        f"#!{sys.executable}\nimport json,sys\n"
+        f"#!{sys.executable}\nimport json,sys,time\n"
         f"open({str(arguments)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
-        f"print({output!r})\nsys.exit({status})\n", encoding="utf-8",
+        f"time.sleep({delay!r})\nprint({output!r})\nsys.exit({status})\n", encoding="utf-8",
     )
     command.chmod(0o755)
     monkeypatch.setenv("PATH", str(directory) + os.pathsep + os.environ["PATH"])
@@ -119,6 +119,49 @@ def test_B3_unreadable_state_fails_closed(fake, monkeypatch, tmp_path, mode):
     unchanged(fake, session, lambda: session.close("Done."), ticket.TicketError, "pr_open")
 
 
+@pytest.mark.parametrize("output", ["not json", '{"state":"merged"}', '{"state":"UNKNOWN"}', "{}"])
+def test_B3_reader_normalizes_unreadable_and_noncanonical_state(monkeypatch, tmp_path, output):
+    gh(monkeypatch, tmp_path, output)
+    assert ticket.pull_request_state(PR) == "OPEN"
+
+
+def test_B3_slow_reader_refuses_close_without_writing(fake, monkeypatch, tmp_path):
+    session = approved(fake)
+    session.record_pull_request(PR)
+    monkeypatch.setattr(ticket, "REVIEW_RECORD_TIMEOUT_SECONDS", 0.1)
+    gh(monkeypatch, tmp_path, '{"state":"MERGED"}', delay=0.5)
+    unchanged(fake, session, lambda: session.close("Done."), ticket.TicketError, "pr_open")
+
+
+def test_B2_close_independently_refuses_noncanonical_state(fake, monkeypatch):
+    session = approved(fake)
+    session.record_pull_request(PR)
+    monkeypatch.setattr(ticket, "pull_request_state", lambda ref: "UNKNOWN")
+    unchanged(fake, session, lambda: session.close("Done."), ticket.TicketError, "pr_open")
+
+
+def test_B10_linked_pr_cannot_close_local_after_new_plan(fake):
+    from ticket_support import go_plan, present
+    source = Source()
+    session = build_ledger(fake, source, "S4", 1)
+    session.end()
+    source.edit("text")
+    session = open_ledger(fake, source)
+    present(session)
+    go_plan(session)
+    session.begin_build()
+    passing(session)
+    session.record_outward_declined(evidence="conversation:no", verbatim="Keep this plan local.")
+    unchanged(fake, session, session.close_local, ticket.TicketError, "pr_recorded")
+
+
+def test_B6_only_outward_go_may_name_review_round(fake):
+    session = approved(fake)
+    decision = dict(fake.store().read()[0]["decisions"][-1], gate="plan")
+    unchanged(fake, session, lambda: session._write([("decision", decision)]),
+              ticket.TicketError, "only an outward go names a review round")
+
+
 def test_B4_close_requires_recorded_pr(fake):
     session = approved(fake)
     assert fake.store().read()[0].get("pr") is None
@@ -189,8 +232,9 @@ def managed_backend(request, tmp_path, monkeypatch):
     return backend
 
 
-@pytest.mark.parametrize("local", [False, True], ids=["close", "close-local"])
-def test_B8_managed_close_is_a_live_write_free_stop(managed_backend, local):
+@pytest.mark.parametrize("mode", ["close", "close-without-pr", "close-local"])
+def test_B8_managed_close_is_a_live_write_free_stop(managed_backend, mode):
+    local = mode == "close-local"
     backend = managed_backend
     session = open_ledger(backend.path, Source(), holder="loop-holder")
     from ticket_support import present, go_plan
@@ -202,14 +246,15 @@ def test_B8_managed_close_is_a_live_write_free_stop(managed_backend, local):
         session.record_outward_declined(evidence="conversation:no", verbatim="Keep it local.")
     else:
         go_outward(session)
-        # The loop owns linking: seed its existing PR, not a pass-written generic link.
-        if isinstance(backend, Fake):
-            backend.write("item.linked", {"rel": "pr", "target": PR, "source": "loop"})
-        if isinstance(backend, Real):
-            loop, open_database = ledger_library(backend.path)
-            with open_database(backend.db) as database:
-                loop.link_pull_request(database, KEY, "loop-holder", "example/repo", 14)
-        session = open_ledger(backend.path, Source(), pass_id=session.pass_id, holder="loop-holder")
+        if mode == "close":
+            # The loop owns linking: seed its existing PR, not a pass-written generic link.
+            if isinstance(backend, Fake):
+                backend.write("item.linked", {"rel": "pr", "target": PR, "source": "loop"})
+            if isinstance(backend, Real):
+                loop, open_database = ledger_library(backend.path)
+                with open_database(backend.db) as database:
+                    loop.link_pull_request(database, KEY, "loop-holder", "example/repo", 14)
+            session = open_ledger(backend.path, Source(), pass_id=session.pass_id, holder="loop-holder")
     before = backend.events()
     appends = len(backend.fake.appends()) if isinstance(backend, Fake) else None
     operation = session.close_local if local else lambda: session.close("Done.")
@@ -246,6 +291,25 @@ def test_B1_a_concurrent_link_writer_cannot_land_half_a_step(fake):
     before = fake.events()
     resumed.record_pull_request(PR)
     assert fake.events() == before
+
+
+@pytest.mark.parametrize("operation", ["close", "record_pull_request"])
+def test_fresh_read_refusal_names_latest_writer_without_attempting_write(fake, operation):
+    session = approved(fake)
+    fake.outside("item.note", {"text": "Concurrent note."}, actor="new-agent", session="new-session")
+    appends = len(fake.appends())
+    with pytest.raises(ticket.StoreUnavailable) as caught:
+        if operation == "close":
+            session.close("Done.")
+        else:
+            session.record_pull_request(PR)
+    assert caught.value.code == "stale"
+    assert "actor=new-agent" in str(caught.value)
+    assert "session=new-session" in str(caught.value)
+    # Only failure cleanup may append; the refused step itself must not.
+    assert all(event["kind"] in ("session.closed", "item.state")
+               for call in fake.appends()[appends:] for event in call.batch)
+    assert not any(event["kind"] == "item.linked" for event in fake.events())
 
 
 def test_B11_skill_documents_close_gate_and_fix_round():
