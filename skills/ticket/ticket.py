@@ -4251,8 +4251,7 @@ class TicketPass:
                     f"session={newest.get('session') or '-'}"
                 ) if newest is not None else "the newest event is not in the export"
                 detail = (
-                    f"the ledger answered stale_revision: stale revision for item {self.key}: "
-                    f"expected {self._token}, current is {token} ({writer})"
+                    f"a fresh read found revision {token}, expected {self._token} ({writer})"
                 )
             raise _stale(self.key, detail)
         return card

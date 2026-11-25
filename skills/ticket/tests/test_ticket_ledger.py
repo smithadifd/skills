@@ -454,6 +454,41 @@ def test_H21_a_stale_write_names_the_newest_writer(fake):
     assert closed_states(fake) == []
 
 
+@pytest.mark.parametrize("kind", ["item.note", "item.stopped"])
+def test_H21b_an_outside_write_during_pr_read_refuses_at_append(fake, monkeypatch, kind):
+    src = Source()
+    session = build_ledger(fake, src, "S4", 1)
+    held = session._token
+    before, appends = fake.events(), len(fake.appends())
+
+    def state(ref):
+        assert ref == "example/repo#14"
+        payload = note("Concurrent note.") if kind == "item.note" else {
+            "point": "Waiting on the person.", "phase": "review", "skills": [], "refs": [],
+        }
+        fake.outside(kind, payload, actor="during-read-agent", session="during-read-session")
+        return "MERGED"
+
+    monkeypatch.setattr(ticket, "pull_request_state", state)
+    with pytest.raises(ticket.StoreUnavailable) as excinfo:
+        session.close("Ticket pass complete.", refs=("example/repo#14",))
+    assert refusal(excinfo) == "stale"
+    assert "actor=during-read-agent" in str(excinfo.value)
+    assert "session=during-read-session" in str(excinfo.value)
+    refused = fake.appends()[appends]
+    assert refused.code == "stale_revision"
+    assert refused.argv[-2:] == ["--expect-revision", held]
+    assert kinds(refused.batch) == ["item.stopped", "item.state"]
+    assert keyed(after(fake, before)[1:]) == released(session)
+    assert closed_states(fake) == []
+    assert not any(event["kind"] == "item.stopped" and event["payload"]["phase"] == "close"
+                   for event in fake.events())
+    assert session.live is False
+    resumed = open_ledger(fake, src)
+    assert resumed.phase == "outward_go"
+    assert resumed.approved("outward") is True
+
+
 def test_H22_a_key_conflict_is_stale_not_success(fake):
     session = build_ledger(fake, Source(), "S2", 0)
     message = "idempotency_key 'ticket-write/x' already recorded as a different event"

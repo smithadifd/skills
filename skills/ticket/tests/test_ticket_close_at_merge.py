@@ -296,7 +296,9 @@ def test_B1_a_concurrent_link_writer_cannot_land_half_a_step(fake):
 @pytest.mark.parametrize("operation", ["close", "record_pull_request"])
 def test_fresh_read_refusal_names_latest_writer_without_attempting_write(fake, operation):
     session = approved(fake)
+    held = session._token
     fake.outside("item.note", {"text": "Concurrent note."}, actor="new-agent", session="new-session")
+    current = str(fake.events()[-1]["id"])
     appends = len(fake.appends())
     with pytest.raises(ticket.StoreUnavailable) as caught:
         if operation == "close":
@@ -304,6 +306,7 @@ def test_fresh_read_refusal_names_latest_writer_without_attempting_write(fake, o
         else:
             session.record_pull_request(PR)
     assert caught.value.code == "stale"
+    assert f"a fresh read found revision {current}, expected {held} (" in str(caught.value)
     assert "actor=new-agent" in str(caught.value)
     assert "session=new-session" in str(caught.value)
     # Only failure cleanup may append; the refused step itself must not.
