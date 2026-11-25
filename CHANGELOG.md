@@ -15,10 +15,13 @@ The headings below are plugin versions, the number `claude plugin list` shows fo
 | v1.3.0 | 0.13.0 | 0.13.0 |
 | v1.4.0 | 0.14.0 | 0.14.0 |
 | v1.5.0 | 0.15.0 | 0.15.0 |
+| v1.6.0 | 0.16.0 | 0.16.0 |
 
 Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0.12.0 (tag v1.2.0). Only tags from v1.2.0 on have an entry, because this file did not exist at earlier tags.
 
-## Unreleased
+## 0.16.0
+
+This is the release tagged v1.6.0 in the repository. It mainly carries the `ticket` skill's PR recording and live-state closure, plan-card validation and delegation guidance, context-bound recommendations, review-document recording, ledger intake and hand-offs, leases and item facts, plus `setup --replace` and README installation guidance.
 
 - `ticket` records its PR atomically, closes only on live merged/closed state, leaves loop-managed items to the loop, and requires a fresh round-bound outward go after fixes.
 - `ticket` prevents kept-local closure of published work, preserves PR links on markdown import and writer diagnostics on stale reads, and bounds live PR reads by the review-record timeout.
