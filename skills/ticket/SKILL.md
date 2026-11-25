@@ -487,73 +487,25 @@ After PR publication, before close: `session.record_lane_receipts(paths,
 published_pr=<URL>)` passes lane documents unchanged.
 Never approval; failures continue. Setup: design 6.10.
 
-Immediately after publication, call `session.record_pull_request("owner/repo#N")`.
-The reference grammar is exactly ASCII owner/repo#N, with a positive decimal
-number and no whitespace, bullet, fence, URL or bare `#N`; near misses are
-`pr_invalid`. The link (`rel: pr`) and a review-phase stop land in one write.
-The same reference again writes nothing; another is `pr_conflict`. This step
-requires a fresh outward go and never links a loop-managed item.
+Follow the [close protocol](references/ticket-design.md#611-close-at-merge-and-kept-local)
+for each step:
 
-Publication is not close. After merge or abandonment, call
-`session.close(point, refs=..., next_skills=..., worktree=<builder worktree>)`.
-Refusals, in order: no outward go for the final round, a managed item, no
-recorded PR (`pr_required`), then an open or unreadable PR (`pr_open`).
-`gh pr view N --repo owner/repo --json state` reads the recorded PR live at
-close, never a caller's state or cache. Missing gh, a failed command,
-unreadable JSON and a read exceeding the review-record timeout all read as
-open. The atomic close stamp carries the PR and says `merged` or
-`closed unmerged`; only then does the pass end.
-
-After publication, a late `changes` review starts a fix round and returns to
-build; a late `pass`, a late review with no PR, or a fourth round is
-`late_review_refused`. All rounds count toward three; third-round changes stop
-the pass. After the passing fix round, record a new outward go before any
-further outward action or close. Both person and controller outward goes name
-the final review `round`. A legacy go with no round counts only before a PR
-is recorded; it authorizes nothing once the card has a PR.
-
-A refusal writes nothing and leaves the pass live. Other item writers still
-race against the held revision, so a concurrent write refuses `stale`, never
-half-links or half-closes. After a stop, resume the same live pass by its id;
-after a successful link, replaying it is a no-op; after a successful close,
-an open reports closed and takes no claim. Push, publication and merge stay
-with the caller: after losing a response, read the remote before repeating
-the outward action. No step deletes a remote branch.
-
-When the person says no to the outward actions, or takes the kept-local close,
-record their words with
-`session.record_outward_declined(evidence=..., verbatim=<exact span copied from their prompt>)`.
-The no is a ticket decision of its own, bound to the captured utterance the
-way a go is. Report the bound election, or the exact line
-`declined go recorded, not bound to a captured utterance`. The binding never
-gates the close. From then on nothing leaves the machine:
-`require_outward_go()` refuses, `approved("outward")` is false, and a later
-`record_go("outward")` is refused. Then call
-`session.close_local(refs=..., next_skills=..., worktree=<builder worktree>)`.
-It writes the kept-local close stamp, `Closed kept local: the person declined
-the outward go for plan revision <N>, so nothing was pushed or opened.`, and
-the closed status in one write, then ends the pass. It refuses
-(`GateRequired`) without the recorded no. It also refuses `pr_recorded`
-whenever the card holds a PR, including after criteria change and a new plan:
-only `close` may close that published work. Close the ticket only through
-`close` or `close_local`: never a ledger status written by hand, and never a
-note in place of the person's words. A resume that finds the no already
-recorded lands at `outward_go`; call `close_local` (a second no is refused).
-
-Both closes take the builder's worktree, the path `builder-core` reported
-(section 5). The worktree is named and kept: the close never removes, moves
-or writes anything there. After the close the line names the path, says when
-it sits under the target repository's `.claude/worktrees`, names its branch
-(a builder agent's `worktree-agent-*` too) as left in place, not deleted, and
-says what `git status --porcelain --ignored --untracked-files=all` listed
-there: nothing, a short summary, or that it could not be read. It ends with
-the command the person may run, `git worktree remove <path>`, with the given
-path shell-quoted and never `--force`. Whether to run it is the person's
-call; the line never says removal is safe. A path that goes through a
-symbolic link is named with the link and no command. Until the person runs
-the command, a worktree under `.claude/worktrees/<name>` stays in the
-repository as an untracked folder. The close returns that line;
-`ticket.tidy_worktree(<path>)` reads it again later.
+- Immediately after publication, call `session.record_pull_request("owner/repo#N")`
+  with a fresh outward go; `pr_invalid` and `pr_conflict` refuse.
+- Publication is not close. Call `session.close(point, refs=..., next_skills=...,
+  worktree=<builder worktree>)` after merge or abandonment. Refusals, in order:
+  no outward go for the final round, a managed item, `pr_required`, `pr_open`.
+  Read live with `gh pr view`; the stamp says `merged` or `closed unmerged`.
+- A late `changes` review starts a fix round; after it passes, record a
+  new outward go naming that round. Invalid late reviews are `late_review_refused`.
+- When the person declines, record
+  `session.record_outward_declined(evidence=..., verbatim=<exact span copied from their prompt>)`.
+  Report the bound election, or `declined go recorded, not bound to a captured utterance`.
+  Nothing then leaves the machine. Call `session.close_local(refs=..., next_skills=...,
+  worktree=<builder worktree>)`; without the no it is `GateRequired`, with a PR `pr_recorded`.
+- The worktree is named and kept. Give its returned status and branch line and
+  `git worktree remove <path>`, never `--force`; `.claude/worktrees/<name>` stays
+  until the person runs it. The close never removes it.
 
 ## More-information exits
 
