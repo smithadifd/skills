@@ -21,13 +21,13 @@ import errno
 import fcntl
 import functools
 import hashlib
-import importlib.util
 import json
 import math
 import os
 import re
 import secrets
 import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, Sequence
 
 # The store phases, shared by both stores (design section 2).
 PHASES = ("orient", "plan", "build", "review", "close")
@@ -1996,10 +1996,6 @@ def _decided_text(decision: Any) -> str | None:
     return f"{_DECIDED_PREFIX}{_one_line(decision['effect'])} (by {by})"
 
 
-def _one_line(text: Any) -> str:
-    return " ".join(str(text).split())
-
-
 @dataclass(frozen=True)
 class _Answer:
     """One answer of the ledger CLI: its envelope's ``ok``, ``data`` and ``error``.
@@ -3459,33 +3455,297 @@ class LedgerStore:
 LEDGER_SELECTOR = "TICKET_LEDGER_CLI"
 # Seconds the capability probe (``append-many --help``) may run before the CLI counts as not running.
 LEDGER_PROBE_TIMEOUT = 10.0
-# The shared rule: ``skills/_lib/ledger_cli.py``, beside this skill's directory.
-LEDGER_RULE_PATH = Path(__file__).resolve().parent.parent / "_lib" / "ledger_cli.py"
+# --- BEGIN inline ledger rule (skills/_lib/ledger_cli.py) ---
+# Verbatim dependency closure, pinned by test_ticket_inline_ledger_rule.py.
+# Only LIB_DIR is re-anchored for this skill's location.
+LIB_DIR = Path(__file__).resolve().parent.parent / "_lib"
+CONFIG_PATH = LIB_DIR.parent / "topic" / "config.json"
+OVERRIDE_PATH = "~/.claude/skill-config/topic.json"
+CONFIG_KEY = "ledger_cli"
+RULE_EXPLICIT = "explicit setting"
+RULE_OFF = "off by setting"
+RULE_PATH = "ledger on PATH with LEDGER_DB"
+RULE_NOT_CONFIGURED = "not configured"
+RULES = (RULE_EXPLICIT, RULE_OFF, RULE_PATH, RULE_NOT_CONFIGURED)
+OPT_OUT = "none"
+LEDGER_COMMAND = "ledger"
+LEDGER_DATABASE = "LEDGER_DB"
+PROBE_TIMEOUT_SECONDS = 10.0
+CONFIG_SOURCE = f"{CONFIG_KEY} in the topic config"
+MOVED_TOKEN = "ledger_cli_moved:"
 
 
-def _load_ledger_rule():
-    """The shared rule every skill uses to decide whether the ledger is on."""
+class ConfigError(ValueError):
+    """The `ledger_cli` key holds something other than a string."""
 
-    spec = importlib.util.spec_from_file_location("ticket_ledger_cli", LEDGER_RULE_PATH)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load the shared ledger rule {LEDGER_RULE_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    # Loading the shared helper must not leave bytecode beside it.
-    saved = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
+
+class LedgerCallError(Exception):
+    """The CLI could not run, timed out, or exited non-zero: one line to report."""
+
+
+class Decision:
+    """What `decide` chose: the CLI (None when the ledger is off), the rule that chose, and why."""
+
+    __slots__ = ("cli", "rule", "detail")
+
+    def __init__(self, cli: Optional[str], rule: str, detail: str):
+        if rule not in RULES:
+            raise ValueError(f"unknown ledger rule {rule!r}")
+        if (cli is not None) != (rule in (RULE_EXPLICIT, RULE_PATH)):
+            raise ValueError(f"rule {rule!r} does not match cli {cli!r}")
+        self.cli = cli
+        self.rule = rule
+        self.detail = detail
+
+    @property
+    def on(self) -> bool:
+        return self.cli is not None
+
+    @property
+    def reason(self) -> str:
+        """`<rule>: <detail>`, the part of the ledger line in parentheses."""
+        return f"{self.rule}: {self.detail}"
+
+    @property
+    def line(self) -> str:
+        """The ledger line every skill prints first: `ledger on|off (<rule>: <detail>)`."""
+        return f"ledger {'on' if self.on else 'off'} ({self.reason})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Decision):
+            return NotImplemented
+        return (self.cli, self.rule, self.detail) == (other.cli, other.rule, other.detail)
+
+    def __repr__(self) -> str:
+        return f"Decision(cli={self.cli!r}, rule={self.rule!r}, detail={self.detail!r})"
+
+
+def _one_line(text: Any) -> str:
+    return " ".join(str(text).split())
+
+
+def _read_object(
+    path: Path, required: bool, who: str, quiet: bool
+) -> tuple[dict[str, Any], Optional[str]]:
+    """A JSON object from `path` and None; or `{}` and what was wrong, with one stderr line.
+
+    A missing file that is not required is `{}` and None: it sets nothing.
+    """
+
+    def unusable(line: str) -> tuple[dict[str, Any], str]:
+        if not quiet:
+            sys.stderr.write(line)
+        return {}, f"{_one_line(path)} could not be read"
+
     try:
-        spec.loader.exec_module(module)
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if required:
+            return unusable(f"{who}: could not read {path} — {CONFIG_KEY} is unset\n")
+        return {}, None
+    except (OSError, UnicodeDecodeError) as exc:
+        return unusable(f"{who}: could not read {path} ({exc}) — ignoring it\n")
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        return unusable(f"{who}: {path} is not valid JSON ({exc}) — ignoring it\n")
+    if not isinstance(data, dict):
+        return unusable(f"{who}: {path} is not a JSON object — ignoring it\n")
+    return data, None
+
+
+def _config_value(
+    config_path: Optional[Path], who: str, required_shipped: bool, quiet: bool
+) -> tuple[Any, Optional[str]]:
+    """The raw `ledger_cli` value and the config problem that stands, if any.
+
+    An explicit `config_path` is the only source. Otherwise each source keeps
+    its own value and read status, weighed in precedence order: the override
+    file, then the shipped config. A source that cannot be read stops the
+    walk with its problem and no value, so a value beneath it is never used.
+    A source that holds the key (even as null) settles the value; a problem in
+    a source beneath it is still returned, so an unset value never falls
+    through to the PATH rule past a broken file.
+    """
+    if config_path is not None:
+        config, problem = _read_object(Path(config_path), True, who, quiet)
+        return config.get(CONFIG_KEY), problem
+    shipped, shipped_problem = _read_object(CONFIG_PATH, required_shipped, who, quiet)
+    override, override_problem = _read_object(
+        Path(OVERRIDE_PATH).expanduser(), False, who, quiet
+    )
+    for config, problem in ((override, override_problem), (shipped, shipped_problem)):
+        if problem is not None:
+            return None, problem
+        if CONFIG_KEY in config:
+            return config[CONFIG_KEY], shipped_problem
+    return None, None
+
+
+def _explicit(value: str, off_detail: str, on_detail: str) -> Decision:
+    """A non-blank explicit setting: `none` is off, anything else names the CLI."""
+    if value.lower() == OPT_OUT:
+        return Decision(None, RULE_OFF, off_detail)
+    return Decision(os.path.expanduser(value), RULE_EXPLICIT, on_detail)
+
+
+def probe(cli: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> Optional[str]:
+    """None when `cli` passes the compatibility check, else what failed, in a few words.
+
+    The check: `<cli> append-many --help` exits 0 within `timeout` seconds and
+    its output names `--expect-revision`. Output that is not UTF-8 is decoded
+    with replacement, so it fails the check rather than raising.
+    """
+    try:
+        result = subprocess.run(
+            [cli, "append-many", "--help"],
+            input="",
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"append-many --help did not finish within {timeout:g}s"
     except OSError as exc:
-        raise ImportError(
-            f"the shared ledger rule {LEDGER_RULE_PATH} is missing ({exc}); reinstall the skills "
-            "(`install.sh` installs `_lib` beside them)"
-        ) from exc
-    finally:
-        sys.dont_write_bytecode = saved
-    return module
+        return str(exc)
+    if result.returncode != 0 or "--expect-revision" not in result.stdout:
+        return f"append-many --help exited {result.returncode}"
+    return None
 
 
-_LEDGER_RULE = _load_ledger_rule()
+def _on_path(probe_timeout: float) -> Decision:
+    """Rule 2: a compatible `ledger` on PATH with a usable `LEDGER_DB`, or off with the reason."""
+    found = shutil.which(LEDGER_COMMAND)
+    if found is None:
+        return Decision(
+            None, RULE_NOT_CONFIGURED, f"no {LEDGER_COMMAND} CLI on PATH and no setting names one"
+        )
+    database = os.environ.get(LEDGER_DATABASE, "")
+    if not database:
+        return Decision(
+            None,
+            RULE_NOT_CONFIGURED,
+            f"{found} is on PATH but {LEDGER_DATABASE} is not set, and the ledger picks no default database",
+        )
+    if not os.path.isfile(database):
+        return Decision(
+            None,
+            RULE_NOT_CONFIGURED,
+            f"{found} is on PATH but {LEDGER_DATABASE} names {_one_line(database)}, which is not a file",
+        )
+    if probe(found, probe_timeout) is not None:
+        return Decision(
+            None,
+            RULE_NOT_CONFIGURED,
+            f"{found} on PATH lacks append-many or --expect-revision, or does not run",
+        )
+    return Decision(
+        found, RULE_PATH, f"{found} found on PATH, {LEDGER_DATABASE} names {_one_line(database)}"
+    )
+
+
+def decide(
+    config_path: Optional[Path] = None,
+    *,
+    selector_env: Optional[str] = None,
+    who: str = CONFIG_KEY,
+    strict: bool = False,
+    required_shipped: bool = False,
+    quiet: bool = False,
+    probe_timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> Decision:
+    """The one rule (see the module text): whether the ledger is on, through which CLI, and which rule chose.
+
+    `selector_env` names an environment variable that is an explicit setting
+    ahead of the config key (the ticket skill's `TICKET_LEDGER_CLI`). `strict`
+    raises ConfigError for a key that is not a string; otherwise such a key is
+    off. `required_shipped` reports a missing shipped config on stderr (topic's
+    long-standing behaviour); otherwise a missing one is silent, because a
+    standalone install of one skill may not carry the topic skill. `quiet`
+    mutes every stderr line. `probe_timeout` bounds the compatibility check.
+    """
+    if selector_env:
+        value = os.environ.get(selector_env, "").strip()
+        if value:
+            return _explicit(value, f"{selector_env}={OPT_OUT}", f"{selector_env} names it")
+    value, problem = _config_value(config_path, who, required_shipped, quiet)
+    if value is not None and not isinstance(value, str):
+        if strict:
+            raise ConfigError(
+                f"{CONFIG_KEY} must be a string naming the ledger executable, "
+                f"got {type(value).__name__}"
+            )
+        return Decision(None, RULE_NOT_CONFIGURED, f"{CONFIG_SOURCE} is not a string")
+    value = (value or "").strip()
+    if value:
+        return _explicit(value, f"{CONFIG_SOURCE} is {OPT_OUT}", f"{CONFIG_SOURCE} names it")
+    if problem is not None:
+        return Decision(None, RULE_NOT_CONFIGURED, f"{problem}, so no ledger on PATH is used")
+    return _on_path(probe_timeout)
+
+
+def setup_command() -> str:
+    """The exact command that pins the ledger CLI, for a refusal to name."""
+    return f"python3 {shlex.quote(str(LIB_DIR / 'ledger_cli.py'))} setup"
+
+
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _moved(cli: str) -> bool:
+    """True when `cli`, after `~` expansion, is an absolute path that is not an executable file."""
+    path = os.path.expanduser(cli)
+    return os.path.isabs(path) and not _is_executable_file(path)
+
+
+def require_runnable(cli: str) -> None:
+    """Raise LedgerCallError (`ledger_cli_moved: ...`) when an absolute `cli` is not an executable file.
+
+    A bare name is not checked: it is looked up the way the person who wrote it
+    meant. No branch of this function reads `PATH`.
+    """
+    if _moved(cli):
+        raise LedgerCallError(
+            f"{MOVED_TOKEN} the ledger CLI {_one_line(cli)} is not an executable file, so nothing was run; "
+            f"rerun setup with `{setup_command()}`"
+        )
+# --- END inline ledger rule ---
+
+
+class _LedgerRule:
+    """The shared-rule interface; config patches update the inline functions' globals."""
+
+    decide = staticmethod(decide)
+    RULE_EXPLICIT = RULE_EXPLICIT
+    RULE_PATH = RULE_PATH
+    _read_object = staticmethod(_read_object)
+    require_runnable = staticmethod(require_runnable)
+    LedgerCallError = LedgerCallError
+    probe = staticmethod(probe)
+
+    @property
+    def CONFIG_PATH(self):
+        return CONFIG_PATH
+
+    @CONFIG_PATH.setter
+    def CONFIG_PATH(self, value):
+        global CONFIG_PATH
+        CONFIG_PATH = value
+
+    @property
+    def OVERRIDE_PATH(self):
+        return OVERRIDE_PATH
+
+    @OVERRIDE_PATH.setter
+    def OVERRIDE_PATH(self, value):
+        global OVERRIDE_PATH
+        OVERRIDE_PATH = value
+
+
+_LEDGER_RULE = _LedgerRule()
 
 
 @dataclass(frozen=True)

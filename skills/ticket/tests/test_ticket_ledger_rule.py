@@ -90,16 +90,18 @@ def test_the_ticket_variable_comes_before_the_topic_config(repo, tmp_path, monke
     )
 
 
-def test_a_ticket_installed_without_the_shared_rule_says_how_to_fix_it(tmp_path):
+def test_a_ticket_installed_without_the_shared_rule_still_decides_the_store(tmp_path, monkeypatch):
     lone = tmp_path / "skills" / "ticket"
     lone.mkdir(parents=True)
     (lone / "ticket.py").write_bytes((SKILL_DIR / "ticket.py").read_bytes())
+    monkeypatch.setenv("TICKET_LEDGER_CLI", "none")
     result = subprocess.run(
-        [sys.executable, str(lone / "ticket.py"), "find-cards", str(tmp_path)],
-        capture_output=True, text=True, check=False,
+        [sys.executable, "-c", "import ticket; print(ticket.select_store().line)"],
+        cwd=lone, capture_output=True, text=True, check=False,
     )
-    assert result.returncode != 0
-    assert "is missing" in result.stderr and "reinstall the skills" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "markdown (off by setting: TICKET_LEDGER_CLI=none)\n"
+    assert result.stderr == ""
 
 
 def test_the_choice_is_the_shared_rules_decision(repo, tmp_path, monkeypatch):

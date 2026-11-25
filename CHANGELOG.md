@@ -16,8 +16,17 @@ The headings below are plugin versions, the number `claude plugin list` shows fo
 | v1.4.0 | 0.14.0 | 0.14.0 |
 | v1.5.0 | 0.15.0 | 0.15.0 |
 | v1.6.0 | 0.16.0 | 0.16.0 |
+| v1.6.1 | 0.16.1 | 0.16.1 |
 
 Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0.12.0 (tag v1.2.0). Only tags from v1.2.0 on have an entry, because this file did not exist at earlier tags.
+
+## 0.16.1
+
+This is the release tagged v1.6.1 in the repository. It makes the `ticket` skill's ledger rule self-contained for standalone installation.
+
+### The ticket skill carries the shared ledger rule inline
+
+`ticket.py` now carries the exact dependency closure it uses from `skills/_lib/ledger_cli.py`, with an AST equality test preventing drift and an import-entry-point check keeping it compatible with strict-root installation. Only the shared library directory is re-anchored. Store selection, precedence, probes and refusals are unchanged. The sole behavior change is that a ticket skill installed without `skills/_lib` still decides the ledger rule instead of failing to load.
 
 ## 0.16.0
 
