@@ -52,6 +52,79 @@ def test_E1_plan_and_outward_go_are_hard_stops(repo):
     assert session.phase == "outward_go"
 
 
+@pytest.mark.parametrize("gate, stage", [("plan", "S1"), ("outward", "S3")])
+def test_go_without_token_writes_nothing_and_keeps_the_stop_open(repo, gate, stage):
+    session = build(repo, Source(), stage)
+    before = read_card(repo)
+    with pytest.raises(ticket.GateRequired) as caught:
+        session.record_go(gate, evidence="conversation:go", verbatim="Go.")
+    assert str(caught.value) == (
+        f"go_token_missing: ticket {KEY}: the {gate} go names neither the ticket id {KEY} "
+        f"nor the pass id's last four characters {session.pass_id[-4:]}. "
+        "Nothing was written; the pass stays live."
+    )
+    assert read_card(repo)["decisions"] == before["decisions"], "a refused go must write no decision event"
+    assert read_card(repo) == before
+    assert session.live is True
+    assert session.phase == f"{gate}_go"
+    session.record_go(gate, evidence="conversation:go", verbatim=f"Go {KEY}.")
+    assert session.approved(gate)
+
+
+@pytest.mark.parametrize("gate, stage", [("plan", "S1"), ("outward", "S3")])
+@pytest.mark.parametrize("token", ["key", "suffix", "lowercase"])
+def test_go_accepts_the_key_or_live_pass_suffix_without_changing_words(repo, gate, stage, token):
+    session = build(repo, Source(), stage)
+    name = {"key": KEY, "suffix": session.pass_id[-4:].upper(), "lowercase": KEY.lower()}[token]
+    words = f"Go ({name})."
+    session.record_go(gate, evidence="conversation:go", verbatim=f"  {words}  ")
+    assert read_card(repo)["decisions"][-1]["verbatim"] == words
+    assert session.approved(gate)
+
+
+@pytest.mark.parametrize(
+    "words, accepted",
+    [
+        ("go ABC-123", False), ("xABC-12", False), ("ABC-12x", False),
+        ("_ABC-12", False), ("ABC-12_", False), ("-ABC-12", False), ("ABC-12-", False),
+        ("éABC-12", False), ("ABC-12９", False),
+        ("(ABC-12)", True), ("ABC-12.", True), ("abc-12 go", True),
+    ],
+)
+def test_go_key_requires_whole_token_boundaries(repo, words, accepted):
+    session = ticket.TicketPass.open("ABC-12", Source(), ticket.MarkdownStore(repo, "ABC-12", TITLE))
+    present(session)
+    if accepted:
+        session.record_go("plan", evidence="conversation:go", verbatim=words)
+        assert session.approved("plan")
+    else:
+        before = session.store.read()[0]
+        with pytest.raises(ticket.GateRequired, match="go_token_missing"):
+            session.record_go("plan", evidence="conversation:go", verbatim=words)
+        assert session.store.read()[0] == before
+        assert session.live
+
+
+@pytest.mark.parametrize("words", ["go x{suffix}", "go {suffix}0", "go _{suffix}", "go {suffix}-"])
+def test_go_pass_suffix_requires_whole_token_boundaries(repo, words):
+    session = build(repo, Source(), "S1")
+    before = read_card(repo)
+    with pytest.raises(ticket.GateRequired, match="go_token_missing"):
+        session.record_go("plan", evidence="conversation:go", verbatim=words.format(suffix=session.pass_id[-4:]))
+    assert read_card(repo) == before
+    assert session.live
+
+
+@pytest.mark.parametrize(
+    "key, pass_id, words",
+    [(KEY, "", f"Go {KEY}."), ("", "abcdef12", "Go ef12."), (None, "abcdef12", "Go ef12."),
+     ("bad key", "abcdef12", "Go ef12.")],
+)
+def test_go_token_fails_closed_without_readable_live_tokens(key, pass_id, words):
+    with pytest.raises(ticket.GateRequired, match="go_token_missing"):
+        ticket._require_go_token(key, pass_id, "plan", words)
+
+
 @pytest.mark.parametrize("stop", ["plan", "pass", "cap"])
 def test_E2_each_stop_is_stamped_in_the_same_write_as_its_record(repo, monkeypatch, stop):
     src = Source()

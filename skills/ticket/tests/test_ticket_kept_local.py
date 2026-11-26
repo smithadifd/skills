@@ -16,7 +16,7 @@ from ticket_support import (
 )
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
-GO_WORDS = "Go with this plan."
+GO_WORDS = f"Go with this plan, {KEY}."
 NO_WORDS = "No, do not push or open a pull request. Keep it local."
 KEPT_LOCAL = ticket.KEPT_LOCAL_POINT.format(revision=1)
 ANSWERED = (

@@ -1071,7 +1071,7 @@ def test_a_moved_pinned_cli_stops_import_cards_by_name(tmp_path, monkeypatch, ca
     assert not marker.exists()
 
 
-GO_WORDS = "Go with this plan."
+GO_WORDS = f"Go with this plan, {KEY}."
 
 
 def _prompt(session_id, text=GO_WORDS, origin="person", **extra):
@@ -1122,6 +1122,24 @@ def test_H39_bind_picks_this_sessions_newest_utterance(fake, monkeypatch):
     assert recorded[0]["idempotency_key"] == f"ticket-bind/{KEY}/plan/1/{this_id}/decision"
     assert fake.calls("elect") and fake.calls("append")
     assert all("decision.recorded" not in (call.stdin or "") for call in fake.appends())
+
+
+@pytest.mark.parametrize("gate", ["plan", "outward"])
+def test_a_go_without_token_is_refused_before_the_ledger_binder(fake, monkeypatch, gate):
+    session = open_ledger(fake, Source())
+    present(session)
+    if gate == "outward":
+        go_plan(session)
+        session.begin_build()
+        passing(session)
+    before = fake.events()
+    binds = []
+    monkeypatch.setattr(session.store, "bind_go", lambda **kwargs: binds.append(kwargs))
+    with pytest.raises(ticket.GateRequired, match="go_token_missing"):
+        session.record_go(gate, evidence="conversation:go", verbatim="Go.")
+    assert binds == [], "a refused go must never call bind_go"
+    assert fake.events() == before
+    assert session.live
 
 
 @pytest.mark.parametrize(

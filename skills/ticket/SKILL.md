@@ -24,6 +24,8 @@ approval from silence or from an earlier approval. Record the person's exact
 words and an evidence reference before continuing. A need for information
 takes one of the more-information exits below; it is never approval.
 
+A go must name the ticket id or the last four characters of the pass id; a go that names neither is refused with a one-line reason and nothing is written.
+
 `ticket.py` holds the whole state machine and the store. The rules it follows,
 and why, are in [references/ticket-design.md](references/ticket-design.md); the
 tests it is checked against are in
@@ -233,38 +235,8 @@ in either setting is how to keep markdown on purpose.
 The ledger CLI's [command and envelope contract](references/ticket-design.md#62-ledger-store-second)
 lives in the design reference; this repository ships no ledger CLI.
 
-## Moving markdown cards into the ledger
-
-A machine that ran `/ticket` before it switched to the ledger store still holds
-`.ticket/<key>.md` cards. Once the store choice picks the ledger (a ledger on
-`PATH` with `LEDGER_DB` set, or `TICKET_LEDGER_CLI` or `ledger_cli` naming one), run these
-once, from this skill's folder or by its full path:
-
-- `python3 ${CLAUDE_SKILL_DIR}/ticket.py find-cards [<root>...]` lists, one
-  absolute path per line, every git repository under the roots (default: the
-  current directory) whose `.ticket/` holds a card that is not imported yet.
-  It follows no links (a root that is itself a link is skipped), skips `.git`,
-  `node_modules` and `.ticket/imported`, and exits 0 whether or not it found any.
-- `python3 ${CLAUDE_SKILL_DIR}/ticket.py import-cards <repo>... [--dry-run]`
-  writes each card as the events of one ledger item and moves the card to
-  `.ticket/imported/<key>.md`. Closed cards import as history; an open card
-  keeps its pass id, so `open(..., pass_id=<id>)` resumes it from the ledger.
-  Each card prints one line: `imported <key>`, `already imported <key>`, or
-  `skipped <key>: <reason>`. A card the reader or a validator refuses (or an older
-  card format) is left where it is and named, never half-imported. A rerun
-  writes nothing. `--dry-run` writes and moves nothing, prints `would import
-  <key>`, and reports the same `skipped` a real run would for a taken
-  `.ticket/imported/<key>.md`. Exit 0 when every card imported or was already imported, 1 when any
-  was skipped, 2 when the store choice above is not the ledger (`none`, or no
-  usable ledger found; the message names the reason) or the named CLI fails the
-  capability probe (before any card is read).
-  `.ticket/imported/` must be git-ignored like the card; if it is not, the
-  repository is refused and no ignore file is edited.
-
-When a ticket opens on the ledger store and the repository still holds markdown
-cards, `open` adds one line to `session.reconciliation` naming the exact
-`import-cards` command. Read it to the person; run the import when they agree.
-Never run the import against a repository you were not asked to work in.
+For finding and importing existing markdown cards into the ledger, including dry runs
+and the leftover-card notice, see [references/markdown-cards.md](references/markdown-cards.md).
 
 ## One live pass
 
@@ -426,6 +398,8 @@ it opens nothing for other criteria or another revision.
 `session.begin_build()` raises
 `GateRequired` without it.
 
+When presenting this stop, name the ticket id and the pass id's last four characters as the accepted tokens; report any `go_token_missing` refusal as written and keep the stop open.
+
 ## 5. Build and review
 
 Before building, compare the local `node --version` with the repository's
@@ -486,6 +460,8 @@ actions.
   read counts as a remote, so the outward go stops as usual.
 
 The outward card lists the owed criteria by CI job, not as passed.
+
+When presenting this stop, name the ticket id and the pass id's last four characters as the accepted tokens; report any `go_token_missing` refusal as written and keep the stop open.
 
 Nothing leaves the machine before the person approves and you record it with
 `session.record_go("outward", evidence=..., verbatim=<exact span copied from their prompt>)`.

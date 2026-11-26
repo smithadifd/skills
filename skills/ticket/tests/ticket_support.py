@@ -209,11 +209,11 @@ def present(session):
 
 
 def go_plan(session):
-    session.record_go("plan", evidence="conversation:plan-go", verbatim="Go with this plan.")
+    session.record_go("plan", evidence="conversation:plan-go", verbatim=f"Go with this plan, {session.key}.")
 
 
 def go_outward(session):
-    session.record_go("outward", evidence="conversation:outward-go", verbatim="Open the pull request.")
+    session.record_go("outward", evidence="conversation:outward-go", verbatim=f"Open the pull request, {session.key}.")
 
 
 def changes(session):
