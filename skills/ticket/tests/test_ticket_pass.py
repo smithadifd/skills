@@ -1224,6 +1224,32 @@ def test_CP1_11_skill_md_names_the_early_resume_line_where_a_resume_lands():
     assert "orient and research start again" in orient.split("| no plan yet |")[1].splitlines()[0]
 
 
+def test_skill_md_requires_job_proof_for_steps_that_could_not_run_locally():
+    section = " ".join(_skill_section("5. Build and review").split())
+    for needle in (
+        "When the builder reports a local build or test step could not run",
+        "blocked cache, missing network, port bind or runtime mismatch",
+        "name the step and the CI job that must prove it on the card",
+        "Before recording that criterion in `passed` or calling it passed on the outward card",
+        "read that job's own live conclusion for the reviewed commit SHA, never the rollup",
+        "Only `success` proves the step",
+        "`skipped`, `cancelled`, `neutral`, failed, absent, still running or unreadable",
+        "leave the criterion `unproven`, not passed",
+        "Do not record a `pass` verdict while any criterion is unproven",
+    ):
+        assert needle in section, needle
+
+
+def test_skill_md_warns_about_runtime_pin_mismatches_before_building():
+    section = " ".join(_skill_section("5. Build and review").split())
+    for needle in (
+        "Before building, compare the local `node --version` with the repository's `.nvmrc`",
+        "When they differ, print one warning line naming both the local version and the pinned version",
+        "Warning only: never block the pass on a runtime mismatch",
+    ):
+        assert needle in section, needle
+
+
 @pytest.mark.parametrize("end", ["more_info", "close"])
 def test_CP1_9_the_pass_id_the_final_message_states_is_readable_after_the_pass_ends(repo, end):
     if end == "close":

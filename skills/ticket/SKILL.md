@@ -428,6 +428,11 @@ it opens nothing for other criteria or another revision.
 
 ## 5. Build and review
 
+Before building, compare the local `node --version` with the repository's
+`.nvmrc`, when present. When they differ, print one warning line naming both
+the local version and the pinned version. Warning only: never block the pass
+on a runtime mismatch.
+
 1. Give `builder-core` the ticket key, the approved card, the acceptance
    criteria, the repository's conventions, the branch boundary, and the exact
    verification commands. Outward actions stay forbidden. Record the worktree
@@ -441,6 +446,15 @@ it opens nothing for other criteria or another revision.
    prior findings. It checks the criteria first and the repository's
    standards second. When the target repository has `scripts/verify.sh`, the
    reviewer runs it as well as the required checks.
+   When the builder reports a local build or test step could not run
+   (blocked cache, missing network, port bind or runtime mismatch), name the
+   step and the CI job that must prove it on the card, against each affected
+   criterion. Before recording that criterion in `passed` or calling it passed
+   on the outward card, read that job's own live conclusion for the reviewed
+   commit SHA, never the rollup. Only `success` proves the step; `skipped`,
+   `cancelled`, `neutral`, failed, absent, still running or unreadable conclusions
+   leave the criterion `unproven`, not passed. Do not record a `pass` verdict
+   while any criterion is unproven.
 3. Record each round with `session.record_review(verdict, evidence=<ref>,
    passed=<criterion indices>, findings=[...])`. A `pass` verdict must list
    every criterion. A round records the plan revision and criteria it
@@ -548,6 +562,8 @@ path, its branch, what `git status` listed, and the `git worktree remove`
 command for the person to run), so no builder worktree is left in the
 repository unnamed. A worktree under `.claude/worktrees/<name>` stays until
 the person runs that command.
+If the builder left the worktree locked, say it can be removed with
+`git worktree remove <path>` once the session holding it has exited.
 
 ## Records
 

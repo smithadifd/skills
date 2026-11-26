@@ -1561,6 +1561,9 @@ symbolic link is named with the link and no command. Until the person runs
 the command, a worktree under `.claude/worktrees/<name>` stays in the
 repository as an untracked folder. The close returns that line;
 `ticket.tidy_worktree(<path>)` reads it again later.
+The model's close card also says that a worktree the builder left locked can
+be removed with `git worktree remove <path>` once the session holding it has
+exited; the close itself still leaves it in place and never forces removal.
 
 ## 7. Non-goals
 
