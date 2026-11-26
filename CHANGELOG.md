@@ -17,8 +17,21 @@ The headings below are plugin versions, the number `claude plugin list` shows fo
 | v1.5.0 | 0.15.0 | 0.15.0 |
 | v1.6.0 | 0.16.0 | 0.16.0 |
 | v1.6.1 | 0.16.1 | 0.16.1 |
+| v1.7.0 | 0.17.0 | 0.17.0 |
 
 Plugin 0.11.0 was never tagged; its entry describes work that first shipped in 0.12.0 (tag v1.2.0). Only tags from v1.2.0 on have an entry, because this file did not exist at earlier tags.
+
+## 0.17.0
+
+This is the release tagged v1.7.0 in the repository. It makes the `ticket` skill's plan and outward approvals name their ticket or pass, and clarifies CI proof, runtime warnings and locked worktrees.
+
+### A plan or outward go names the ticket or pass
+
+A plan go or an outward go must now name the ticket id or the last four characters of the pass id. Each stop shows both accepted tokens. A go naming neither is refused with one line and nothing written, and the stop stays open for another answer. The card-migration guidance moved to `skills/ticket/references/markdown-cards.md`.
+
+### Build and closing cards distinguish CI proof, runtime warnings and locked worktrees
+
+When a local build or test step cannot run, the affected criteria are shown as owed to CI with the step and job named; a passing review means review coverage, not CI proof. Only that job's live `success` conclusion on the pushed head proves the step; other or unreadable results stay unproven. Before building, the skill compares the local Node major version with `.nvmrc`, when present, ignoring a leading `v` and trailing `.x`; a mismatch produces one build-card warning naming both versions without blocking the pass. The closing card explains that a locked builder worktree can be removed with `git worktree remove <path>` once the session holding it exits.
 
 ## 0.16.1
 
