@@ -314,6 +314,20 @@ The last message of a session states the pass id too. That message is written by
 function in `ticket.py` shapes it; SKILL.md ("The final message") carries the instruction, and the id is
 `session.pass_id`, which stays readable after the pass ends.
 
+The model's build and review cards distinguish review coverage from CI proof.
+Before building, compare the local `node --version` with the repository's
+`.nvmrc`, when present. Compare major versions, ignoring a leading `v` and a
+trailing `.x`. When they differ, print one warning line on the build card
+naming both the local version and the pinned version. Warning only: never
+block the pass on a runtime mismatch.
+
+When the builder reports a local build or test step could not run
+(blocked cache, missing network, port bind or runtime mismatch), record each
+affected criterion as `owed to CI`, naming the step and its CI job.
+Owed criteria do not block a `pass` verdict: `passed` indices record review
+coverage, not CI proof; keep the owed criteria in the review evidence and
+show them beside the rendered card.
+
 ### 3.7 Advisory context bound at phase boundaries
 
 `TicketPass.open(context_reading=, context_floor_fraction=)` accepts a host
@@ -1494,6 +1508,13 @@ earlier successful calls are not rolled back. No remote branch is deleted.
 
 ### 6.11 Close at merge and kept local
 
+The outward card lists the owed criteria by CI job, not as passed.
+After the push, before the closing card or any later step calls an owed
+criterion passed, read that job's own live conclusion on the pushed head SHA,
+never the rollup. Only `success` proves the step; `skipped`, `cancelled`,
+`neutral`, failed, absent, still running or unreadable conclusions leave the
+criterion `unproven`, not passed; report it so.
+
 Immediately after publication, call `session.record_pull_request("owner/repo#N")`.
 The reference grammar is exactly ASCII owner/repo#N, with a positive decimal
 number and no whitespace, bullet, fence, URL or bare `#N`; near misses are
@@ -1561,6 +1582,9 @@ symbolic link is named with the link and no command. Until the person runs
 the command, a worktree under `.claude/worktrees/<name>` stays in the
 repository as an untracked folder. The close returns that line;
 `ticket.tidy_worktree(<path>)` reads it again later.
+The model's close card also says that a worktree the builder left locked can
+be removed with `git worktree remove <path>` once the session holding it has
+exited; the close itself still leaves it in place and never forces removal.
 
 ## 7. Non-goals
 

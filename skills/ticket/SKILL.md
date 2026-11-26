@@ -428,6 +428,12 @@ it opens nothing for other criteria or another revision.
 
 ## 5. Build and review
 
+Before building, compare the local `node --version` with the repository's
+`.nvmrc`, when present. Compare major versions, ignoring a leading `v` and a
+trailing `.x`. When they differ, print one warning line on the build card
+naming both the local version and the pinned version. Warning only: never
+block the pass on a runtime mismatch.
+
 1. Give `builder-core` the ticket key, the approved card, the acceptance
    criteria, the repository's conventions, the branch boundary, and the exact
    verification commands. Outward actions stay forbidden. Record the worktree
@@ -441,11 +447,16 @@ it opens nothing for other criteria or another revision.
    prior findings. It checks the criteria first and the repository's
    standards second. When the target repository has `scripts/verify.sh`, the
    reviewer runs it as well as the required checks.
+   When the builder reports a local build or test step could not run
+   (blocked cache, missing network, port bind or runtime mismatch), record each
+   affected criterion as `owed to CI`, naming the step and its CI job.
+   Owed criteria do not block a `pass` verdict: `passed` indices record review
+   coverage, not CI proof; keep the owed criteria in the review evidence and
+   show them beside the rendered card.
 3. Record each round with `session.record_review(verdict, evidence=<ref>,
    passed=<criterion indices>, findings=[...])`. A `pass` verdict must list
    every criterion. A round records the plan revision and criteria it
-   reviewed, and the rendered card (`session.plan.render()`) derives each
-   criterion's `passes` from the stored rounds.
+   reviewed; `session.plan.render()` derives `passes` from the stored rounds.
 4. Send findings back to `builder-core`, then review the delta with a fresh
    reviewer. Continue without asking the person.
 5. A passing round stops at the outward go. Three rounds are the cap, counted
@@ -474,6 +485,8 @@ actions.
   own words; never close kept local on your own. A remote list that cannot be
   read counts as a remote, so the outward go stops as usual.
 
+The outward card lists the owed criteria by CI job, not as passed.
+
 Nothing leaves the machine before the person approves and you record it with
 `session.record_go("outward", evidence=..., verbatim=<exact span copied from their prompt>)`.
 Pass `verbatim` as that exact span, not a paraphrase. Report the bound
@@ -482,6 +495,12 @@ The binding never opens a ledger gate. Then: no push, pull
 request, tracker comment, status change, message, merge, release or deploy.
 Call `session.require_outward_go()` before each outward action; it reads the
 card fresh and refuses (`GateRequired`, or `stale` if the card changed).
+
+After the push, before the closing card or any later step calls an owed
+criterion passed, read that job's own live conclusion on the pushed head SHA,
+never the rollup. Only `success` proves the step; `skipped`, `cancelled`,
+`neutral`, failed, absent, still running or unreadable conclusions leave the
+criterion `unproven`, not passed; report it so.
 
 After PR publication, before close: `session.record_lane_receipts(paths,
 published_pr=<URL>)` passes lane documents unchanged.
@@ -548,6 +567,8 @@ path, its branch, what `git status` listed, and the `git worktree remove`
 command for the person to run), so no builder worktree is left in the
 repository unnamed. A worktree under `.claude/worktrees/<name>` stays until
 the person runs that command.
+If the builder left the worktree locked, say it can be removed with
+`git worktree remove <path>` once the session holding it has exited.
 
 ## Records
 

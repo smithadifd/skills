@@ -527,3 +527,11 @@ def test_K7_skill_md_describes_the_declined_path_the_no_remote_path_and_the_work
         assert needle in outward, needle
     final = _skill_section("The final message")
     assert "kept local" in final and "`git worktree remove`" in final and "`.claude/worktrees/<name>`" in final
+
+
+def test_skill_md_explains_when_a_locked_builder_worktree_can_be_removed():
+    final = _skill_section("The final message")
+    assert (
+        "If the builder left the worktree locked, say it can be removed with "
+        "`git worktree remove <path>` once the session holding it has exited."
+    ) in final

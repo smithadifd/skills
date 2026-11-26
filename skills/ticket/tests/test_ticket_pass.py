@@ -1224,6 +1224,50 @@ def test_CP1_11_skill_md_names_the_early_resume_line_where_a_resume_lands():
     assert "orient and research start again" in orient.split("| no plan yet |")[1].splitlines()[0]
 
 
+@pytest.mark.parametrize("phase, needle", [
+    ("review", "When the builder reports a local build or test step could not run"),
+    ("review", "blocked cache, missing network, port bind or runtime mismatch"),
+    ("review", "record each affected criterion as `owed to CI`, naming the step and its CI job"),
+    ("review", "Owed criteria do not block a `pass` verdict"),
+    ("review", "`passed` indices record review coverage, not CI proof"),
+    ("review", "keep the owed criteria in the review evidence and show them beside the rendered card"),
+    ("outward", "The outward card lists the owed criteria by CI job, not as passed"),
+    ("outward", "After the push, before the closing card or any later step calls an owed criterion passed"),
+    ("outward", "read that job's own live conclusion on the pushed head SHA, never the rollup"),
+    ("outward", "Only `success` proves the step"),
+    ("outward", "`skipped`, `cancelled`, `neutral`, failed, absent, still running or unreadable"),
+    ("outward", "leave the criterion `unproven`, not passed; report it so"),
+])
+@pytest.mark.parametrize("document", ["skill", "design"])
+def test_skill_md_requires_job_proof_for_steps_that_could_not_run_locally(document, phase, needle):
+    if document == "skill":
+        review = _skill_section("5. Build and review")
+        outward = _skill_section("6. Outward go: a hard stop")
+    else:
+        text = (SKILL_DIR / "references" / "ticket-design.md").read_text(encoding="utf-8")
+        review = text.split("### 3.6 Rendered step status\n", 1)[1].split("\n### ", 1)[0]
+        outward = text.split("### 6.11 Close at merge and kept local\n", 1)[1].split("\n## ", 1)[0]
+    section = review if phase == "review" else outward
+    assert needle in " ".join(section.split()), needle
+
+
+@pytest.mark.parametrize("needle", [
+    "Before building, compare the local `node --version` with the repository's `.nvmrc`",
+    "Compare major versions, ignoring a leading `v` and a trailing `.x`",
+    "When they differ, print one warning line on the build card naming both the local version and the pinned version",
+    "Warning only: never block the pass on a runtime mismatch",
+])
+@pytest.mark.parametrize("document", ["skill", "design"])
+def test_skill_md_warns_about_runtime_pin_mismatches_before_building(document, needle):
+    if document == "skill":
+        text = _skill_section("5. Build and review")
+    else:
+        text = (SKILL_DIR / "references" / "ticket-design.md").read_text(encoding="utf-8")
+        text = text.split("### 3.6 Rendered step status\n", 1)[1].split("\n### ", 1)[0]
+    section = " ".join(text.split())
+    assert needle in section, needle
+
+
 @pytest.mark.parametrize("end", ["more_info", "close"])
 def test_CP1_9_the_pass_id_the_final_message_states_is_readable_after_the_pass_ends(repo, end):
     if end == "close":
