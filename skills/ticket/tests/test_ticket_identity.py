@@ -267,7 +267,7 @@ def _run_step(session, step):
     elif step == "record_review":
         session.record_review("changes", evidence="reviews/round-1.md")
     elif step == "record_go outward":
-        session.record_go("outward", evidence="conversation:outward-go", verbatim="Open it.")
+        session.record_go("outward", evidence="conversation:outward-go", verbatim=f"Open it, {session.key}.")
     elif step == "require_outward_go":
         session.require_outward_go()
     else:

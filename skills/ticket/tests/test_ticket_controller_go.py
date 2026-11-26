@@ -23,7 +23,7 @@ def at_stop(repo, backend, gate="plan"):
     session = open_handoff(repo, declared=DECLARED)
     present(session)
     if gate == "outward":
-        session.record_go("plan", evidence="conversation:plan", verbatim="Go with the plan.")
+        session.record_go("plan", evidence="conversation:plan", verbatim=f"Go with the plan, {KEY}.")
         session.begin_build()
         passing(session)
     return session
@@ -365,7 +365,7 @@ def test_P9_P10_a_role_go_without_a_hand_off_opens_nothing(repo, backend, versio
     assert not session.approved("plan"), "a role go without an open hand-off must not count"
     with pytest.raises(ticket.GateRequired):
         session.begin_build()
-    session.record_go("plan", evidence="conversation:person", verbatim="Go.")
+    session.record_go("plan", evidence="conversation:person", verbatim=f"Go, {KEY}.")
     session.begin_build()
     passing(session)
     plant_go(session, "outward")
@@ -415,7 +415,7 @@ def test_P13_a_persons_go_is_unchanged_and_binds_even_on_a_hand_off(repo, backen
         backend.file_row()
         session = open_ledger_id(repo)
         present(session)
-    words = "Go with this plan."
+    words = f"Go with this plan, {KEY}."
     if isinstance(backend, Fake):
         _capture(backend.fake, _prompt("controller-person-test", text=words))
     else:
@@ -430,12 +430,12 @@ def test_P13_a_persons_go_is_unchanged_and_binds_even_on_a_hand_off(repo, backen
     person = record_of(notes[-1])
     expected = decision(session)
     expected.pop("relayed_by")
-    expected.update(who="the person", who_kind="person")
+    expected.update(who="the person", who_kind="person", verbatim=words)
     assert person == expected, "record_go's person shape must be unchanged"
     assert session.approved("plan"), "a person's go never depends on a hand-off"
     session.begin_build()
     passing(session)
-    session.record_go("outward", evidence="conversation:outward", verbatim="Send it.")
+    session.record_go("outward", evidence="conversation:outward", verbatim=f"Send it, {KEY}.")
     assert session.approved("outward")
 
 

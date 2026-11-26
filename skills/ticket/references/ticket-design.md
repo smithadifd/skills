@@ -243,6 +243,8 @@ are store-neutral (section 6).
 | `more_info(destination, question)` | any live phase | `stamp {point: "waiting on <x>: <question>", phase: <store phase>}` | the pass ends | unchanged (the stamp is the human trail) |
 | `end()` | — | `release` (unconditional) | not live | unchanged |
 
+Before writing or binding either person's `record_go`, require its stripped verbatim to name the ticket key or the live pass id's last four characters, case-insensitively, bounded on both sides by the string edge or a character other than a letter, digit, hyphen or underscore. Missing tokens, an empty pass id or an unreadable key raise `GateRequired` with one `go_token_missing` line, write nothing and leave the stop live; the controller's `record_role_go`, `record_outward_declined` and byte-exact utterance binding are unchanged.
+
 Gates: the **plan go** opens `begin_build`; the **outward go** opens `require_outward_go` and `close`.
 Both are read from the card at the moment of reliance through `_has_go(card, gate, I)`, never from
 session state; the card at that moment is the held card, or a fresh read proven equal to it by its

@@ -27,9 +27,11 @@ DEFAULTS = {"build": "builder-core", "review": "reviewer", "outward": "push-and-
 # for the delegation line.
 # Close-at-merge remeasures all three: outward decisions name their round, the card records its PR,
 # a link/review-stop batch precedes close, and the close stamp records the live PR outcome.
-MARKDOWN_CARD_SHA256 = "8e85413f298874277d0dadfe27459eff109e115adc37b7e9d0d432e1985a3960"
-MARKDOWN_TOKEN = "53a7efc41497ebd1859b2f082995a93f2de3a6024e5183c8f85bf34148428653"
-LEDGER_EVENTS_SHA256 = "b3df5489484c124366cf4e9f5218d3206deffede5557c34e4a95c6364dc62fbe"
+# Requiring a ticket token in the two approval utterances remeasures all three; the base module with the
+# same new words produces the same digests.
+MARKDOWN_CARD_SHA256 = "678b649e67aaa42b3831685ef1002f4dd1136828b43a9d2da82db3aa81df6db0"
+MARKDOWN_TOKEN = "317b6855da738b096dc87bd587745e00b75b6a55fc73c2401da56c46dfe3943e"
+LEDGER_EVENTS_SHA256 = "dca78fc5cb8f2c282e672e4b8a97b5660e8e6ff66ca93929eb7e5323c1860a1c"
 
 
 @pytest.fixture

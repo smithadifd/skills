@@ -166,6 +166,19 @@ def _role_go_refused(code: str, key: str, why: str) -> GateRequired:
     return GateRequired(f"{code}: ticket {key}: {why}. Nothing was written; the pass stays live.")
 
 
+def _require_go_token(key: str, pass_id: str, gate: str, verbatim: str) -> None:
+    """Guard only the person's approval: a relayed controller go needs no token, and a decline authorises nothing."""
+    suffix = pass_id[-4:] if type(pass_id) is str else ""
+    if type(key) is str and _KEY.fullmatch(key) and suffix:
+        for token in (key, suffix):
+            if re.search(rf"(?<![\w-]){re.escape(token)}(?![\w-])", verbatim.strip(), re.IGNORECASE):
+                return
+    raise GateRequired(
+        f"go_token_missing: ticket {key}: the {gate} go names neither the ticket id {key} "
+        f"nor the pass id's last four characters {suffix}. Nothing was written; the pass stays live."
+    )
+
+
 class StoreUnavailable(RuntimeError):
     """A refusal: nothing was written and the pass ends. ``code`` names the refusal."""
 
@@ -4702,6 +4715,7 @@ class TicketPass:
         revision, criteria = self._identity
         if gate == "outward" and _declines(self._card, self._identity):
             raise TicketError(_answered(revision))
+        _require_go_token(self.key, self._pass_id, gate, verbatim)
         decision = {
             "who": "the person",
             "who_kind": "person",
